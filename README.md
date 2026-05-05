@@ -6,20 +6,20 @@ An API and live status board for Claude Code session management.
 
 ## Install
 
-#### Release tarball
+### Release tarball
 ```sh
-curl -L https://github.com/<owner>/<repo>/releases/latest/download/agent-status_<version>_linux-amd64.tar.gz | tar xz
+curl -L https://github.com/samling/agent-status/releases/latest/download/agent-status_<version>_linux-amd64.tar.gz | tar xz
 sudo install agent-status_*/agent-status /usr/local/bin/
 ```
 
-#### From source
+### From source
 ```sh
-go install github.com/<owner>/<repo>/cmd/agent-status@latest
+go install github.com/samling/agent-status/cmd/agent-status@latest
 ```
 
-#### Build it yourself
+### Build it yourself
 ```sh
-git clone https://github.com/<owner>/<repo>.git
+git clone https://github.com/samling/agent-status.git
 cd <repo>
 make install
 ```
@@ -30,7 +30,7 @@ Claude Code fires [hooks](https://code.claude.com/docs/en/hooks) on session even
 
 ## Setup
 
-> Requirements: `jq make`
+> **Requirements:** `jq make`
 
 The fastest path, from a clone of this repo:
 
@@ -81,7 +81,3 @@ make build      # bin/agent-status
 make test       # go test ./...
 make clean
 ```
-
-A tagged release (`git tag v0.1.0 && git push --tags`) triggers
-`.github/workflows/release.yml` to build linux/darwin amd64+arm64
-binaries and attach them to the GitHub release.
