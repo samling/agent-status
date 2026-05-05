@@ -69,6 +69,52 @@ func InsertEvent(ctx context.Context, db *sql.DB, receivedAt, sessionID, hookEve
 	return err
 }
 
+// DeriveStatus reduces a session's last hook_event_name into a coarse
+// status used by the UI and other consumers.
+func DeriveStatus(lastEvent string) string {
+	switch lastEvent {
+	case "SessionEnd", "Reaped":
+		return "ended"
+	case "SessionStart", "Stop", "StopFailure", "Discovered", "Idle":
+		return "idle"
+	case "Notification", "PermissionRequest":
+		return "waiting"
+	default:
+		return "active"
+	}
+}
+
+// SyncIdle inserts a synthetic "Idle" event for a session whose external
+// state (e.g. ~/.claude/sessions/<pid>.json) reports it as idle, but only
+// if our derived status is currently "active" or "waiting" (i.e. we are
+// stuck somewhere busy because no terminating hook fired). Returns true
+// if a row was inserted.
+func SyncIdle(ctx context.Context, db *sql.DB, sessionID string) (bool, error) {
+	var lastEvent string
+	err := db.QueryRowContext(ctx,
+		`SELECT hook_event_name FROM events WHERE session_id = ? ORDER BY id DESC LIMIT 1`,
+		sessionID,
+	).Scan(&lastEvent)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	status := DeriveStatus(lastEvent)
+	if status != "active" && status != "waiting" {
+		return false, nil
+	}
+	receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO events (received_at, session_id, hook_event_name, payload) VALUES (?, ?, 'Idle', '')`,
+		receivedAt, sessionID,
+	); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ReapAbsent inserts a synthetic "Reaped" event for every session whose
 // latest event is not already SessionEnd or Reaped, and whose session_id
 // is NOT in the provided alive set. Used to detect sessions that exited
@@ -175,16 +221,7 @@ func QuerySessions(ctx context.Context, db *sql.DB) ([]Session, error) {
 		if payload != "" {
 			s.LastPayload = json.RawMessage(payload)
 		}
-		switch s.LastEvent {
-		case "SessionEnd", "Reaped":
-			s.Status = "ended"
-		case "SessionStart", "Stop", "StopFailure", "Discovered":
-			s.Status = "idle"
-		case "Notification", "PermissionRequest":
-			s.Status = "waiting"
-		default:
-			s.Status = "active"
-		}
+		s.Status = DeriveStatus(s.LastEvent)
 		out = append(out, s)
 	}
 	return out, rows.Err()

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"agent-status/internal/discovery"
 	"agent-status/internal/store"
 )
 
@@ -48,6 +49,16 @@ func makeHookHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		log.Printf("hook: event=%s session=%s", env.HookEventName, shortID(env.SessionID))
+
+		// If the JSONL cache says this session is currently idle, sync our
+		// derived state immediately. Catches cases where a hook fires
+		// without a corresponding file change (e.g. SubagentStop).
+		if status, ok := discovery.Status(env.SessionID); ok && status == "idle" {
+			if synced, err := store.SyncIdle(r.Context(), db, env.SessionID); err == nil && synced {
+				log.Printf("hook: synced session %s to idle (cache)", shortID(env.SessionID))
+			}
+		}
+
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
