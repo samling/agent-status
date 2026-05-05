@@ -3,14 +3,14 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
         ]
       }
     ],
@@ -18,28 +18,86 @@
       {
         "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
         ]
       }
     ],
     "PermissionRequest": [
       {
         "hooks": [
-          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/scripts/debug.sh" }
         ]
       }
     ]

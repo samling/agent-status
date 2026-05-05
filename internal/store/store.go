@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -68,6 +69,77 @@ func InsertEvent(ctx context.Context, db *sql.DB, receivedAt, sessionID, hookEve
 	return err
 }
 
+// ReapAbsent inserts a synthetic "Reaped" event for every session whose
+// latest event is not already SessionEnd or Reaped, and whose session_id
+// is NOT in the provided alive set. Used to detect sessions that exited
+// without firing SessionEnd (e.g. Ctrl-C). Returns count inserted.
+func ReapAbsent(ctx context.Context, db *sql.DB, alive map[string]bool) (int, error) {
+	rows, err := db.QueryContext(ctx, `
+		WITH ranked AS (
+			SELECT session_id, hook_event_name,
+			       ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id DESC) AS rn
+			FROM events
+			WHERE session_id IS NOT NULL AND session_id != ''
+		)
+		SELECT session_id FROM ranked
+		WHERE rn = 1 AND hook_event_name NOT IN ('SessionEnd', 'Reaped')
+	`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	var candidates []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		if !alive[id] {
+			candidates = append(candidates, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	inserted := 0
+	for _, id := range candidates {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO events (received_at, session_id, hook_event_name, payload) VALUES (?, ?, 'Reaped', '')`,
+			receivedAt, id,
+		); err != nil {
+			return inserted, err
+		}
+		inserted++
+	}
+	return inserted, nil
+}
+
+// DiscoverSession records a synthetic "Discovered" event for a session_id
+// only if no events already exist for that session. Returns true if a row
+// was inserted, false if the session was already known. Used at collector
+// startup to surface sessions that began before the collector was running.
+// createdAt should be the session's actual start time when known (e.g. from
+// ~/.claude/sessions/<pid>.json startedAt); pass time.Time{} to use now.
+func DiscoverSession(ctx context.Context, db *sql.DB, sessionID string, createdAt time.Time) (bool, error) {
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	receivedAt := createdAt.UTC().Format(time.RFC3339Nano)
+	res, err := db.ExecContext(ctx, `
+		INSERT INTO events (received_at, session_id, hook_event_name, payload)
+		SELECT ?, ?, 'Discovered', ''
+		WHERE NOT EXISTS (SELECT 1 FROM events WHERE session_id = ?)
+	`, receivedAt, sessionID, sessionID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func QuerySessions(ctx context.Context, db *sql.DB) ([]Session, error) {
 	rows, err := db.QueryContext(ctx, `
 		WITH ranked AS (
@@ -100,10 +172,17 @@ func QuerySessions(ctx context.Context, db *sql.DB) ([]Session, error) {
 		if err := rows.Scan(&s.SessionID, &s.LastEvent, &s.LastEventAt, &payload, &s.FirstSeenAt); err != nil {
 			return nil, err
 		}
-		s.LastPayload = json.RawMessage(payload)
-		if s.LastEvent == "SessionEnd" {
+		if payload != "" {
+			s.LastPayload = json.RawMessage(payload)
+		}
+		switch s.LastEvent {
+		case "SessionEnd", "Reaped":
 			s.Status = "ended"
-		} else {
+		case "SessionStart", "Stop", "StopFailure", "Discovered":
+			s.Status = "idle"
+		case "Notification", "PermissionRequest":
+			s.Status = "waiting"
+		default:
 			s.Status = "active"
 		}
 		out = append(out, s)
@@ -130,7 +209,9 @@ func QueryEventsAfter(ctx context.Context, db *sql.DB, afterID int64) ([]Event, 
 		if err := rows.Scan(&e.ID, &e.ReceivedAt, &e.SessionID, &e.HookEventName, &payload); err != nil {
 			return nil, err
 		}
-		e.Payload = json.RawMessage(payload)
+		if payload != "" {
+			e.Payload = json.RawMessage(payload)
+		}
 		out = append(out, e)
 	}
 	return out, rows.Err()
