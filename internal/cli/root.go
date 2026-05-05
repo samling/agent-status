@@ -15,10 +15,10 @@ func Execute() error {
 }
 
 func init() {
-	rootCmd.PersistentFlags().String("db", "state.db", "path to SQLite database")
-	_ = viper.BindPFlag("db", rootCmd.PersistentFlags().Lookup("db"))
+	rootCmd.PersistentFlags().String("state", "state.json", "path to state file")
+	_ = viper.BindPFlag("state", rootCmd.PersistentFlags().Lookup("state"))
 	viper.SetEnvPrefix("AGENT_STATUS")
 	viper.AutomaticEnv()
 
-	rootCmd.AddCommand(serverCmd, stateCmd, tailCmd, uiCmd)
+	rootCmd.AddCommand(serverCmd, stateCmd, uiCmd)
 }

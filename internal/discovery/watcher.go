@@ -2,24 +2,24 @@ package discovery
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 
-	"agent-status/internal/store"
+	"agent-status/internal/state"
 )
 
 // Watch monitors ~/.claude/sessions/*.json for write/create events and
-// syncs idle status into the events table: when a file reports
-// status=="idle" and our derived status is currently "active" or
-// "waiting", a synthetic "Idle" event is appended. Runs until ctx is
-// cancelled.
-func Watch(ctx context.Context, db *sql.DB) error {
+// syncs the on-disk JSONL status into our state file: when a file
+// reports status=="idle" and our derived status is currently "active"
+// or "waiting", we flip the entry to idle. Removal/rename triggers a
+// reap. Runs until ctx is cancelled.
+func Watch(ctx context.Context, s *state.Store) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -46,7 +46,7 @@ func Watch(ctx context.Context, db *sql.DB) error {
 			if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 				continue
 			}
-			processSessionFile(ctx, db, filepath.Join(dir, e.Name()))
+			processSessionFile(s, filepath.Join(dir, e.Name()))
 		}
 	}
 
@@ -63,11 +63,11 @@ func Watch(ctx context.Context, db *sql.DB) error {
 			}
 			switch {
 			case event.Op&(fsnotify.Write|fsnotify.Create) != 0:
-				processSessionFile(ctx, db, event.Name)
+				processSessionFile(s, event.Name)
 			case event.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
 				// File vanished: a session likely exited (including
 				// non-clean exits that skip SessionEnd). Trigger a reap.
-				if n, err := Reap(ctx, db); err != nil {
+				if n, err := Reap(ctx, s); err != nil {
 					log.Printf("watcher: reap after %s: %v", filepath.Base(event.Name), err)
 				} else if n > 0 {
 					log.Printf("watcher: reaped %d session(s) after file removal", n)
@@ -82,7 +82,7 @@ func Watch(ctx context.Context, db *sql.DB) error {
 	}
 }
 
-func processSessionFile(ctx context.Context, db *sql.DB, path string) {
+func processSessionFile(s *state.Store, path string) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -98,17 +98,24 @@ func processSessionFile(ctx context.Context, db *sql.DB, path string) {
 	if sf.SessionID == "" {
 		return
 	}
-	setStatus(sf.SessionID, sf.Status)
-	if sf.Status != "idle" {
-		return
+	// Pick up sessions that started after the server did so they show
+	// up immediately, without waiting for a hook to fire.
+	var createdAt time.Time
+	if sf.StartedAt > 0 {
+		createdAt = time.UnixMilli(sf.StartedAt)
 	}
-	inserted, err := store.SyncIdle(ctx, db, sf.SessionID)
+	if inserted, err := s.MarkDiscovered(sf.SessionID, createdAt); err != nil {
+		log.Printf("watcher: mark discovered %s: %v", short(sf.SessionID), err)
+	} else if inserted {
+		log.Printf("watcher: discovered new session %s", short(sf.SessionID))
+	}
+	changed, err := s.SetJSONLStatus(sf.SessionID, sf.Status)
 	if err != nil {
-		log.Printf("watcher: sync idle for %s: %v", sf.SessionID, err)
+		log.Printf("watcher: set jsonl status for %s: %v", sf.SessionID, err)
 		return
 	}
-	if inserted {
-		log.Printf("watcher: synced session %s to idle", short(sf.SessionID))
+	if changed {
+		log.Printf("watcher: session %s jsonl_status=%q", short(sf.SessionID), sf.Status)
 	}
 }
 

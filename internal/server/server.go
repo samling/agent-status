@@ -1,21 +1,19 @@
 package server
 
 import (
-	"database/sql"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"time"
 
-	"agent-status/internal/discovery"
-	"agent-status/internal/store"
+	"agent-status/internal/state"
 )
 
-func Handler(db *sql.DB) http.Handler {
+func Handler(s *state.Store) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/hook", makeHookHandler(db))
-	mux.HandleFunc("/state", makeStateHandler(db))
+	mux.HandleFunc("/hook", makeHookHandler(s))
+	mux.HandleFunc("/state", makeStateHandler(s))
 	return mux
 }
 
@@ -24,7 +22,7 @@ type envelope struct {
 	HookEventName string `json:"hook_event_name"`
 }
 
-func makeHookHandler(db *sql.DB) http.HandlerFunc {
+func makeHookHandler(s *state.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			log.Printf("hook: %s %s rejected (method not allowed)", r.Method, r.URL.Path)
@@ -43,21 +41,12 @@ func makeHookHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
-		if err := store.InsertEvent(r.Context(), db, receivedAt, env.SessionID, env.HookEventName, ""); err != nil {
-			log.Printf("hook: insert error session=%s event=%s: %v", shortID(env.SessionID), env.HookEventName, err)
-			http.Error(w, "insert failed", http.StatusInternalServerError)
+		if err := s.RecordEvent(env.SessionID, env.HookEventName, receivedAt); err != nil {
+			log.Printf("hook: record error session=%s event=%s: %v", shortID(env.SessionID), env.HookEventName, err)
+			http.Error(w, "record failed", http.StatusInternalServerError)
 			return
 		}
 		log.Printf("hook: event=%s session=%s", env.HookEventName, shortID(env.SessionID))
-
-		// If the JSONL cache says this session is currently idle, sync our
-		// derived state immediately. Catches cases where a hook fires
-		// without a corresponding file change (e.g. SubagentStop).
-		if status, ok := discovery.Status(env.SessionID); ok && status == "idle" {
-			if synced, err := store.SyncIdle(r.Context(), db, env.SessionID); err == nil && synced {
-				log.Printf("hook: synced session %s to idle (cache)", shortID(env.SessionID))
-			}
-		}
 
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -73,14 +62,9 @@ func shortID(id string) string {
 	return id
 }
 
-func makeStateHandler(db *sql.DB) http.HandlerFunc {
+func makeStateHandler(s *state.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		sessions, err := store.QuerySessions(r.Context(), db)
-		if err != nil {
-			log.Printf("state: query error: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		sessions := s.Sessions()
 		log.Printf("state: %d session(s)", len(sessions))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(sessions)

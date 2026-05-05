@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"agent-status/internal/store"
+	"agent-status/internal/state"
 )
 
 var stateCmd = &cobra.Command{
@@ -23,13 +23,7 @@ func init() {
 }
 
 func runState(cmd *cobra.Command, _ []string) error {
-	db, err := store.Open(viper.GetString("db"))
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	sessions, err := store.QuerySessions(cmd.Context(), db)
+	sessions, err := state.Load(viper.GetString("state"))
 	if err != nil {
 		return err
 	}
