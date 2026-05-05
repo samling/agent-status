@@ -19,10 +19,12 @@ type sessionFile struct {
 	StartedAt  int64  `json:"startedAt"` // Unix milliseconds; absent on some entrypoints
 	Entrypoint string `json:"entrypoint"`
 	Cwd        string `json:"cwd"`
+	Status     string `json:"status"` // "idle"|"busy"; absent for non-cli entrypoints
 }
 
 // SessionMeta is the per-session metadata available from ~/.claude/sessions/.
 type SessionMeta struct {
+	PID        int
 	Entrypoint string
 	Cwd        string
 }
@@ -71,7 +73,7 @@ func LiveSessionMeta() (map[string]SessionMeta, error) {
 		return out, err
 	}
 	for _, sf := range alive {
-		out[sf.SessionID] = SessionMeta{Entrypoint: sf.Entrypoint, Cwd: sf.Cwd}
+		out[sf.SessionID] = SessionMeta{PID: sf.PID, Entrypoint: sf.Entrypoint, Cwd: sf.Cwd}
 	}
 	return out, nil
 }
