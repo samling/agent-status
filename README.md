@@ -28,6 +28,13 @@ make install
 
 Claude Code fires [hooks](https://code.claude.com/docs/en/hooks) on session events (start, prompt submit, tool use, stop, etc.). The collector (`agent-status server`) receives those events over local HTTP and writes a per-session state file; the TUI (`agent-status ui`) reads that file and renders a live, navigable status board.
 
+The data read by `agent-status` is **local** and **only data provided by claude-code**. The data comes from two places:
+
+- The data sent via the hook
+- The data in `~/.claude`, specifically `sessions` and `projects`
+
+This tool simply aggregates that data, tracks the state via the hooks correlated with the session id, and presents it in a terminal UI.
+
 ## Compatability
 
 I made this tool for me initially, which means currently it supports **Niri** on **Linux x86_64**. It builds for ARM and so I presume it will work there too; it does not (yet) work on other compositors.

@@ -44,7 +44,7 @@ func findTmuxPane(ancestors []int) (string, error) {
 		if out, err := exec.Command("tmux", "select-window", "-t", paneID).CombinedOutput(); err != nil {
 			return "", fmt.Errorf("tmux select-window: %v: %s", err, strings.TrimSpace(string(out)))
 		}
-		return fmt.Sprintf("tmux pane %s", paneID), nil
+		return "Switched to tmux pane", nil
 	}
 	return "", nil
 }

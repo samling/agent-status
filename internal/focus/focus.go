@@ -36,12 +36,12 @@ func PID(pid int) (string, error) {
 
 	switch {
 	case winFound && paneMsg != "":
-		return winMsg + ", " + paneMsg, nil
+		return "Focused window and tmux pane", nil
 	case winFound:
 		return winMsg, nil
 	case paneMsg != "":
 		return paneMsg, nil
 	default:
-		return fmt.Sprintf("no window or tmux pane found for pid %d", pid), nil
+		return "Couldn't find a window or pane for this session", nil
 	}
 }
