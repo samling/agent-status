@@ -2,7 +2,6 @@ package discovery
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -10,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"agent-status/internal/store"
+	"agent-status/internal/state"
 )
 
 type sessionFile struct {
@@ -19,7 +18,8 @@ type sessionFile struct {
 	StartedAt  int64  `json:"startedAt"` // Unix milliseconds; absent on some entrypoints
 	Entrypoint string `json:"entrypoint"`
 	Cwd        string `json:"cwd"`
-	Status     string `json:"status"` // "idle"|"busy"; absent for non-cli entrypoints
+	Status     string `json:"status"`  // "idle"|"busy"; absent for non-cli entrypoints
+	Version    string `json:"version"` // Claude Code version string, e.g. "2.1.128"
 }
 
 // SessionMeta is the per-session metadata available from ~/.claude/sessions/.
@@ -27,19 +27,20 @@ type SessionMeta struct {
 	PID        int
 	Entrypoint string
 	Cwd        string
+	Version    string
 }
 
 // Result reports the outcome of a discovery scan.
 type Result struct {
 	Scanned  int // session files seen on disk
 	Alive    int // session files whose PID is still alive
-	Inserted int // sessions newly added to the events table
+	Inserted int // sessions newly added to state
 }
 
 // Run scans ~/.claude/sessions/*.json for live Claude Code sessions and
-// records a synthetic "Discovered" event for any session_id that has no
-// events yet. Existing sessions are not touched.
-func Run(ctx context.Context, db *sql.DB) (Result, error) {
+// registers any session_id not yet present in state with a Discovered
+// marker. Existing sessions are not touched.
+func Run(ctx context.Context, s *state.Store) (Result, error) {
 	var r Result
 	alive, scanned, err := walkAlive()
 	if err != nil {
@@ -52,7 +53,7 @@ func Run(ctx context.Context, db *sql.DB) (Result, error) {
 		if sf.StartedAt > 0 {
 			createdAt = time.UnixMilli(sf.StartedAt)
 		}
-		inserted, err := store.DiscoverSession(ctx, db, sf.SessionID, createdAt)
+		inserted, err := s.MarkDiscovered(sf.SessionID, createdAt)
 		if err != nil {
 			return r, err
 		}
@@ -64,8 +65,8 @@ func Run(ctx context.Context, db *sql.DB) (Result, error) {
 }
 
 // LiveSessionMeta returns a map of session_id -> SessionMeta for sessions
-// currently alive on disk. Read-only; intended for the UI to enrich
-// DB-derived rows with fields not stored in the events table.
+// currently alive on disk. Read-only; used by the UI to enrich rows with
+// fields that are not part of persisted state.
 func LiveSessionMeta() (map[string]SessionMeta, error) {
 	out := map[string]SessionMeta{}
 	alive, _, err := walkAlive()
@@ -73,15 +74,14 @@ func LiveSessionMeta() (map[string]SessionMeta, error) {
 		return out, err
 	}
 	for _, sf := range alive {
-		out[sf.SessionID] = SessionMeta{PID: sf.PID, Entrypoint: sf.Entrypoint, Cwd: sf.Cwd}
+		out[sf.SessionID] = SessionMeta{PID: sf.PID, Entrypoint: sf.Entrypoint, Cwd: sf.Cwd, Version: sf.Version}
 	}
 	return out, nil
 }
 
-// Reap inserts a synthetic "Reaped" event for any DB session whose PID is no
-// longer alive (or whose ~/.claude/sessions/<pid>.json no longer exists).
-// Idempotent: a session already ended is left alone. Returns count reaped.
-func Reap(ctx context.Context, db *sql.DB) (int, error) {
+// Reap removes any state entry whose session_id is no longer backed by a
+// live session file. Returns the count removed.
+func Reap(ctx context.Context, s *state.Store) (int, error) {
 	alive, _, err := walkAlive()
 	if err != nil {
 		return 0, err
@@ -90,7 +90,7 @@ func Reap(ctx context.Context, db *sql.DB) (int, error) {
 	for _, sf := range alive {
 		set[sf.SessionID] = true
 	}
-	return store.ReapAbsent(ctx, db, set)
+	return s.ReapAbsent(set)
 }
 
 // walkAlive returns every parsed session file whose PID is still alive.
