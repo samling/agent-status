@@ -39,7 +39,7 @@ func (n Niri) Focus(ancestors []int) (string, bool, error) {
 		if err != nil {
 			return "", false, fmt.Errorf("niri focus-window: %v: %s", err, strings.TrimSpace(string(out)))
 		}
-		return fmt.Sprintf("focused niri window %d", id), true, nil
+		return "Focused window", true, nil
 	}
 	return "", false, nil
 }

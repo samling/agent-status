@@ -62,8 +62,15 @@ func init() {
 
 func runUI(cmd *cobra.Command, _ []string) error {
 	statePath := viper.GetString("state")
+	notesPath := state.NotesPath(statePath)
+	notes, _ := state.LoadNotes(notesPath)
 	interval, _ := cmd.Flags().GetDuration("interval")
-	p := tea.NewProgram(uiModel{statePath: statePath, interval: interval}, tea.WithAltScreen())
+	p := tea.NewProgram(uiModel{
+		statePath: statePath,
+		notesPath: notesPath,
+		notes:     notes,
+		interval:  interval,
+	}, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }
@@ -79,15 +86,26 @@ type errMsg struct{ err error }
 
 type uiModel struct {
 	statePath  string
+	notesPath  string
 	interval   time.Duration
 	sessions   []state.Session
 	meta       map[string]discovery.SessionMeta
+	notes      map[string]string
 	selectedID string
 	sort       sortMode
 	width      int
 	height     int
 	detail     discovery.TranscriptInfo
 	detailFor  string // session id that detail belongs to
+	// Note input mode: when active, key presses go into inputBuf and
+	// `enter` saves the note for inputForID. Captured at entry so a
+	// subsequent selection change can't redirect the save target.
+	inputMode  bool
+	inputBuf   string
+	inputForID string
+	// When true, the bottom block shows the UI's config (state path,
+	// notes path, refresh interval) instead of the per-session detail.
+	showConfig bool
 	status     string // ephemeral footer message (e.g. focus result)
 	err        error
 }
@@ -130,6 +148,27 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 	case tea.KeyMsg:
+		if m.inputMode {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "enter":
+				m = m.commitNote()
+			case "esc":
+				m.inputMode = false
+				m.inputBuf = ""
+				m.inputForID = ""
+			case "backspace":
+				if r := []rune(m.inputBuf); len(r) > 0 {
+					m.inputBuf = string(r[:len(r)-1])
+				}
+			default:
+				if len(msg.Runes) > 0 {
+					m.inputBuf += string(msg.Runes)
+				}
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
@@ -142,6 +181,10 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "s":
 			m.sort = m.sort.next()
 			sortSessions(m.sessions, m.sort)
+		case "n":
+			m = m.beginNote()
+		case "?":
+			m.showConfig = !m.showConfig
 		}
 	case tickMsg:
 		return m, tea.Batch(loadSnapshot(m.statePath, m.selectedID, m.sort), tickEvery(m.interval))
@@ -233,6 +276,53 @@ func (m *uiModel) moveSelection(delta int) {
 	m.selectedID = m.sessions[next].SessionID
 }
 
+func (m uiModel) activeSelectionID() string {
+	if m.selectedID != "" {
+		return m.selectedID
+	}
+	if len(m.sessions) > 0 {
+		return m.sessions[0].SessionID
+	}
+	return ""
+}
+
+func (m uiModel) beginNote() uiModel {
+	id := m.activeSelectionID()
+	if id == "" {
+		m.status = "no session to note"
+		return m
+	}
+	m.inputMode = true
+	m.inputForID = id
+	m.inputBuf = m.notes[id]
+	m.status = ""
+	return m
+}
+
+func (m uiModel) commitNote() uiModel {
+	id := m.inputForID
+	text := strings.TrimSpace(m.inputBuf)
+	m.inputMode = false
+	m.inputBuf = ""
+	m.inputForID = ""
+	if id == "" {
+		return m
+	}
+	if err := state.SaveNote(m.notesPath, id, text); err != nil {
+		m.status = "save note error: " + err.Error()
+		return m
+	}
+	if m.notes == nil {
+		m.notes = map[string]string{}
+	}
+	if text == "" {
+		delete(m.notes, id)
+	} else {
+		m.notes[id] = text
+	}
+	return m
+}
+
 func (m uiModel) focusSelected() uiModel {
 	if m.selectedID == "" {
 		if len(m.sessions) == 0 {
@@ -259,6 +349,7 @@ var (
 	titleStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 	headerStyle       = lipgloss.NewStyle().Bold(true)
 	activeHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	panelHeaderStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 	dimStyle          = lipgloss.NewStyle().Faint(true)
 	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	borderStyle       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
@@ -275,20 +366,21 @@ func keyHint(key, desc string) string {
 // active state highlights this header; -1 means the column does not
 // correspond to any sortable field.
 // Column widths excluding CWD, which flexes to fill the remaining
-// horizontal space inside the border.
+// horizontal space inside the border. The session hash isn't a column
+// any more; it's surfaced in the detail block at the bottom.
 const (
 	colStatus     = 8
-	colSession    = 12
 	colVersion    = 10
 	colLastEvent  = 20
 	colTransition = 15
 	colCreated    = 19 // length of "2026-05-05 15:04:05"
+	colNote       = 30
 )
 
 // fixedCols sums the non-CWD column widths plus the 12 chars of
 // inter-column separators (6 gaps × 2 spaces) and the 4 chars of border
 // + padding. cwdWidth() returns whatever is left of the terminal width.
-const fixedCols = colStatus + colSession + colVersion + colLastEvent + colTransition + colCreated + 12 + 4
+const fixedCols = colStatus + colVersion + colLastEvent + colTransition + colCreated + colNote + 12 + 4
 
 func (m uiModel) cwdWidth() int {
 	if m.width <= 0 {
@@ -311,12 +403,12 @@ func renderHeader(active sortMode, cwd int) string {
 		sortKey sortMode
 	}{
 		{"STATUS", colStatus, sortStatus},
-		{"SESSION", colSession, -1},
 		{"VERSION", colVersion, -1},
 		{"CWD", cwd, -1},
 		{"LAST EVENT", colLastEvent, -1},
 		{"LAST TRANSITION", colTransition, sortActivity},
-		{"CREATED", 0, sortCreated},
+		{"CREATED", colCreated, sortCreated},
+		{"NOTE", 0, -1},
 	}
 	parts := make([]string, 0, len(cols))
 	for _, c := range cols {
@@ -351,26 +443,30 @@ func rowStyle(status string, selected bool) lipgloss.Style {
 }
 
 func (m uiModel) View() string {
-	var inner strings.Builder
+	// head holds the title and either the error/empty-state or the
+	// session table. foot holds the per-session detail block. They are
+	// rendered separately so we can pad between them and anchor the
+	// detail block to the bottom of the inner box area.
+	var head, foot strings.Builder
 
-	inner.WriteString(titleStyle.Render(fmt.Sprintf("agent-status, %d session(s)", len(m.sessions))))
-	inner.WriteString("\n\n")
+	head.WriteString(titleStyle.Render(fmt.Sprintf("agent-status, %d session(s)", len(m.sessions))))
+	head.WriteString("\n\n")
+
+	selectedID := m.selectedID
+	if selectedID == "" && len(m.sessions) > 0 {
+		selectedID = m.sessions[0].SessionID
+	}
 
 	if m.err != nil {
-		inner.WriteString(errorStyle.Render("error: " + m.err.Error()))
+		head.WriteString(errorStyle.Render("error: " + m.err.Error()))
 	} else {
-		selectedID := m.selectedID
-		if selectedID == "" && len(m.sessions) > 0 {
-			selectedID = m.sessions[0].SessionID
-		}
-
 		cwdWidth := m.cwdWidth()
 		if len(m.sessions) == 0 {
-			inner.WriteString(dimStyle.Render("(no live sessions)"))
+			head.WriteString(dimStyle.Render("(no live sessions)"))
 		} else {
-			inner.WriteString(renderHeader(m.sort, cwdWidth))
+			head.WriteString(renderHeader(m.sort, cwdWidth))
 			for _, s := range m.sessions {
-				inner.WriteString("\n")
+				head.WriteString("\n")
 				meta := m.meta[s.SessionID]
 				ver := meta.Version
 				if ver == "" {
@@ -382,27 +478,47 @@ func (m uiModel) View() string {
 				} else {
 					cwd = shortPath(cwd, cwdWidth)
 				}
-				rowText := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s",
+				note := truncate(collapseWS(m.notes[s.SessionID]), colNote)
+				rowText := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
 					colStatus, s.Status,
-					colSession, short(s.SessionID),
 					colVersion, ver,
 					cwdWidth, cwd,
 					colLastEvent, s.LastEvent,
 					colTransition, relTime(s.StatusAt),
-					absTime(s.FirstSeenAt),
+					colCreated, absTime(s.FirstSeenAt),
+					colNote, note,
 				)
 				selected := s.SessionID == selectedID
-				inner.WriteString(rowStyle(s.Status, selected).Render(rowText))
+				head.WriteString(rowStyle(s.Status, selected).Render(rowText))
 			}
-			if selectedID != "" {
-				inner.WriteString("\n\n")
+			if selectedID != "" && !m.showConfig {
 				var info discovery.TranscriptInfo
 				if m.detailFor == selectedID {
 					info = m.detail
 				}
-				inner.WriteString(renderDetail(info, m.meta[selectedID]))
+				foot.WriteString(renderDetail(selectedID, m.notes[selectedID], info, m.meta[selectedID]))
 			}
 		}
+	}
+	if m.showConfig {
+		foot.Reset()
+		foot.WriteString(m.renderConfig())
+	}
+
+	inner := head.String()
+	if footStr := foot.String(); footStr != "" {
+		// Anchor the detail block to the bottom of the inner box. The
+		// box content area is m.height-4 rows tall (matching the
+		// box.Height set below); pad with blank rows between head and
+		// foot so foot's last line lands on the box's bottom row.
+		boxH := max(m.height-4, 1)
+		headLines := lineCount(inner)
+		footLines := lineCount(footStr)
+		// Always keep at least one blank row between table and
+		// detail; if the terminal is too short we'll overflow,
+		// which is preferable to running them together.
+		pad := max(boxH-headLines-footLines, 1)
+		inner = inner + strings.Repeat("\n", pad+1) + footStr
 	}
 
 	var b strings.Builder
@@ -410,20 +526,69 @@ func (m uiModel) View() string {
 	if m.width > 0 {
 		box = box.Width(m.width - 2)
 	}
-	b.WriteString(box.Render(inner.String()))
-	b.WriteString("\n")
-	if m.status != "" {
-		b.WriteString(dimStyle.Render(m.status))
-		b.WriteString("\n")
+	if m.height > 0 {
+		// Reserve 4 rows below the box content: 2 for the box's own
+		// border (top + bottom), 1 for the status row, 1 for the keymap.
+		box = box.Height(max(m.height-4, 1))
 	}
-	keymap := strings.Join([]string{
-		keyHint("↑/↓", "select"),
-		keyHint("enter", "focus"),
-		keyHint("s", "sort:"+m.sort.String()),
-		keyHint("q", "quit"),
-	}, "   ")
+	b.WriteString(box.Render(inner))
+	b.WriteString("\n")
+	// Status row. In note input mode the prompt replaces any ephemeral
+	// status; otherwise we always emit the row (even empty) so the
+	// keymap stays pinned to the bottom regardless of state.
+	if m.inputMode {
+		b.WriteString(dimStyle.Render("note: ") + m.inputBuf + "▏")
+	} else {
+		b.WriteString(dimStyle.Render(m.status))
+	}
+	b.WriteString("\n")
+	var keymap string
+	if m.inputMode {
+		keymap = strings.Join([]string{
+			keyHint("enter", "save"),
+			keyHint("esc", "cancel"),
+		}, "   ")
+	} else {
+		keymap = strings.Join([]string{
+			keyHint("↑/↓", "select"),
+			keyHint("enter", "focus"),
+			keyHint("n", "note"),
+			keyHint("s", "sort:"+m.sort.String()),
+			keyHint("?", "config"),
+			keyHint("q", "quit"),
+		}, "   ")
+	}
 	b.WriteString(keymap)
 	return b.String()
+}
+
+// renderConfig formats the UI's runtime configuration for the bottom
+// block. Mirrors renderDetail's faint-label / value layout so the box
+// looks consistent whether the foot is showing config or a session
+// detail.
+func (m uiModel) renderConfig() string {
+	labelStyle := lipgloss.NewStyle().Faint(true)
+	field := func(label, value string) string {
+		if value == "" {
+			value = "-"
+		}
+		return labelStyle.Render(label+": ") + value
+	}
+	return strings.Join([]string{
+		panelHeaderStyle.Render("Config"),
+		field("state", m.statePath),
+		field("notes", m.notesPath),
+		field("refresh", m.interval.String()),
+	}, "\n")
+}
+
+// lineCount returns the number of visual rows in s (a string with no
+// trailing newline counts its last line).
+func lineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
 }
 
 func short(id string) string {
@@ -433,7 +598,7 @@ func short(id string) string {
 	return id
 }
 
-func renderDetail(info discovery.TranscriptInfo, meta discovery.SessionMeta) string {
+func renderDetail(sessionID, note string, info discovery.TranscriptInfo, meta discovery.SessionMeta) string {
 	labelStyle := lipgloss.NewStyle().Faint(true)
 	field := func(label, value string) string {
 		if value == "" {
@@ -456,7 +621,9 @@ func renderDetail(info discovery.TranscriptInfo, meta discovery.SessionMeta) str
 		cache = fmt.Sprintf("%s read / %s create", num(info.CacheReadTokens), num(info.CacheCreationTokens))
 	}
 	prompt := truncate(collapseWS(info.LastUserPrompt), 100)
+	header := panelHeaderStyle.Render("Metadata")
 	line1 := strings.Join([]string{
+		field("session", short(sessionID)),
 		field("model", info.Model),
 		field("branch", info.GitBranch),
 		field("mode", info.PermissionMode),
@@ -469,8 +636,9 @@ func renderDetail(info discovery.TranscriptInfo, meta discovery.SessionMeta) str
 		field("cache", cache),
 	}, "   ")
 	line3 := field("cwd", meta.Cwd)
-	line4 := field("last", prompt)
-	return strings.Join([]string{line1, line2, line3, line4}, "\n")
+	line4 := field("note", note)
+	line5 := field("last", prompt)
+	return strings.Join([]string{header, line1, line2, line3, line4, line5}, "\n")
 }
 
 func collapseWS(s string) string {
