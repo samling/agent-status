@@ -1,0 +1,5 @@
+.serena/
+.claude/
+/agent-status
+/bin
+/state.db*

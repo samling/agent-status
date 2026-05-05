@@ -1,0 +1,47 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/sboynton/Documents/Programming/agent-status/debug.sh" }
+        ]
+      }
+    ]
+  }
+}
