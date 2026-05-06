@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"agent-status/internal/state"
 )
@@ -27,40 +26,6 @@ type SessionMeta struct {
 	Entrypoint string
 	Cwd        string
 	Version    string
-}
-
-// Result reports the outcome of a discovery scan.
-type Result struct {
-	Scanned  int // session files seen on disk
-	Alive    int // session files whose PID is still alive
-	Inserted int // sessions newly added to state
-}
-
-// Run scans ~/.claude/sessions/*.json for live Claude Code sessions and
-// registers any session_id not yet present in state with a Discovered
-// marker. Existing sessions are not touched.
-func Run(s *state.Store) (Result, error) {
-	var r Result
-	alive, scanned, err := walkAlive()
-	if err != nil {
-		return r, err
-	}
-	r.Scanned = scanned
-	r.Alive = len(alive)
-	for _, sf := range alive {
-		var createdAt time.Time
-		if sf.StartedAt > 0 {
-			createdAt = time.UnixMilli(sf.StartedAt)
-		}
-		inserted, err := s.MarkDiscovered(sf.SessionID, createdAt)
-		if err != nil {
-			return r, err
-		}
-		if inserted {
-			r.Inserted++
-		}
-	}
-	return r, nil
 }
 
 // LiveSessionMeta returns a map of session_id -> SessionMeta for sessions

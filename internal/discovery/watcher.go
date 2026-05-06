@@ -39,15 +39,20 @@ func Watch(ctx context.Context, s *state.Store) error {
 		return err
 	}
 
-	// Initial sweep so already-idle sessions get synced without waiting
-	// for the next on-disk update.
-	if entries, err := os.ReadDir(dir); err == nil {
-		for _, e := range entries {
-			if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-				continue
+	// Initial sweep: register every live session and sync its on-disk
+	// JSONL status so the state file is populated before any hooks fire.
+	// Filtered through walkAlive so dead-PID stragglers (uncleaned
+	// session files from prior crashes) don't get inserted.
+	if alive, scanned, err := walkAlive(); err != nil {
+		log.Printf("watcher: initial sweep: %v", err)
+	} else {
+		inserted := 0
+		for _, sf := range alive {
+			if applySessionFile(s, sf) {
+				inserted++
 			}
-			processSessionFile(s, filepath.Join(dir, e.Name()))
 		}
+		log.Printf("discovery: scanned=%d alive=%d inserted=%d", scanned, len(alive), inserted)
 	}
 
 	for {
@@ -98,13 +103,20 @@ func processSessionFile(s *state.Store, path string) {
 	if sf.SessionID == "" {
 		return
 	}
-	// Pick up sessions that started after the server did so they show
-	// up immediately, without waiting for a hook to fire.
+	applySessionFile(s, sf)
+}
+
+// applySessionFile registers sf with the state store and syncs its JSONL
+// status. Returns true when the session was newly inserted. Shared by
+// the initial sweep (which feeds it parsed entries from walkAlive) and
+// the per-event handler.
+func applySessionFile(s *state.Store, sf sessionFile) bool {
 	var createdAt time.Time
 	if sf.StartedAt > 0 {
 		createdAt = time.UnixMilli(sf.StartedAt)
 	}
-	if inserted, err := s.MarkDiscovered(sf.SessionID, createdAt); err != nil {
+	inserted, err := s.MarkDiscovered(sf.SessionID, createdAt)
+	if err != nil {
 		log.Printf("watcher: mark discovered %s: %v", state.ShortID(sf.SessionID), err)
 	} else if inserted {
 		log.Printf("watcher: discovered new session %s", state.ShortID(sf.SessionID))
@@ -112,9 +124,10 @@ func processSessionFile(s *state.Store, path string) {
 	changed, err := s.SetJSONLStatus(sf.SessionID, sf.Status)
 	if err != nil {
 		log.Printf("watcher: set jsonl status for %s: %v", state.ShortID(sf.SessionID), err)
-		return
+		return inserted
 	}
 	if changed {
 		log.Printf("watcher: session %s jsonl_status=%q", state.ShortID(sf.SessionID), sf.Status)
 	}
+	return inserted
 }
