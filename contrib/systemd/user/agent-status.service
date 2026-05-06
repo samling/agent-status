@@ -1,5 +1,5 @@
 [Unit]
-Description=agent-status HTTP collector for Claude Code
+Description=agent-status collector for local coding-agent sessions
 Documentation=https://github.com/samling/agent-status
 After=default.target
 

@@ -16,7 +16,7 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:     "agent-status",
-	Short:   "Collect and inspect Claude Code hook events",
+	Short:   "Collect and inspect local coding-agent sessions",
 	Version: version.Get(),
 }
 

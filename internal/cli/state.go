@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/samling/agent-status/internal/server"
+	"github.com/samling/agent-status/internal/state"
 )
 
 var stateCmd = &cobra.Command{
@@ -44,9 +45,9 @@ func runState(cmd *cobra.Command, _ []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "STATUS\tSESSION_ID\tLAST_EVENT\tLAST_EVENT_AT\tFIRST_SEEN_AT")
+	fmt.Fprintln(w, "STATUS\tAGENT\tSESSION_ID\tLAST_EVENT\tLAST_EVENT_AT\tFIRST_SEEN_AT")
 	for _, s := range sessions {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.Status, s.SessionID, s.LastEvent, s.LastEventAt, s.FirstSeenAt)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.Status, state.NormalizeAgent(s.Agent), s.SessionID, s.LastEvent, s.LastEventAt, s.FirstSeenAt)
 	}
 	return w.Flush()
 }

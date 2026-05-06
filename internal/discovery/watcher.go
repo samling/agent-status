@@ -2,8 +2,6 @@ package discovery
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -14,17 +12,14 @@ import (
 	"github.com/samling/agent-status/internal/state"
 )
 
-// Watch monitors ~/.claude/sessions/*.json for write/create events and
-// syncs the on-disk JSONL status into our state file: when a file
-// reports status=="idle" and our derived status is currently "active"
-// or "waiting", we flip the entry to idle. Removal/rename triggers a
-// reap. Runs until ctx is cancelled.
+// Watch monitors Claude session-file events and polls all registered
+// discovery sources into our state file. Removal/rename triggers a reap.
+// Runs until ctx is cancelled.
 func Watch(ctx context.Context, s *state.Store) error {
-	home, err := os.UserHomeDir()
+	dir, err := claudeSessionsDir()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(home, ".claude", "sessions")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -40,20 +35,17 @@ func Watch(ctx context.Context, s *state.Store) error {
 	}
 
 	// Initial sweep: register every live session and sync its on-disk
-	// JSONL status so the state file is populated before any hooks fire.
-	// Filtered through walkAlive so dead-PID stragglers (uncleaned
-	// session files from prior crashes) don't get inserted.
-	if alive, scanned, err := walkAlive(); err != nil {
+	// status so the state file is populated before any hooks fire.
+	// Filtered through each provider's liveness check so dead-PID
+	// stragglers from prior crashes don't get inserted.
+	if scanned, alive, updated, err := syncDiscovered(s); err != nil {
 		log.Printf("watcher: initial sweep: %v", err)
 	} else {
-		inserted := 0
-		for _, sf := range alive {
-			if applySessionFile(s, sf) {
-				inserted++
-			}
-		}
-		log.Printf("discovery: scanned=%d alive=%d inserted=%d", scanned, len(alive), inserted)
+		log.Printf("discovery: scanned=%d alive=%d updated=%d", scanned, alive, updated)
 	}
+
+	discover := time.NewTicker(2 * time.Second)
+	defer discover.Stop()
 
 	// Periodic reap as a safety net for dead sessions whose file
 	// removal we missed (fsnotify drops events under load, the
@@ -68,6 +60,12 @@ func Watch(ctx context.Context, s *state.Store) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-discover.C:
+			if scanned, alive, updated, err := syncDiscovered(s); err != nil {
+				log.Printf("watcher: discovery poll: %v", err)
+			} else if updated > 0 {
+				log.Printf("discovery: scanned=%d alive=%d updated=%d", scanned, alive, updated)
+			}
 		case <-reap.C:
 			if n, err := Reap(s); err != nil {
 				log.Printf("watcher: periodic reap: %v", err)
@@ -83,7 +81,7 @@ func Watch(ctx context.Context, s *state.Store) error {
 			}
 			switch {
 			case event.Op&(fsnotify.Write|fsnotify.Create) != 0:
-				processSessionFile(s, event.Name)
+				processClaudeSessionFile(s, event.Name)
 			case event.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
 				// File vanished: a session likely exited (including
 				// non-clean exits that skip SessionEnd). Trigger a reap.
@@ -102,47 +100,72 @@ func Watch(ctx context.Context, s *state.Store) error {
 	}
 }
 
-func processSessionFile(s *state.Store, path string) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			log.Printf("watcher: read %s: %v", filepath.Base(path), err)
+func syncDiscovered(s *state.Store) (scanned, alive, updated int, err error) {
+	type result struct {
+		sessions []liveAgentSession
+		scanned  int
+		err      error
+	}
+	sources := liveSources()
+	ch := make(chan result, len(sources))
+	for _, src := range sources {
+		src := src
+		go func() {
+			sessions, scanned, err := src.scan()
+			ch <- result{sessions: sessions, scanned: scanned, err: err}
+		}()
+	}
+	for range sources {
+		res := <-ch
+		if res.err != nil {
+			if err == nil {
+				err = res.err
+			}
+			continue
 		}
-		return
+		scanned += res.scanned
+		alive += len(res.sessions)
+		for _, sess := range res.sessions {
+			if applyLiveSession(s, sess) {
+				updated++
+			}
+		}
 	}
-	var sf sessionFile
-	if err := json.Unmarshal(b, &sf); err != nil {
-		// Mid-write race or unrelated file; ignore quietly.
-		return
-	}
-	if sf.SessionID == "" {
-		return
-	}
-	applySessionFile(s, sf)
+	return scanned, alive, updated, err
 }
 
-// applySessionFile registers sf with the state store and syncs its JSONL
-// status. Returns true when the session was newly inserted. Shared by
-// the initial sweep (which feeds it parsed entries from walkAlive) and
-// the per-event handler.
-func applySessionFile(s *state.Store, sf sessionFile) bool {
-	var createdAt time.Time
-	if sf.StartedAt > 0 {
-		createdAt = time.UnixMilli(sf.StartedAt)
+func applyLiveSession(s *state.Store, sess liveAgentSession) bool {
+	switch sess.Agent {
+	case state.AgentClaudeCode:
+		return applyClaudeSessionFile(s, claudeSessionFile{
+			PID:        sess.Meta.PID,
+			SessionID:  sess.SessionID,
+			Entrypoint: sess.Meta.Entrypoint,
+			Cwd:        sess.Meta.Cwd,
+			Status:     sess.EngineStatus,
+			Version:    sess.Meta.Version,
+			StartedAt:  unixMilli(sess.StartedAt),
+		})
+	case state.AgentCodex:
+		changed, err := s.ReconcileDiscovered(sess.Agent, sess.SessionID, sess.StartedAt)
+		if err != nil {
+			log.Printf("watcher: reconcile discovered %s %s: %v", sess.Agent, state.ShortID(sess.SessionID), err)
+		} else if changed {
+			log.Printf("watcher: reconciled %s session %s", sess.Agent, state.ShortID(sess.SessionID))
+		}
+		return changed
+	default:
+		changed, err := s.RecordObserved(sess.Agent, sess.SessionID, sess.StartedAt, sess.Event, sess.EventAt, sess.EngineStatus)
+		if err != nil {
+			log.Printf("watcher: record observed %s %s: %v", sess.Agent, state.ShortID(sess.SessionID), err)
+		}
+		return changed
 	}
-	inserted, err := s.MarkDiscovered(sf.SessionID, createdAt)
-	if err != nil {
-		log.Printf("watcher: mark discovered %s: %v", state.ShortID(sf.SessionID), err)
-	} else if inserted {
-		log.Printf("watcher: discovered new session %s", state.ShortID(sf.SessionID))
+}
+
+func unixMilli(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
 	}
-	changed, err := s.SetJSONLStatus(sf.SessionID, sf.Status)
-	if err != nil {
-		log.Printf("watcher: set jsonl status for %s: %v", state.ShortID(sf.SessionID), err)
-		return inserted
-	}
-	if changed {
-		log.Printf("watcher: session %s jsonl_status=%q", state.ShortID(sf.SessionID), sf.Status)
-	}
-	return inserted
+	return t.UnixMilli()
 }

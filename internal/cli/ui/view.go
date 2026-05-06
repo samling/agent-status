@@ -36,6 +36,7 @@ func keyHint(key, desc string) string {
 // any more; it's surfaced in the detail block at the bottom.
 const (
 	colStatus     = 8
+	colAgent      = 11 // length of "claude-code"
 	colVersion    = 10
 	colLastEvent  = 20
 	colTransition = 15
@@ -43,10 +44,10 @@ const (
 	colNote       = 30
 )
 
-// fixedCols sums the non-CWD column widths plus the 12 chars of
-// inter-column separators (6 gaps × 2 spaces) and the 4 chars of border
+// fixedCols sums the non-CWD column widths plus the 14 chars of
+// inter-column separators (7 gaps x 2 spaces) and the 4 chars of border
 // + padding. cwdWidth() returns whatever is left of the terminal width.
-const fixedCols = colStatus + colVersion + colLastEvent + colTransition + colCreated + colNote + 12 + 4
+const fixedCols = colStatus + colAgent + colVersion + colLastEvent + colTransition + colCreated + colNote + 14 + 4
 
 func (m uiModel) cwdWidth() int {
 	if m.width <= 0 {
@@ -72,6 +73,7 @@ func renderHeader(active sortMode, cwd int) string {
 		sortKey sortMode
 	}{
 		{"STATUS", colStatus, sortStatus},
+		{"AGENT", colAgent, -1},
 		{"VERSION", colVersion, -1},
 		{"CWD", cwd, -1},
 		{"LAST EVENT", colLastEvent, -1},
@@ -157,8 +159,9 @@ func (m uiModel) View() string {
 					cwd = shortPath(cwd, cwdWidth)
 				}
 				note := truncate(collapseWS(m.notes[s.SessionID]), colNote)
-				rowText := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+				rowText := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
 					colStatus, s.Status,
+					colAgent, state.NormalizeAgent(s.Agent),
 					colVersion, ver,
 					cwdWidth, cwd,
 					colLastEvent, s.LastEvent,
@@ -288,6 +291,7 @@ func renderDetail(sessionID, note string, info discovery.TranscriptInfo, meta di
 		pid = fmt.Sprintf("%d", meta.PID)
 	}
 	line1 := strings.Join([]string{
+		labeledField("agent", state.NormalizeAgent(meta.Agent)),
 		labeledField("session", state.ShortID(sessionID)),
 		labeledField("pid", pid),
 		labeledField("model", info.Model),

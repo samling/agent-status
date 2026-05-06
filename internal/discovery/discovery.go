@@ -1,33 +1,44 @@
 package discovery
 
 import (
-	"encoding/json"
-	"errors"
-	"os"
-	"path/filepath"
-	"sync"
-	"syscall"
 	"time"
 
 	"github.com/samling/agent-status/internal/state"
 )
 
-type sessionFile struct {
-	PID        int    `json:"pid"`
-	SessionID  string `json:"sessionId"`
-	StartedAt  int64  `json:"startedAt"` // Unix milliseconds; absent on some entrypoints
-	Entrypoint string `json:"entrypoint"`
-	Cwd        string `json:"cwd"`
-	Status     string `json:"status"`  // "idle"|"busy"; absent for non-cli entrypoints
-	Version    string `json:"version"` // Claude Code version string, e.g. "2.1.128"
-}
-
-// SessionMeta is the per-session metadata available from ~/.claude/sessions/.
+// SessionMeta is the live per-session metadata discovered from an agent's
+// local state files.
 type SessionMeta struct {
+	Agent      string
 	PID        int
 	Entrypoint string
 	Cwd        string
 	Version    string
+	Model      string
+	Path       string
+	UpdatedAt  time.Time
+}
+
+type liveAgentSession struct {
+	Agent        string
+	SessionID    string
+	StartedAt    time.Time
+	Event        string
+	EventAt      time.Time
+	EngineStatus string
+	Meta         SessionMeta
+}
+
+type liveSource struct {
+	agent string
+	scan  func() ([]liveAgentSession, int, error)
+}
+
+func liveSources() []liveSource {
+	return []liveSource{
+		{agent: state.AgentClaudeCode, scan: scanClaudeLive},
+		{agent: state.AgentCodex, scan: scanCodexLive},
+	}
 }
 
 // LiveSessionMeta returns a map of session_id -> SessionMeta for sessions
@@ -35,127 +46,68 @@ type SessionMeta struct {
 // fields that are not part of persisted state.
 func LiveSessionMeta() (map[string]SessionMeta, error) {
 	out := map[string]SessionMeta{}
-	alive, _, err := walkAlive()
-	if err != nil {
-		return out, err
+	type result struct {
+		sessions []liveAgentSession
+		err      error
 	}
-	for _, sf := range alive {
-		out[sf.SessionID] = SessionMeta{PID: sf.PID, Entrypoint: sf.Entrypoint, Cwd: sf.Cwd, Version: sf.Version}
+	sources := liveSources()
+	ch := make(chan result, len(sources))
+	for _, src := range sources {
+		src := src
+		go func() {
+			sessions, _, err := src.scan()
+			ch <- result{sessions: sessions, err: err}
+		}()
 	}
-	return out, nil
+	var firstErr error
+	for range sources {
+		res := <-ch
+		if res.err != nil && firstErr == nil {
+			firstErr = res.err
+		}
+		for _, sess := range res.sessions {
+			out[sess.SessionID] = sess.Meta
+		}
+	}
+	return out, firstErr
 }
 
 // Reap removes any state entry whose session_id is no longer backed by a
 // live session file. Returns the count removed.
 func Reap(s *state.Store) (int, error) {
-	alive, _, err := walkAlive()
-	if err != nil {
-		return 0, err
+	type result struct {
+		agent    string
+		sessions []liveAgentSession
+		err      error
 	}
-	set := make(map[string]bool, len(alive))
-	for _, sf := range alive {
-		set[sf.SessionID] = true
+	sources := liveSources()
+	ch := make(chan result, len(sources))
+	for _, src := range sources {
+		src := src
+		go func() {
+			sessions, _, err := src.scan()
+			ch <- result{agent: src.agent, sessions: sessions, err: err}
+		}()
 	}
-	return s.ReapAbsent(set)
-}
-
-// walkAlive returns every parsed session file whose PID is still alive.
-// scanned counts every parseable file regardless of liveness. Parsed
-// entries are cached keyed on (path, mtime, size) so the UI's per-tick
-// poll doesn't re-read every file under ~/.claude/sessions/ on each
-// refresh; pidAlive is checked unconditionally because liveness can
-// flip between polls without touching the file.
-func walkAlive() (alive []sessionFile, scanned int, err error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, 0, err
-	}
-	dir := filepath.Join(home, ".claude", "sessions")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, 0, nil
-		}
-		return nil, 0, err
-	}
-	seen := make(map[string]struct{}, len(entries))
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+	total := 0
+	var firstErr error
+	for range sources {
+		res := <-ch
+		if res.err != nil {
+			if firstErr == nil {
+				firstErr = res.err
+			}
 			continue
 		}
-		path := filepath.Join(dir, e.Name())
-		seen[path] = struct{}{}
-		fi, err := e.Info()
-		if err != nil {
-			continue
+		set := make(map[string]bool, len(res.sessions))
+		for _, sess := range res.sessions {
+			set[sess.SessionID] = true
 		}
-		sf, ok := loadSessionFile(path, fi.ModTime(), fi.Size())
-		if !ok {
-			continue
-		}
-		if sf.SessionID == "" || sf.PID <= 0 {
-			continue
-		}
-		scanned++
-		if !pidAlive(sf.PID) {
-			continue
-		}
-		alive = append(alive, sf)
-	}
-	pruneWalkCache(seen)
-	return alive, scanned, nil
-}
-
-type cachedSessionFile struct {
-	mtime time.Time
-	size  int64
-	sf    sessionFile
-}
-
-var (
-	walkCacheMu sync.Mutex
-	walkCache   = map[string]cachedSessionFile{}
-)
-
-// loadSessionFile returns the parsed sessionFile at path, using the
-// (mtime, size) cache when present. The mutex is held only for cache
-// reads/writes; I/O happens unlocked, so concurrent callers may race to
-// re-parse the same file on a miss but that's harmless.
-func loadSessionFile(path string, mtime time.Time, size int64) (sessionFile, bool) {
-	walkCacheMu.Lock()
-	cached, ok := walkCache[path]
-	walkCacheMu.Unlock()
-	if ok && cached.mtime.Equal(mtime) && cached.size == size {
-		return cached.sf, true
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return sessionFile{}, false
-	}
-	var sf sessionFile
-	if err := json.Unmarshal(b, &sf); err != nil {
-		return sessionFile{}, false
-	}
-	walkCacheMu.Lock()
-	walkCache[path] = cachedSessionFile{mtime: mtime, size: size, sf: sf}
-	walkCacheMu.Unlock()
-	return sf, true
-}
-
-func pruneWalkCache(seen map[string]struct{}) {
-	walkCacheMu.Lock()
-	defer walkCacheMu.Unlock()
-	for path := range walkCache {
-		if _, ok := seen[path]; !ok {
-			delete(walkCache, path)
+		n, err := s.ReapAbsentForAgent(res.agent, set)
+		total += n
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-}
-
-func pidAlive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	return total, firstErr
 }
