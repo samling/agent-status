@@ -43,5 +43,5 @@ func init() {
 	viper.SetEnvPrefix("AGENT_STATUS")
 	viper.AutomaticEnv()
 
-	rootCmd.AddCommand(serverCmd, stateCmd, ui.Command())
+	rootCmd.AddCommand(serverCmd, stateCmd, statuslineCmd, ui.Command())
 }
