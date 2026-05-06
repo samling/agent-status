@@ -1,11 +1,13 @@
 package ui
 
 import (
+	"context"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/samling/agent-status/internal/focus"
+	"github.com/samling/agent-status/internal/server"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -92,6 +94,11 @@ func (m uiModel) commitNote() uiModel {
 	return m
 }
 
+// focusSelected POSTs to /focus/{id} on the collector. The TUI used
+// to call focus.PID directly, but routing through the same REST
+// endpoint as notification activations means there's exactly one
+// place that knows how to focus a session — the server. The PID
+// lookup, ancestry walk, and compositor IPC all happen server-side.
 func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 	id := m.activeSelectionID()
 	if id == "" {
@@ -99,17 +106,14 @@ func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 		return m, nil
 	}
 	m.selectedID = id
-	meta, ok := m.meta[id]
-	if !ok || meta.PID <= 0 {
-		m.status = "no live PID for selected session"
-		return m, nil
-	}
-	msg, err := focus.PID(meta.PID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := server.Focus(ctx, m.serverAddr, id)
 	if err != nil {
 		m.status = "focus error: " + err.Error()
 		return m, nil
 	}
-	m.status = msg
+	m.status = resp.Message
 	if m.quitAfterFocus {
 		return m, tea.Quit
 	}

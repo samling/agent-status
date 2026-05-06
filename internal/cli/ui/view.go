@@ -258,6 +258,7 @@ func (m uiModel) renderConfig() string {
 	return strings.Join([]string{
 		accentStyle.Render("Config"),
 		labeledField("version", version.Get()),
+		labeledField("config", m.configPath),
 		labeledField("state", m.statePath),
 		labeledField("notes", m.notesPath),
 		labeledField("server", m.serverAddr),

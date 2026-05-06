@@ -1,15 +1,16 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 
-	"github.com/samling/agent-status/internal/state"
+	"github.com/samling/agent-status/internal/server"
 )
 
 var stateCmd = &cobra.Command{
@@ -23,7 +24,9 @@ func init() {
 }
 
 func runState(cmd *cobra.Command, _ []string) error {
-	sessions, err := state.Load(viper.GetString("state"))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	sessions, err := server.LoadState(ctx, ServerEndpoint())
 	if err != nil {
 		return err
 	}

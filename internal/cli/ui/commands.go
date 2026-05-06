@@ -1,12 +1,13 @@
 package ui
 
 import (
-	"net"
+	"context"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/server"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -23,23 +24,34 @@ type snapshotMsg struct {
 	// Update can skip re-sorting in the common case where the user
 	// hasn't changed the mode mid-load.
 	sortedBy sortMode
-	// serverUp is the result of probing the collector's listen socket
-	// each tick. False when the dial fails, so the user has a visible
-	// signal that updates have stalled.
+	// serverUp is true when the /state call succeeded. Doubling as
+	// the connectivity indicator avoids a second TCP-level probe; if
+	// the load failed we already know the server is unreachable or
+	// broken, and an extra dial wouldn't add information.
 	serverUp bool
 }
 type errMsg struct{ err error }
 
-// loadSnapshot is the IO half of the refresh tick: read state from
-// disk, enrich with live session metadata, kick off a transcript fetch
-// for the focused row, and probe the collector's TCP socket. Sorted
-// before returning so the View's implicit first-row default matches
-// the focus we picked.
-func loadSnapshot(path, serverAddr, selectedID string, mode sortMode) tea.Cmd {
+// loadSnapshot is the IO half of the refresh tick: hit /state for the
+// session list, enrich with live session metadata from disk (PID, cwd,
+// etc. — Claude's session files, not agent-status state), and kick off
+// a transcript fetch for the focused row.
+//
+// Sessions come from the collector's /state endpoint rather than the
+// disk file. Going through the API keeps the TUI honest about being a
+// REST client of the server: same wire shape every other consumer
+// uses, no second source of truth to drift from.
+func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
 	return func() tea.Msg {
-		sessions, err := state.Load(path)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		sessions, err := server.LoadState(ctx, serverAddr)
+		serverUp := err == nil
 		if err != nil {
-			return errMsg{err}
+			// Treat unreachable collector as "no sessions" so the UI
+			// keeps drawing instead of erroring out; the disconnected
+			// indicator already tells the user what's going on.
+			sessions = nil
 		}
 		meta, _ := discovery.LiveSessionMeta()
 		sortSessions(sessions, mode)
@@ -59,25 +71,9 @@ func loadSnapshot(path, serverAddr, selectedID string, mode sortMode) tea.Cmd {
 			detail:    detail,
 			detailFor: focus,
 			sortedBy:  mode,
-			serverUp:  probeServer(serverAddr),
+			serverUp:  serverUp,
 		}
 	}
-}
-
-// probeServer returns true when a TCP connection to addr succeeds
-// within a short timeout. Used as a liveness signal for the indicator
-// in the title bar; we don't speak any protocol because the server
-// might not have an HTTP path that's free of side effects.
-func probeServer(addr string) bool {
-	if addr == "" {
-		return false
-	}
-	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }
 
 func tickEvery(d time.Duration) tea.Cmd {
