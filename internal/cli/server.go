@@ -7,9 +7,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"agent-status/internal/discovery"
-	"agent-status/internal/server"
-	"agent-status/internal/state"
+	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/server"
+	"github.com/samling/agent-status/internal/state"
 )
 
 var serverCmd = &cobra.Command{

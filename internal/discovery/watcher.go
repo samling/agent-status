@@ -11,7 +11,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"agent-status/internal/state"
+	"github.com/samling/agent-status/internal/state"
 )
 
 // Watch monitors ~/.claude/sessions/*.json for write/create events and

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"agent-status/internal/cli"
+	"github.com/samling/agent-status/internal/cli"
 )
 
 func main() {

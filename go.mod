@@ -1,4 +1,4 @@
-module agent-status
+module github.com/samling/agent-status
 
 go 1.26
 

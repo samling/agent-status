@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
+	"time"
 
-	"agent-status/internal/state"
+	"github.com/samling/agent-status/internal/state"
 )
 
 type sessionFile struct {
@@ -58,7 +60,11 @@ func Reap(s *state.Store) (int, error) {
 }
 
 // walkAlive returns every parsed session file whose PID is still alive.
-// scanned counts every parseable file regardless of liveness.
+// scanned counts every parseable file regardless of liveness. Parsed
+// entries are cached keyed on (path, mtime, size) so the UI's per-tick
+// poll doesn't re-read every file under ~/.claude/sessions/ on each
+// refresh; pidAlive is checked unconditionally because liveness can
+// flip between polls without touching the file.
 func walkAlive() (alive []sessionFile, scanned int, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -72,16 +78,19 @@ func walkAlive() (alive []sessionFile, scanned int, err error) {
 		}
 		return nil, 0, err
 	}
+	seen := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		path := filepath.Join(dir, e.Name())
+		seen[path] = struct{}{}
+		fi, err := e.Info()
 		if err != nil {
 			continue
 		}
-		var sf sessionFile
-		if err := json.Unmarshal(b, &sf); err != nil {
+		sf, ok := loadSessionFile(path, fi.ModTime(), fi.Size())
+		if !ok {
 			continue
 		}
 		if sf.SessionID == "" || sf.PID <= 0 {
@@ -93,7 +102,54 @@ func walkAlive() (alive []sessionFile, scanned int, err error) {
 		}
 		alive = append(alive, sf)
 	}
+	pruneWalkCache(seen)
 	return alive, scanned, nil
+}
+
+type cachedSessionFile struct {
+	mtime time.Time
+	size  int64
+	sf    sessionFile
+}
+
+var (
+	walkCacheMu sync.Mutex
+	walkCache   = map[string]cachedSessionFile{}
+)
+
+// loadSessionFile returns the parsed sessionFile at path, using the
+// (mtime, size) cache when present. The mutex is held only for cache
+// reads/writes; I/O happens unlocked, so concurrent callers may race to
+// re-parse the same file on a miss but that's harmless.
+func loadSessionFile(path string, mtime time.Time, size int64) (sessionFile, bool) {
+	walkCacheMu.Lock()
+	cached, ok := walkCache[path]
+	walkCacheMu.Unlock()
+	if ok && cached.mtime.Equal(mtime) && cached.size == size {
+		return cached.sf, true
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return sessionFile{}, false
+	}
+	var sf sessionFile
+	if err := json.Unmarshal(b, &sf); err != nil {
+		return sessionFile{}, false
+	}
+	walkCacheMu.Lock()
+	walkCache[path] = cachedSessionFile{mtime: mtime, size: size, sf: sf}
+	walkCacheMu.Unlock()
+	return sf, true
+}
+
+func pruneWalkCache(seen map[string]struct{}) {
+	walkCacheMu.Lock()
+	defer walkCacheMu.Unlock()
+	for path := range walkCache {
+		if _, ok := seen[path]; !ok {
+			delete(walkCache, path)
+		}
+	}
 }
 
 func pidAlive(pid int) bool {

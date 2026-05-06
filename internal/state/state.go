@@ -30,6 +30,12 @@ type Session struct {
 	LastEventAt string `json:"last_event_at"`
 	JSONLStatus string `json:"jsonl_status"` // last value of the "status" field in ~/.claude/sessions/<pid>.json
 	StatusAt    string `json:"status_at"`    // when derived status last transitioned
+
+	// Parsed copies of FirstSeenAt and StatusAt, set by materialize so
+	// renderers don't re-parse RFC3339Nano strings on every frame.
+	// json:"-" keeps them off both the wire and the disk.
+	FirstSeenTime time.Time `json:"-"`
+	StatusTime    time.Time `json:"-"`
 }
 
 type Store struct {
@@ -209,14 +215,15 @@ func Load(path string) ([]Session, error) {
 	return materialize(m), nil
 }
 
-// materialize fills SessionID and Status on each entry (both are
-// json:"-" so they arrive zero from the unmarshal) and returns a sorted
-// slice for consumers.
+// materialize fills the derived fields on each entry (SessionID,
+// Status, parsed timestamps) and returns a sorted slice for consumers.
 func materialize(m map[string]Session) []Session {
 	out := make([]Session, 0, len(m))
 	for id, s := range m {
 		s.SessionID = id
 		s.Status = deriveStatus(s)
+		s.FirstSeenTime, _ = time.Parse(time.RFC3339Nano, s.FirstSeenAt)
+		s.StatusTime, _ = time.Parse(time.RFC3339Nano, s.StatusAt)
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool {

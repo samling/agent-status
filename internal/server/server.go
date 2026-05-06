@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"agent-status/internal/state"
+	"github.com/samling/agent-status/internal/state"
 )
 
 func Handler(s *state.Store) http.Handler {
