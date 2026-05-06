@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -29,7 +27,7 @@ func (*wsl) Focus(ctx context.Context, target Target) error {
 			continue
 		}
 		if isVSCodeTerminal(env) {
-			return focusViaVSCode(ctx, pid, env)
+			return focusViaVSCode(ctx)
 		}
 		// Future host-strategies plug in here (Windows Terminal:
 		// WT_SESSION → wt.exe AppActivate, etc.).
@@ -44,104 +42,73 @@ func isVSCodeTerminal(env map[string]string) bool {
 	return env["TERM_PROGRAM"] == "vscode" || env["VSCODE_IPC_HOOK_CLI"] != ""
 }
 
-// focusViaVSCode invokes the WSL-side `code` shim with the matching
-// process's cwd. The shim forwards to Windows VS Code, which focuses
-// the existing window for that folder (or opens it in the most recent
-// window if the folder isn't already loaded).
+// focusViaVSCode brings the running VS Code window to the foreground
+// by shelling out to powershell.exe and calling AppActivate against
+// the first Code.exe process that owns a top-level window.
 //
-// targetEnv is the matching process's parsed /proc/<pid>/environ. We
-// forward VSCODE_* and WSL_* keys into the shim's environment because
-// the shim itself gates on VSCODE_IPC_HOOK_CLI (the socket back to
-// the VS Code window) plus the WSL identification vars; without them
-// it refuses with "Command is only available in WSL or inside a
-// Visual Studio Code terminal", since our process (especially when
-// launched via systemd or another non-VS-Code parent) doesn't carry
-// them itself.
-func focusViaVSCode(ctx context.Context, pid int, targetEnv map[string]string) error {
-	bin, err := vscodeCLI()
+// We deliberately don't invoke the WSL-side `code` shim here. That's
+// an "open" verb: it loads a path into a window and (with -r) replaces
+// whatever workspace was there. We want a pure focus action against
+// the already-open window, which the COM WScript.Shell.AppActivate
+// API provides.
+//
+// For users with one VS Code instance open this is exact. With
+// multiple Code.exe windows the COM enumerator picks the first; a
+// precise-targeting story (filter by workspace title, or follow the
+// session's VSCODE_PID up the Windows process tree) is a follow-up.
+func focusViaVSCode(ctx context.Context) error {
+	psPath, err := findPowerShell()
 	if err != nil {
 		return err
 	}
-	cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
-	if err != nil || cwd == "" {
-		return fmt.Errorf("read /proc/%d/cwd: %v", pid, err)
-	}
-	// -r / --reuse-window forces the shim to forward the open to the
-	// existing window the IPC handle points at, instead of letting
-	// VS Code's window-picking heuristic decide (which often spawns
-	// a new window even when the folder is already open).
-	cmd := exec.CommandContext(ctx, bin, "-r", cwd)
-	cmd.Env = forwardVSCodeEnv(targetEnv)
+	cmd := exec.CommandContext(ctx, psPath, "-NoProfile", "-NonInteractive", "-Command", appActivateCodeScript)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s -r %s: %v: %s", bin, cwd, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("powershell AppActivate Code.exe: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// forwardVSCodeEnv returns os.Environ() augmented with the VSCODE_*
-// and WSL_* entries from target. Target wins on conflict so a stale
-// VSCODE_IPC_HOOK_CLI inherited by agent-status doesn't override the
-// session's fresh socket path.
-func forwardVSCodeEnv(target map[string]string) []string {
-	keep := []string{
-		"VSCODE_IPC_HOOK_CLI",
-		"VSCODE_PID",
-		"VSCODE_GIT_IPC_HANDLE",
-		"VSCODE_INJECTION",
-		"WSL_DISTRO_NAME",
-		"WSL_INTEROP",
-		"WSLENV",
+// findPowerShell locates a PowerShell executable usable from WSL.
+// Tries PATH first (the common case when WSL appends Windows paths),
+// then falls back to the canonical Windows-side install paths via the
+// /mnt/c mount. Users with `appendWindowsPath = false` in /etc/wsl.conf
+// hit the fallback; users with a non-default WSL drvfs prefix get a
+// clear error.
+func findPowerShell() (string, error) {
+	if p, err := exec.LookPath("powershell.exe"); err == nil {
+		return p, nil
 	}
-	keepSet := make(map[string]bool, len(keep))
-	for _, k := range keep {
-		keepSet[k] = true
+	if p, err := exec.LookPath("pwsh.exe"); err == nil {
+		return p, nil
 	}
-	out := make([]string, 0, len(os.Environ())+len(keep))
-	for _, kv := range os.Environ() {
-		k, _, ok := strings.Cut(kv, "=")
-		if !ok || !keepSet[k] {
-			out = append(out, kv)
+	candidates := []string{
+		"/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+		"/mnt/c/Program Files/PowerShell/7/pwsh.exe",
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
 		}
 	}
-	for _, k := range keep {
-		if v, ok := target[k]; ok {
-			out = append(out, k+"="+v)
-		}
-	}
-	return out
+	return "", fmt.Errorf("powershell.exe not found: not on PATH and not at /mnt/c/Windows/System32/WindowsPowerShell/v1.0/. Check WSL interop is enabled (appendWindowsPath in /etc/wsl.conf) or that /mnt/c is the WSL drvfs root")
 }
 
-// vscodeCLI locates the VS Code CLI shim usable from WSL. Looks at
-// PATH first (the case when this process was launched by a VS Code
-// integrated terminal), then falls back to the per-server shim at
-// ~/.vscode-server/bin/<commit>/bin/remote-cli/code which exists
-// whenever the Remote-WSL server is installed in this distro,
-// regardless of how the caller's shell PATH is configured. When
-// multiple server installs are present (after a VS Code update,
-// before old commits are reaped) we pick the most recently modified.
-func vscodeCLI() (string, error) {
-	if path, err := exec.LookPath("code"); err == nil {
-		return path, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("locate VS Code CLI: %w", err)
-	}
-	matches, _ := filepath.Glob(filepath.Join(home, ".vscode-server", "bin", "*", "bin", "remote-cli", "code"))
-	if len(matches) == 0 {
-		return "", fmt.Errorf("VS Code CLI not found: `code` is not on PATH and no shim exists under ~/.vscode-server/bin/*/bin/remote-cli/. Open this WSL session from VS Code (Remote-WSL) at least once to install the server, or run agent-status from VS Code's integrated terminal")
-	}
-	sort.Slice(matches, func(i, j int) bool {
-		fi, _ := os.Stat(matches[i])
-		fj, _ := os.Stat(matches[j])
-		if fi == nil || fj == nil {
-			return false
-		}
-		return fi.ModTime().After(fj.ModTime())
-	})
-	return matches[0], nil
+// appActivateCodeScript finds the first Code.exe with a main window
+// and brings it to the foreground via the COM WScript.Shell
+// AppActivate API. Exits non-zero when no Code.exe process is
+// running, so the caller surfaces a clear error in the TUI footer.
+const appActivateCodeScript = `
+$ws = New-Object -ComObject WScript.Shell
+$proc = Get-Process Code -ErrorAction SilentlyContinue |
+    Where-Object MainWindowHandle -ne 0 |
+    Select-Object -First 1
+if ($proc) {
+    $null = $ws.AppActivate($proc.Id)
+    exit 0
 }
+exit 1
+`
 
 // readEnviron parses /proc/<pid>/environ into a map. The file is a
 // NUL-separated list of KEY=VALUE entries. Returns an error only when
