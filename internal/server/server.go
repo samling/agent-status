@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,8 +28,11 @@ func Handler(s *state.Store) http.Handler {
 }
 
 type envelope struct {
-	SessionID     string `json:"session_id"`
-	HookEventName string `json:"hook_event_name"`
+	Agent          string `json:"agent"`
+	SessionID      string `json:"session_id"`
+	HookEventName  string `json:"hook_event_name"`
+	TranscriptPath string `json:"transcript_path"`
+	TurnID         string `json:"turn_id"`
 }
 
 func makeHookHandler(s *state.Store) http.HandlerFunc {
@@ -49,16 +53,38 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 			log.Printf("hook: unmarshal: %v (%d bytes)", err, len(body))
 		}
 
+		agent := inferAgent(env, r.URL.Query().Get("agent"))
 		receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
-		if err := s.RecordEvent(env.SessionID, env.HookEventName, receivedAt); err != nil {
+		if err := s.RecordEvent(agent, env.SessionID, env.HookEventName, env.TurnID, receivedAt); err != nil {
 			log.Printf("hook: record error session=%s event=%s: %v", state.ShortID(env.SessionID), env.HookEventName, err)
 			http.Error(w, "record failed", http.StatusInternalServerError)
 			return
 		}
-		log.Printf("hook: event=%s session=%s", env.HookEventName, state.ShortID(env.SessionID))
+		log.Printf("hook: agent=%s event=%s session=%s", agent, env.HookEventName, state.ShortID(env.SessionID))
 
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func inferAgent(env envelope, agentHint string) string {
+	if agent := strings.TrimSpace(env.Agent); agent != "" {
+		return state.NormalizeAgent(agent)
+	}
+	if agent := strings.TrimSpace(agentHint); agent != "" {
+		return state.NormalizeAgent(agent)
+	}
+	if isCodexTranscriptPath(env.TranscriptPath) {
+		return state.AgentCodex
+	}
+	return state.AgentClaudeCode
+}
+
+func isCodexTranscriptPath(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	path = filepath.ToSlash(path)
+	return strings.Contains(path, "/.codex/") || strings.HasPrefix(path, ".codex/")
 }
 
 func makeStateHandler(s *state.Store) http.HandlerFunc {

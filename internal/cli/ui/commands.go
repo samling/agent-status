@@ -61,8 +61,8 @@ func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
 		}
 		var detail discovery.TranscriptInfo
 		if focus != "" {
-			if md, ok := meta[focus]; ok && md.Cwd != "" {
-				detail, _ = discovery.LoadTranscript(focus, md.Cwd)
+			if md, ok := meta[focus]; ok {
+				detail, _ = discovery.LoadTranscriptForMeta(focus, md)
 			}
 		}
 		return snapshotMsg{
