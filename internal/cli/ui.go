@@ -58,6 +58,7 @@ var uiCmd = &cobra.Command{
 
 func init() {
 	uiCmd.Flags().Duration("interval", 500*time.Millisecond, "refresh interval")
+	uiCmd.Flags().Bool("quit-after-focus", false, "exit the TUI after focusing a session (useful when launched in a tmux popup)")
 }
 
 func runUI(cmd *cobra.Command, _ []string) error {
@@ -65,11 +66,13 @@ func runUI(cmd *cobra.Command, _ []string) error {
 	notesPath := state.NotesPath(statePath)
 	notes, _ := state.LoadNotes(notesPath)
 	interval, _ := cmd.Flags().GetDuration("interval")
+	quitAfterFocus, _ := cmd.Flags().GetBool("quit-after-focus")
 	p := tea.NewProgram(uiModel{
-		statePath: statePath,
-		notesPath: notesPath,
-		notes:     notes,
-		interval:  interval,
+		statePath:      statePath,
+		notesPath:      notesPath,
+		notes:          notes,
+		interval:       interval,
+		quitAfterFocus: quitAfterFocus,
 	}, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
@@ -106,8 +109,12 @@ type uiModel struct {
 	// When true, the bottom block shows the UI's config (state path,
 	// notes path, refresh interval) instead of the per-session detail.
 	showConfig bool
-	status     string // ephemeral footer message (e.g. focus result)
-	err        error
+	// When true, the program exits after a successful focus action.
+	// Useful when the TUI is launched in a tmux popup that should
+	// close itself once the user has picked a session.
+	quitAfterFocus bool
+	status         string // ephemeral footer message (e.g. focus result)
+	err            error
 }
 
 func (m uiModel) Init() tea.Cmd {
@@ -177,7 +184,11 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "down", "j":
 			m.moveSelection(+1)
 		case "enter":
-			m = m.focusSelected()
+			var cmd tea.Cmd
+			m, cmd = m.focusSelected()
+			if cmd != nil {
+				return m, cmd
+			}
 		case "s":
 			m.sort = m.sort.next()
 			sortSessions(m.sessions, m.sort)
@@ -323,26 +334,29 @@ func (m uiModel) commitNote() uiModel {
 	return m
 }
 
-func (m uiModel) focusSelected() uiModel {
+func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 	if m.selectedID == "" {
 		if len(m.sessions) == 0 {
 			m.status = "no sessions to focus"
-			return m
+			return m, nil
 		}
 		m.selectedID = m.sessions[0].SessionID
 	}
 	meta, ok := m.meta[m.selectedID]
 	if !ok || meta.PID <= 0 {
 		m.status = "no live PID for selected session"
-		return m
+		return m, nil
 	}
 	msg, err := focus.PID(meta.PID)
 	if err != nil {
 		m.status = "focus error: " + err.Error()
-		return m
+		return m, nil
 	}
 	m.status = msg
-	return m
+	if m.quitAfterFocus {
+		return m, tea.Quit
+	}
+	return m, nil
 }
 
 var (

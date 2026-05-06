@@ -1,0 +1,17 @@
+[Unit]
+Description=agent-status HTTP collector for Claude Code
+Documentation=https://github.com/samling/agent-status
+After=default.target
+
+[Service]
+Type=simple
+# Creates ~/.config/agent-status/ (or $XDG_CONFIG_HOME/agent-status), which
+# is where the binary writes/reads state.json by default. No --state flag
+# needed: the default matches.
+ConfigurationDirectory=agent-status
+ExecStart=/usr/bin/agent-status server
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
