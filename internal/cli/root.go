@@ -19,8 +19,8 @@ func Execute() error {
 
 // defaultStatePath returns ~/.config/agent-status/state.json, honoring
 // XDG_CONFIG_HOME when set. Falls back to a relative "state.json" if we
-// can't determine a home directory; the --state flag and AGENT_STATUS_STATE
-// env var still override.
+// can't determine a home directory; the --state flag and
+// AGENT_STATUS_STATE env var still override.
 func defaultStatePath() string {
 	base := os.Getenv("XDG_CONFIG_HOME")
 	if base == "" {
