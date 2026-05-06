@@ -66,11 +66,15 @@ func focusViaVSCode(ctx context.Context, pid int, targetEnv map[string]string) e
 	if err != nil || cwd == "" {
 		return fmt.Errorf("read /proc/%d/cwd: %v", pid, err)
 	}
-	cmd := exec.CommandContext(ctx, bin, cwd)
+	// -r / --reuse-window forces the shim to forward the open to the
+	// existing window the IPC handle points at, instead of letting
+	// VS Code's window-picking heuristic decide (which often spawns
+	// a new window even when the folder is already open).
+	cmd := exec.CommandContext(ctx, bin, "-r", cwd)
 	cmd.Env = forwardVSCodeEnv(targetEnv)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s %s: %v: %s", bin, cwd, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%s -r %s: %v: %s", bin, cwd, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
