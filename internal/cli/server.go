@@ -36,7 +36,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	if r, err := discovery.Run(cmd.Context(), s); err != nil {
+	if r, err := discovery.Run(s); err != nil {
 		log.Printf("discovery: error: %v", err)
 	} else {
 		log.Printf("discovery: scanned=%d alive=%d inserted=%d", r.Scanned, r.Alive, r.Inserted)

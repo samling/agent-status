@@ -84,6 +84,10 @@ type snapshotMsg struct {
 	meta      map[string]discovery.SessionMeta
 	detail    discovery.TranscriptInfo
 	detailFor string
+	// sortedBy records the sort mode used to produce sessions, so Update
+	// can skip re-sorting in the common case where the user hasn't
+	// changed the mode mid-load.
+	sortedBy sortMode
 }
 type errMsg struct{ err error }
 
@@ -141,7 +145,7 @@ func loadSnapshot(path, selectedID string, mode sortMode) tea.Cmd {
 				detail, _ = discovery.LoadTranscript(focus, md.Cwd)
 			}
 		}
-		return snapshotMsg{sessions: sessions, meta: meta, detail: detail, detailFor: focus}
+		return snapshotMsg{sessions: sessions, meta: meta, detail: detail, detailFor: focus, sortedBy: mode}
 	}
 }
 
@@ -204,7 +208,11 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.meta = msg.meta
 		m.detail = msg.detail
 		m.detailFor = msg.detailFor
-		sortSessions(m.sessions, m.sort)
+		// Snapshots are sorted at load time; only re-sort if the user
+		// flipped the mode while the load was in flight.
+		if msg.sortedBy != m.sort {
+			sortSessions(m.sessions, m.sort)
+		}
 		// If the previously-selected session disappeared, drop the selection.
 		if m.selectedID != "" && !sessionsContain(m.sessions, m.selectedID) {
 			m.selectedID = ""
@@ -335,14 +343,13 @@ func (m uiModel) commitNote() uiModel {
 }
 
 func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
-	if m.selectedID == "" {
-		if len(m.sessions) == 0 {
-			m.status = "no sessions to focus"
-			return m, nil
-		}
-		m.selectedID = m.sessions[0].SessionID
+	id := m.activeSelectionID()
+	if id == "" {
+		m.status = "no sessions to focus"
+		return m, nil
 	}
-	meta, ok := m.meta[m.selectedID]
+	m.selectedID = id
+	meta, ok := m.meta[id]
 	if !ok || meta.PID <= 0 {
 		m.status = "no live PID for selected session"
 		return m, nil
@@ -360,20 +367,20 @@ func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 }
 
 var (
-	titleStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	headerStyle       = lipgloss.NewStyle().Bold(true)
-	activeHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	panelHeaderStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	dimStyle          = lipgloss.NewStyle().Faint(true)
-	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	borderStyle       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	keyStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	// accentStyle is the bold-blue used for titles, active sort headers,
+	// panel headers, and key hints. They were four separate styles with
+	// identical settings; one alias keeps them in lockstep.
+	accentStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	headerStyle = lipgloss.NewStyle().Bold(true)
+	dimStyle    = lipgloss.NewStyle().Faint(true)
+	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	borderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 
 	selectedBG = lipgloss.Color("237")
 )
 
 func keyHint(key, desc string) string {
-	return keyStyle.Render(key) + " " + dimStyle.Render(desc)
+	return accentStyle.Render(key) + " " + dimStyle.Render(desc)
 }
 
 // columns describes the table layout. sortKey is the sortMode whose
@@ -431,7 +438,7 @@ func renderHeader(active sortMode, cwd int) string {
 			text = fmt.Sprintf("%-*s", c.width, text)
 		}
 		if c.sortKey == active {
-			parts = append(parts, activeHeaderStyle.Render(text))
+			parts = append(parts, accentStyle.Render(text))
 		} else {
 			parts = append(parts, headerStyle.Render(text))
 		}
@@ -463,7 +470,7 @@ func (m uiModel) View() string {
 	// detail block to the bottom of the inner box area.
 	var head, foot strings.Builder
 
-	head.WriteString(titleStyle.Render(fmt.Sprintf("agent-status, %d session(s)", len(m.sessions))))
+	head.WriteString(accentStyle.Render(fmt.Sprintf("agent-status, %d session(s)", len(m.sessions))))
 	head.WriteString("\n\n")
 
 	selectedID := m.selectedID
@@ -576,23 +583,26 @@ func (m uiModel) View() string {
 	return b.String()
 }
 
+// labeledField renders "label: value" with a faint label and falls back
+// to "-" when the value is empty. Shared between the detail and config
+// blocks so both panels stay visually consistent.
+func labeledField(label, value string) string {
+	if value == "" {
+		value = "-"
+	}
+	return dimStyle.Render(label+": ") + value
+}
+
 // renderConfig formats the UI's runtime configuration for the bottom
 // block. Mirrors renderDetail's faint-label / value layout so the box
 // looks consistent whether the foot is showing config or a session
 // detail.
 func (m uiModel) renderConfig() string {
-	labelStyle := lipgloss.NewStyle().Faint(true)
-	field := func(label, value string) string {
-		if value == "" {
-			value = "-"
-		}
-		return labelStyle.Render(label+": ") + value
-	}
 	return strings.Join([]string{
-		panelHeaderStyle.Render("Config"),
-		field("state", m.statePath),
-		field("notes", m.notesPath),
-		field("refresh", m.interval.String()),
+		accentStyle.Render("Config"),
+		labeledField("state", m.statePath),
+		labeledField("notes", m.notesPath),
+		labeledField("refresh", m.interval.String()),
 	}, "\n")
 }
 
@@ -605,21 +615,7 @@ func lineCount(s string) int {
 	return strings.Count(s, "\n") + 1
 }
 
-func short(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
-}
-
 func renderDetail(sessionID, note string, info discovery.TranscriptInfo, meta discovery.SessionMeta) string {
-	labelStyle := lipgloss.NewStyle().Faint(true)
-	field := func(label, value string) string {
-		if value == "" {
-			value = "-"
-		}
-		return labelStyle.Render(label+": ") + value
-	}
 	num := func(n int64) string {
 		if n <= 0 {
 			return "-"
@@ -635,23 +631,23 @@ func renderDetail(sessionID, note string, info discovery.TranscriptInfo, meta di
 		cache = fmt.Sprintf("%s read / %s create", num(info.CacheReadTokens), num(info.CacheCreationTokens))
 	}
 	prompt := truncate(collapseWS(info.LastUserPrompt), 100)
-	header := panelHeaderStyle.Render("Metadata")
+	header := accentStyle.Render("Metadata")
 	line1 := strings.Join([]string{
-		field("session", short(sessionID)),
-		field("model", info.Model),
-		field("branch", info.GitBranch),
-		field("mode", info.PermissionMode),
-		field("entrypoint", meta.Entrypoint),
+		labeledField("session", state.ShortID(sessionID)),
+		labeledField("model", info.Model),
+		labeledField("branch", info.GitBranch),
+		labeledField("mode", info.PermissionMode),
+		labeledField("entrypoint", meta.Entrypoint),
 	}, "   ")
 	line2 := strings.Join([]string{
-		field("turns", turns),
-		field("in", num(info.InputTokens)),
-		field("out", num(info.OutputTokens)),
-		field("cache", cache),
+		labeledField("turns", turns),
+		labeledField("in", num(info.InputTokens)),
+		labeledField("out", num(info.OutputTokens)),
+		labeledField("cache", cache),
 	}, "   ")
-	line3 := field("cwd", meta.Cwd)
-	line4 := field("note", note)
-	line5 := field("last", prompt)
+	line3 := labeledField("cwd", meta.Cwd)
+	line4 := labeledField("note", note)
+	line5 := labeledField("last", prompt)
 	return strings.Join([]string{header, line1, line2, line3, line4, line5}, "\n")
 }
 

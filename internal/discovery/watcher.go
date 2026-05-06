@@ -67,7 +67,7 @@ func Watch(ctx context.Context, s *state.Store) error {
 			case event.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
 				// File vanished: a session likely exited (including
 				// non-clean exits that skip SessionEnd). Trigger a reap.
-				if n, err := Reap(ctx, s); err != nil {
+				if n, err := Reap(s); err != nil {
 					log.Printf("watcher: reap after %s: %v", filepath.Base(event.Name), err)
 				} else if n > 0 {
 					log.Printf("watcher: reaped %d session(s) after file removal", n)
@@ -105,23 +105,16 @@ func processSessionFile(s *state.Store, path string) {
 		createdAt = time.UnixMilli(sf.StartedAt)
 	}
 	if inserted, err := s.MarkDiscovered(sf.SessionID, createdAt); err != nil {
-		log.Printf("watcher: mark discovered %s: %v", short(sf.SessionID), err)
+		log.Printf("watcher: mark discovered %s: %v", state.ShortID(sf.SessionID), err)
 	} else if inserted {
-		log.Printf("watcher: discovered new session %s", short(sf.SessionID))
+		log.Printf("watcher: discovered new session %s", state.ShortID(sf.SessionID))
 	}
 	changed, err := s.SetJSONLStatus(sf.SessionID, sf.Status)
 	if err != nil {
-		log.Printf("watcher: set jsonl status for %s: %v", sf.SessionID, err)
+		log.Printf("watcher: set jsonl status for %s: %v", state.ShortID(sf.SessionID), err)
 		return
 	}
 	if changed {
-		log.Printf("watcher: session %s jsonl_status=%q", short(sf.SessionID), sf.Status)
+		log.Printf("watcher: session %s jsonl_status=%q", state.ShortID(sf.SessionID), sf.Status)
 	}
-}
-
-func short(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
 }

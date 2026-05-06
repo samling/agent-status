@@ -42,24 +42,14 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 
 		receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
 		if err := s.RecordEvent(env.SessionID, env.HookEventName, receivedAt); err != nil {
-			log.Printf("hook: record error session=%s event=%s: %v", shortID(env.SessionID), env.HookEventName, err)
+			log.Printf("hook: record error session=%s event=%s: %v", state.ShortID(env.SessionID), env.HookEventName, err)
 			http.Error(w, "record failed", http.StatusInternalServerError)
 			return
 		}
-		log.Printf("hook: event=%s session=%s", env.HookEventName, shortID(env.SessionID))
+		log.Printf("hook: event=%s session=%s", env.HookEventName, state.ShortID(env.SessionID))
 
 		w.WriteHeader(http.StatusNoContent)
 	}
-}
-
-func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	if id == "" {
-		return "?"
-	}
-	return id
 }
 
 func makeStateHandler(s *state.Store) http.HandlerFunc {

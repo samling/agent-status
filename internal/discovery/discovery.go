@@ -1,7 +1,6 @@
 package discovery
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -40,7 +39,7 @@ type Result struct {
 // Run scans ~/.claude/sessions/*.json for live Claude Code sessions and
 // registers any session_id not yet present in state with a Discovered
 // marker. Existing sessions are not touched.
-func Run(ctx context.Context, s *state.Store) (Result, error) {
+func Run(s *state.Store) (Result, error) {
 	var r Result
 	alive, scanned, err := walkAlive()
 	if err != nil {
@@ -81,7 +80,7 @@ func LiveSessionMeta() (map[string]SessionMeta, error) {
 
 // Reap removes any state entry whose session_id is no longer backed by a
 // live session file. Returns the count removed.
-func Reap(ctx context.Context, s *state.Store) (int, error) {
+func Reap(s *state.Store) (int, error) {
 	alive, _, err := walkAlive()
 	if err != nil {
 		return 0, err
