@@ -20,7 +20,7 @@ go install github.com/samling/agent-status/cmd/agent-status@latest
 ### Build it yourself
 ```sh
 git clone https://github.com/samling/agent-status.git
-cd <repo>
+cd agent-status
 make install
 ```
 
