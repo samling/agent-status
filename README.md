@@ -20,7 +20,7 @@ go install github.com/samling/agent-status/cmd/agent-status@latest
 ### Build it yourself
 ```sh
 git clone https://github.com/samling/agent-status.git
-cd <repo>
+cd agent-status
 make install
 ```
 
@@ -84,6 +84,36 @@ agent-status ui
 ```
 
 See `agent-status -h` and subcommand `-h` output for configuration.
+
+### Run the collector as a user service
+
+A reference systemd user unit lives at `contrib/systemd/user/agent-status.service`. To install it:
+
+```sh
+make install-service
+systemctl --user enable --now agent-status
+```
+
+Or by hand:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp contrib/systemd/user/agent-status.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now agent-status
+```
+
+The unit assumes `agent-status` is on `PATH` at `/usr/bin/agent-status`. Edit `ExecStart=` if yours lives elsewhere (e.g. `~/go/bin/agent-status`).
+
+### Launch from a tmux popup
+
+Bind the UI to a tmux popup so it overlays the current pane and dismisses itself once you focus a session:
+
+```tmux
+bind o display-popup -E "agent-status ui --quit-after-focus"
+```
+
+The `--quit-after-focus` flag exits the TUI after `enter` focuses a session, which lets `display-popup -E` close the popup automatically. Omit the flag if you'd rather the popup stay open until you press `q`.
 
 ## Develop
 
