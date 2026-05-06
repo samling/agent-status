@@ -55,10 +55,25 @@ func Watch(ctx context.Context, s *state.Store) error {
 		log.Printf("discovery: scanned=%d alive=%d inserted=%d", scanned, len(alive), inserted)
 	}
 
+	// Periodic reap as a safety net for dead sessions whose file
+	// removal we missed (fsnotify drops events under load, the
+	// process crashed without unlinking, the SessionEnd hook had a
+	// case mismatch, etc.). Reap is cheap — one ReadDir + a stat
+	// per file plus a kill -0 per pid — so polling every 30s costs
+	// nothing and prevents stale rows from lingering in the TUI.
+	reap := time.NewTicker(30 * time.Second)
+	defer reap.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-reap.C:
+			if n, err := Reap(s); err != nil {
+				log.Printf("watcher: periodic reap: %v", err)
+			} else if n > 0 {
+				log.Printf("watcher: periodic reap removed %d stale session(s)", n)
+			}
 		case event, ok := <-w.Events:
 			if !ok {
 				return nil

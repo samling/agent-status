@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -261,7 +262,11 @@ func deriveStatus(r Session) string {
 }
 
 func isTerminal(event string) bool {
-	return event == "SessionEnd"
+	// Case-insensitive: Claude Code's hook payloads have varied
+	// between "SessionEnd" and lowercase variants in past versions,
+	// and we'd rather drop the entry than keep it around as a
+	// stale "active" row when the casing doesn't line up.
+	return strings.EqualFold(event, "SessionEnd")
 }
 
 // ShortID returns a display-friendly truncation of a session id (first 8
