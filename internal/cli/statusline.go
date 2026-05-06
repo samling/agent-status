@@ -1,9 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"text/template"
@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"github.com/samling/agent-status/internal/server"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -46,8 +47,15 @@ The template has access to:
 
 func init() {
 	statuslineCmd.Flags().String("format", "{{.Active}}/{{.Waiting}}/{{.Idle}}", "Go template applied to the statusline view")
-	statuslineCmd.Flags().String("server", "127.0.0.1:7878", "host:port to probe for the .Connected variable")
 	statuslineCmd.Flags().Bool("json", false, "emit JSON instead of evaluating the template")
+
+	bindings := map[string]string{
+		"statusline.format": "format",
+		"statusline.json":   "json",
+	}
+	for key, flag := range bindings {
+		_ = viper.BindPFlag(key, statuslineCmd.Flags().Lookup(flag))
+	}
 }
 
 // statuslineView is the data passed to the user-provided template.
@@ -62,20 +70,24 @@ type statuslineView struct {
 	Sessions  []state.Session
 }
 
-func runStatusline(cmd *cobra.Command, _ []string) error {
-	statePath := viper.GetString("state")
-	format, _ := cmd.Flags().GetString("format")
-	serverAddr, _ := cmd.Flags().GetString("server")
-	asJSON, _ := cmd.Flags().GetBool("json")
+func runStatusline(_ *cobra.Command, _ []string) error {
+	format := viper.GetString("statusline.format")
+	asJSON := viper.GetBool("statusline.json")
 
-	sessions, err := state.Load(statePath)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	sessions, err := server.LoadState(ctx, ServerEndpoint())
+	connected := err == nil
 	if err != nil {
-		return err
+		// Statusline is meant to render every poll; surface "no
+		// sessions, disconnected" instead of failing so tmux/waybar
+		// don't show their fallback text on every transient blip.
+		sessions = nil
 	}
 
 	view := statuslineView{
 		Total:     len(sessions),
-		Connected: probeServerReachable(serverAddr),
+		Connected: connected,
 		Sessions:  sessions,
 	}
 	for _, s := range sessions {
@@ -104,19 +116,4 @@ func runStatusline(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintln(os.Stdout, sb.String())
 	return nil
-}
-
-// probeServerReachable does a short TCP dial against addr to populate
-// .Connected. Mirrors the TUI's title-bar indicator so widget output
-// agrees with what the live UI shows.
-func probeServerReachable(addr string) bool {
-	if addr == "" {
-		return false
-	}
-	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }

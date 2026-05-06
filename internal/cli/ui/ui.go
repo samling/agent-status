@@ -23,8 +23,23 @@ import (
 	"github.com/samling/agent-status/internal/state"
 )
 
+// serverEndpoint mirrors cli.ServerEndpoint. Duplicated (rather than
+// imported) because the parent cli package imports this one, so a
+// reverse import would cycle. The composition is two viper reads;
+// keeping them inline beats inventing a shared helper package.
+func serverEndpoint() string {
+	addr := viper.GetString("server.addr")
+	port := viper.GetString("server.port")
+	if port == "" {
+		return addr
+	}
+	return addr + ":" + port
+}
+
 // Command returns the cobra subcommand registered by the parent cli
-// package. Constructed each call so the parent owns the lifetime.
+// package. Constructed each call so the parent owns the lifetime;
+// flags bind into the shared viper instance under the "ui." prefix
+// so they pick up values from config and AGENT_STATUS_UI_* env vars.
 func Command() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ui",
@@ -33,24 +48,29 @@ func Command() *cobra.Command {
 	}
 	cmd.Flags().Duration("interval", 500*time.Millisecond, "refresh interval")
 	cmd.Flags().Bool("quit-after-focus", false, "exit the TUI after focusing a session (useful when launched in a tmux popup)")
-	cmd.Flags().String("server", "127.0.0.1:7878", "host:port of the agent-status server, used for the connection indicator")
+
+	bindings := map[string]string{
+		"ui.interval":         "interval",
+		"ui.quit-after-focus": "quit-after-focus",
+	}
+	for key, flag := range bindings {
+		_ = viper.BindPFlag(key, cmd.Flags().Lookup(flag))
+	}
 	return cmd
 }
 
-func runUI(cmd *cobra.Command, _ []string) error {
+func runUI(_ *cobra.Command, _ []string) error {
 	statePath := viper.GetString("state")
 	notesPath := state.NotesPath(statePath)
 	notes, _ := state.LoadNotes(notesPath)
-	interval, _ := cmd.Flags().GetDuration("interval")
-	quitAfterFocus, _ := cmd.Flags().GetBool("quit-after-focus")
-	serverAddr, _ := cmd.Flags().GetString("server")
 	p := tea.NewProgram(uiModel{
 		statePath:      statePath,
 		notesPath:      notesPath,
+		configPath:     viper.ConfigFileUsed(),
 		notes:          notes,
-		interval:       interval,
-		quitAfterFocus: quitAfterFocus,
-		serverAddr:     serverAddr,
+		interval:       viper.GetDuration("ui.interval"),
+		quitAfterFocus: viper.GetBool("ui.quit-after-focus"),
+		serverAddr:     serverEndpoint(),
 	}, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
@@ -59,6 +79,9 @@ func runUI(cmd *cobra.Command, _ []string) error {
 type uiModel struct {
 	statePath  string
 	notesPath  string
+	// configPath is the YAML config file viper actually loaded, or
+	// empty when no config was found / `--config` was unset.
+	configPath string
 	interval   time.Duration
 	sessions   []state.Session
 	meta       map[string]discovery.SessionMeta
@@ -94,7 +117,7 @@ type uiModel struct {
 }
 
 func (m uiModel) Init() tea.Cmd {
-	return tea.Batch(loadSnapshot(m.statePath, m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
+	return tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
 }
 
 func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -146,7 +169,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showConfig = !m.showConfig
 		}
 	case tickMsg:
-		return m, tea.Batch(loadSnapshot(m.statePath, m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
+		return m, tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
 	case snapshotMsg:
 		m.sessions = msg.sessions
 		m.meta = msg.meta
