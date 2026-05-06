@@ -7,9 +7,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"agent-status/internal/discovery"
-	"agent-status/internal/server"
-	"agent-status/internal/state"
+	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/server"
+	"github.com/samling/agent-status/internal/state"
 )
 
 var serverCmd = &cobra.Command{
@@ -34,12 +34,6 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	s, err := state.Open(statePath)
 	if err != nil {
 		return err
-	}
-
-	if r, err := discovery.Run(cmd.Context(), s); err != nil {
-		log.Printf("discovery: error: %v", err)
-	} else {
-		log.Printf("discovery: scanned=%d alive=%d inserted=%d", r.Scanned, r.Alive, r.Inserted)
 	}
 
 	go func() {

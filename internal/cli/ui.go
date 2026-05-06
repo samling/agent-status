@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -11,9 +12,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"agent-status/internal/discovery"
-	"agent-status/internal/focus"
-	"agent-status/internal/state"
+	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/focus"
+	"github.com/samling/agent-status/internal/state"
 )
 
 type sortMode int
@@ -59,6 +60,7 @@ var uiCmd = &cobra.Command{
 func init() {
 	uiCmd.Flags().Duration("interval", 500*time.Millisecond, "refresh interval")
 	uiCmd.Flags().Bool("quit-after-focus", false, "exit the TUI after focusing a session (useful when launched in a tmux popup)")
+	uiCmd.Flags().String("server", "127.0.0.1:7878", "host:port of the agent-status server, used for the connection indicator")
 }
 
 func runUI(cmd *cobra.Command, _ []string) error {
@@ -67,12 +69,14 @@ func runUI(cmd *cobra.Command, _ []string) error {
 	notes, _ := state.LoadNotes(notesPath)
 	interval, _ := cmd.Flags().GetDuration("interval")
 	quitAfterFocus, _ := cmd.Flags().GetBool("quit-after-focus")
+	serverAddr, _ := cmd.Flags().GetString("server")
 	p := tea.NewProgram(uiModel{
 		statePath:      statePath,
 		notesPath:      notesPath,
 		notes:          notes,
 		interval:       interval,
 		quitAfterFocus: quitAfterFocus,
+		serverAddr:     serverAddr,
 	}, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
@@ -84,6 +88,14 @@ type snapshotMsg struct {
 	meta      map[string]discovery.SessionMeta
 	detail    discovery.TranscriptInfo
 	detailFor string
+	// sortedBy records the sort mode used to produce sessions, so Update
+	// can skip re-sorting in the common case where the user hasn't
+	// changed the mode mid-load.
+	sortedBy sortMode
+	// serverUp is the result of probing the collector's listen socket
+	// each tick. False when the dial fails, so the user has a visible
+	// signal that updates have stalled.
+	serverUp bool
 }
 type errMsg struct{ err error }
 
@@ -113,15 +125,22 @@ type uiModel struct {
 	// Useful when the TUI is launched in a tmux popup that should
 	// close itself once the user has picked a session.
 	quitAfterFocus bool
-	status         string // ephemeral footer message (e.g. focus result)
-	err            error
+	// serverAddr is the host:port used to probe whether the collector
+	// is up. Empty disables the probe and hides the indicator.
+	serverAddr string
+	// serverUp tracks the result of the most recent probe. Defaults to
+	// false so the indicator only shows green once we've confirmed
+	// reachability rather than misreporting at startup.
+	serverUp bool
+	status   string // ephemeral footer message (e.g. focus result)
+	err      error
 }
 
 func (m uiModel) Init() tea.Cmd {
-	return tea.Batch(loadSnapshot(m.statePath, m.selectedID, m.sort), tickEvery(m.interval))
+	return tea.Batch(loadSnapshot(m.statePath, m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
 }
 
-func loadSnapshot(path, selectedID string, mode sortMode) tea.Cmd {
+func loadSnapshot(path, serverAddr, selectedID string, mode sortMode) tea.Cmd {
 	return func() tea.Msg {
 		sessions, err := state.Load(path)
 		if err != nil {
@@ -141,8 +160,31 @@ func loadSnapshot(path, selectedID string, mode sortMode) tea.Cmd {
 				detail, _ = discovery.LoadTranscript(focus, md.Cwd)
 			}
 		}
-		return snapshotMsg{sessions: sessions, meta: meta, detail: detail, detailFor: focus}
+		return snapshotMsg{
+			sessions:  sessions,
+			meta:      meta,
+			detail:    detail,
+			detailFor: focus,
+			sortedBy:  mode,
+			serverUp:  probeServer(serverAddr),
+		}
 	}
+}
+
+// probeServer returns true when a TCP connection to addr succeeds
+// within a short timeout. Used as a liveness signal for the indicator
+// in the title bar; we don't speak any protocol because the server
+// might not have an HTTP path that's free of side effects.
+func probeServer(addr string) bool {
+	if addr == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func tickEvery(d time.Duration) tea.Cmd {
@@ -198,13 +240,18 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showConfig = !m.showConfig
 		}
 	case tickMsg:
-		return m, tea.Batch(loadSnapshot(m.statePath, m.selectedID, m.sort), tickEvery(m.interval))
+		return m, tea.Batch(loadSnapshot(m.statePath, m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
 	case snapshotMsg:
 		m.sessions = msg.sessions
 		m.meta = msg.meta
 		m.detail = msg.detail
 		m.detailFor = msg.detailFor
-		sortSessions(m.sessions, m.sort)
+		m.serverUp = msg.serverUp
+		// Snapshots are sorted at load time; only re-sort if the user
+		// flipped the mode while the load was in flight.
+		if msg.sortedBy != m.sort {
+			sortSessions(m.sessions, m.sort)
+		}
 		// If the previously-selected session disappeared, drop the selection.
 		if m.selectedID != "" && !sessionsContain(m.sessions, m.selectedID) {
 			m.selectedID = ""
@@ -335,14 +382,13 @@ func (m uiModel) commitNote() uiModel {
 }
 
 func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
-	if m.selectedID == "" {
-		if len(m.sessions) == 0 {
-			m.status = "no sessions to focus"
-			return m, nil
-		}
-		m.selectedID = m.sessions[0].SessionID
+	id := m.activeSelectionID()
+	if id == "" {
+		m.status = "no sessions to focus"
+		return m, nil
 	}
-	meta, ok := m.meta[m.selectedID]
+	m.selectedID = id
+	meta, ok := m.meta[id]
 	if !ok || meta.PID <= 0 {
 		m.status = "no live PID for selected session"
 		return m, nil
@@ -360,20 +406,23 @@ func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 }
 
 var (
-	titleStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	headerStyle       = lipgloss.NewStyle().Bold(true)
-	activeHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	panelHeaderStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	dimStyle          = lipgloss.NewStyle().Faint(true)
-	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	borderStyle       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	keyStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	// accentStyle is the bold-blue used for titles, active sort headers,
+	// panel headers, and key hints. They were four separate styles with
+	// identical settings; one alias keeps them in lockstep.
+	accentStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	headerStyle = lipgloss.NewStyle().Bold(true)
+	dimStyle    = lipgloss.NewStyle().Faint(true)
+	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	borderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+
+	connectedStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
+	disconnectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9"))
 
 	selectedBG = lipgloss.Color("237")
 )
 
 func keyHint(key, desc string) string {
-	return keyStyle.Render(key) + " " + dimStyle.Render(desc)
+	return accentStyle.Render(key) + " " + dimStyle.Render(desc)
 }
 
 // columns describes the table layout. sortKey is the sortMode whose
@@ -431,7 +480,7 @@ func renderHeader(active sortMode, cwd int) string {
 			text = fmt.Sprintf("%-*s", c.width, text)
 		}
 		if c.sortKey == active {
-			parts = append(parts, activeHeaderStyle.Render(text))
+			parts = append(parts, accentStyle.Render(text))
 		} else {
 			parts = append(parts, headerStyle.Render(text))
 		}
@@ -463,7 +512,15 @@ func (m uiModel) View() string {
 	// detail block to the bottom of the inner box area.
 	var head, foot strings.Builder
 
-	head.WriteString(titleStyle.Render(fmt.Sprintf("agent-status, %d session(s)", len(m.sessions))))
+	head.WriteString(accentStyle.Render("agent-status"))
+	if m.serverAddr != "" {
+		dot, label, style := "●", "connected", connectedStyle
+		if !m.serverUp {
+			label, style = "disconnected", disconnectedStyle
+		}
+		head.WriteString(" " + style.Render(dot) + " " + dimStyle.Render(label))
+	}
+	head.WriteString(accentStyle.Render(fmt.Sprintf(", %d session(s)", len(m.sessions))))
 	head.WriteString("\n\n")
 
 	selectedID := m.selectedID
@@ -498,8 +555,8 @@ func (m uiModel) View() string {
 					colVersion, ver,
 					cwdWidth, cwd,
 					colLastEvent, s.LastEvent,
-					colTransition, relTime(s.StatusAt),
-					colCreated, absTime(s.FirstSeenAt),
+					colTransition, relTime(s.StatusTime),
+					colCreated, absTime(s.FirstSeenTime),
 					colNote, note,
 				)
 				selected := s.SessionID == selectedID
@@ -576,23 +633,27 @@ func (m uiModel) View() string {
 	return b.String()
 }
 
+// labeledField renders "label: value" with a faint label and falls back
+// to "-" when the value is empty. Shared between the detail and config
+// blocks so both panels stay visually consistent.
+func labeledField(label, value string) string {
+	if value == "" {
+		value = "-"
+	}
+	return dimStyle.Render(label+": ") + value
+}
+
 // renderConfig formats the UI's runtime configuration for the bottom
 // block. Mirrors renderDetail's faint-label / value layout so the box
 // looks consistent whether the foot is showing config or a session
 // detail.
 func (m uiModel) renderConfig() string {
-	labelStyle := lipgloss.NewStyle().Faint(true)
-	field := func(label, value string) string {
-		if value == "" {
-			value = "-"
-		}
-		return labelStyle.Render(label+": ") + value
-	}
 	return strings.Join([]string{
-		panelHeaderStyle.Render("Config"),
-		field("state", m.statePath),
-		field("notes", m.notesPath),
-		field("refresh", m.interval.String()),
+		accentStyle.Render("Config"),
+		labeledField("state", m.statePath),
+		labeledField("notes", m.notesPath),
+		labeledField("server", m.serverAddr),
+		labeledField("refresh", m.interval.String()),
 	}, "\n")
 }
 
@@ -605,21 +666,7 @@ func lineCount(s string) int {
 	return strings.Count(s, "\n") + 1
 }
 
-func short(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
-}
-
 func renderDetail(sessionID, note string, info discovery.TranscriptInfo, meta discovery.SessionMeta) string {
-	labelStyle := lipgloss.NewStyle().Faint(true)
-	field := func(label, value string) string {
-		if value == "" {
-			value = "-"
-		}
-		return labelStyle.Render(label+": ") + value
-	}
 	num := func(n int64) string {
 		if n <= 0 {
 			return "-"
@@ -635,23 +682,23 @@ func renderDetail(sessionID, note string, info discovery.TranscriptInfo, meta di
 		cache = fmt.Sprintf("%s read / %s create", num(info.CacheReadTokens), num(info.CacheCreationTokens))
 	}
 	prompt := truncate(collapseWS(info.LastUserPrompt), 100)
-	header := panelHeaderStyle.Render("Metadata")
+	header := accentStyle.Render("Metadata")
 	line1 := strings.Join([]string{
-		field("session", short(sessionID)),
-		field("model", info.Model),
-		field("branch", info.GitBranch),
-		field("mode", info.PermissionMode),
-		field("entrypoint", meta.Entrypoint),
+		labeledField("session", state.ShortID(sessionID)),
+		labeledField("model", info.Model),
+		labeledField("branch", info.GitBranch),
+		labeledField("mode", info.PermissionMode),
+		labeledField("entrypoint", meta.Entrypoint),
 	}, "   ")
 	line2 := strings.Join([]string{
-		field("turns", turns),
-		field("in", num(info.InputTokens)),
-		field("out", num(info.OutputTokens)),
-		field("cache", cache),
+		labeledField("turns", turns),
+		labeledField("in", num(info.InputTokens)),
+		labeledField("out", num(info.OutputTokens)),
+		labeledField("cache", cache),
 	}, "   ")
-	line3 := field("cwd", meta.Cwd)
-	line4 := field("note", note)
-	line5 := field("last", prompt)
+	line3 := labeledField("cwd", meta.Cwd)
+	line4 := labeledField("note", note)
+	line5 := labeledField("last", prompt)
 	return strings.Join([]string{header, line1, line2, line3, line4, line5}, "\n")
 }
 
@@ -697,18 +744,16 @@ func shortPath(p string, max int) string {
 	return "..." + p[len(p)-max+3:]
 }
 
-func absTime(s string) string {
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		return s
+func absTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
 	}
 	return t.Local().Format("2006-01-02 15:04:05")
 }
 
-func relTime(s string) string {
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		return s
+func relTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
 	}
 	d := time.Since(t)
 	switch {

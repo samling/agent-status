@@ -11,7 +11,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"agent-status/internal/state"
+	"github.com/samling/agent-status/internal/state"
 )
 
 // Watch monitors ~/.claude/sessions/*.json for write/create events and
@@ -39,15 +39,20 @@ func Watch(ctx context.Context, s *state.Store) error {
 		return err
 	}
 
-	// Initial sweep so already-idle sessions get synced without waiting
-	// for the next on-disk update.
-	if entries, err := os.ReadDir(dir); err == nil {
-		for _, e := range entries {
-			if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-				continue
+	// Initial sweep: register every live session and sync its on-disk
+	// JSONL status so the state file is populated before any hooks fire.
+	// Filtered through walkAlive so dead-PID stragglers (uncleaned
+	// session files from prior crashes) don't get inserted.
+	if alive, scanned, err := walkAlive(); err != nil {
+		log.Printf("watcher: initial sweep: %v", err)
+	} else {
+		inserted := 0
+		for _, sf := range alive {
+			if applySessionFile(s, sf) {
+				inserted++
 			}
-			processSessionFile(s, filepath.Join(dir, e.Name()))
 		}
+		log.Printf("discovery: scanned=%d alive=%d inserted=%d", scanned, len(alive), inserted)
 	}
 
 	for {
@@ -67,7 +72,7 @@ func Watch(ctx context.Context, s *state.Store) error {
 			case event.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
 				// File vanished: a session likely exited (including
 				// non-clean exits that skip SessionEnd). Trigger a reap.
-				if n, err := Reap(ctx, s); err != nil {
+				if n, err := Reap(s); err != nil {
 					log.Printf("watcher: reap after %s: %v", filepath.Base(event.Name), err)
 				} else if n > 0 {
 					log.Printf("watcher: reaped %d session(s) after file removal", n)
@@ -98,30 +103,31 @@ func processSessionFile(s *state.Store, path string) {
 	if sf.SessionID == "" {
 		return
 	}
-	// Pick up sessions that started after the server did so they show
-	// up immediately, without waiting for a hook to fire.
+	applySessionFile(s, sf)
+}
+
+// applySessionFile registers sf with the state store and syncs its JSONL
+// status. Returns true when the session was newly inserted. Shared by
+// the initial sweep (which feeds it parsed entries from walkAlive) and
+// the per-event handler.
+func applySessionFile(s *state.Store, sf sessionFile) bool {
 	var createdAt time.Time
 	if sf.StartedAt > 0 {
 		createdAt = time.UnixMilli(sf.StartedAt)
 	}
-	if inserted, err := s.MarkDiscovered(sf.SessionID, createdAt); err != nil {
-		log.Printf("watcher: mark discovered %s: %v", short(sf.SessionID), err)
+	inserted, err := s.MarkDiscovered(sf.SessionID, createdAt)
+	if err != nil {
+		log.Printf("watcher: mark discovered %s: %v", state.ShortID(sf.SessionID), err)
 	} else if inserted {
-		log.Printf("watcher: discovered new session %s", short(sf.SessionID))
+		log.Printf("watcher: discovered new session %s", state.ShortID(sf.SessionID))
 	}
 	changed, err := s.SetJSONLStatus(sf.SessionID, sf.Status)
 	if err != nil {
-		log.Printf("watcher: set jsonl status for %s: %v", sf.SessionID, err)
-		return
+		log.Printf("watcher: set jsonl status for %s: %v", state.ShortID(sf.SessionID), err)
+		return inserted
 	}
 	if changed {
-		log.Printf("watcher: session %s jsonl_status=%q", short(sf.SessionID), sf.Status)
+		log.Printf("watcher: session %s jsonl_status=%q", state.ShortID(sf.SessionID), sf.Status)
 	}
-}
-
-func short(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
+	return inserted
 }

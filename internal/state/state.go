@@ -14,31 +14,34 @@ import (
 	"time"
 )
 
-// record is the persisted per-session payload. Status is derived at read
-// time from LastEvent and JSONLStatus together.
-type record struct {
+// Session is the unit of state, both on disk (as values in the
+// per-session map keyed by session id) and at the API surface.
+// SessionID and Status are derived: SessionID is filled from the map
+// key, and Status is computed by deriveStatus, both inside materialize.
+// They're tagged omitempty and the mutators never populate them on the
+// in-memory map values, so persist() omits them — derived state stays
+// out of the file. Consumer output (server /state, `state --json`) goes
+// through materialize, which sets them, so the wire shape is unchanged.
+type Session struct {
+	SessionID   string `json:"session_id,omitempty"`
+	Status      string `json:"status,omitempty"`
 	FirstSeenAt string `json:"first_seen_at"`
 	LastEvent   string `json:"last_event"`
 	LastEventAt string `json:"last_event_at"`
 	JSONLStatus string `json:"jsonl_status"` // last value of the "status" field in ~/.claude/sessions/<pid>.json
 	StatusAt    string `json:"status_at"`    // when derived status last transitioned
-}
 
-// Session is the materialized view returned to consumers.
-type Session struct {
-	SessionID   string `json:"session_id"`
-	Status      string `json:"status"`
-	FirstSeenAt string `json:"first_seen_at"`
-	LastEvent   string `json:"last_event"`
-	LastEventAt string `json:"last_event_at"`
-	JSONLStatus string `json:"jsonl_status"`
-	StatusAt    string `json:"status_at"`
+	// Parsed copies of FirstSeenAt and StatusAt, set by materialize so
+	// renderers don't re-parse RFC3339Nano strings on every frame.
+	// json:"-" keeps them off both the wire and the disk.
+	FirstSeenTime time.Time `json:"-"`
+	StatusTime    time.Time `json:"-"`
 }
 
 type Store struct {
 	path     string
 	mu       sync.Mutex
-	sessions map[string]record
+	sessions map[string]Session
 }
 
 func Open(path string) (*Store, error) {
@@ -47,7 +50,7 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	s := &Store{path: path, sessions: map[string]record{}}
+	s := &Store{path: path, sessions: map[string]Session{}}
 	if err := s.load(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
@@ -62,7 +65,7 @@ func (s *Store) load() error {
 	if len(b) == 0 {
 		return nil
 	}
-	var m map[string]record
+	var m map[string]Session
 	if err := json.Unmarshal(b, &m); err != nil {
 		return err
 	}
@@ -158,7 +161,7 @@ func (s *Store) MarkDiscovered(sessionID string, createdAt time.Time) (bool, err
 		createdAt = time.Now()
 	}
 	ts := createdAt.UTC().Format(time.RFC3339Nano)
-	s.sessions[sessionID] = record{
+	s.sessions[sessionID] = Session{
 		FirstSeenAt: ts,
 		LastEvent:   "Discovered",
 		LastEventAt: ts,
@@ -205,25 +208,23 @@ func Load(path string) ([]Session, error) {
 	if len(b) == 0 {
 		return nil, nil
 	}
-	var m map[string]record
+	var m map[string]Session
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
 	}
 	return materialize(m), nil
 }
 
-func materialize(m map[string]record) []Session {
+// materialize fills the derived fields on each entry (SessionID,
+// Status, parsed timestamps) and returns a sorted slice for consumers.
+func materialize(m map[string]Session) []Session {
 	out := make([]Session, 0, len(m))
-	for id, r := range m {
-		out = append(out, Session{
-			SessionID:   id,
-			Status:      deriveStatus(r),
-			FirstSeenAt: r.FirstSeenAt,
-			LastEvent:   r.LastEvent,
-			LastEventAt: r.LastEventAt,
-			JSONLStatus: r.JSONLStatus,
-			StatusAt:    r.StatusAt,
-		})
+	for id, s := range m {
+		s.SessionID = id
+		s.Status = deriveStatus(s)
+		s.FirstSeenTime, _ = time.Parse(time.RFC3339Nano, s.FirstSeenAt)
+		s.StatusTime, _ = time.Parse(time.RFC3339Nano, s.StatusAt)
+		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].StatusAt != out[j].StatusAt {
@@ -234,13 +235,13 @@ func materialize(m map[string]record) []Session {
 	return out
 }
 
-// deriveStatus reduces a session record into a coarse status. JSONL=idle
+// deriveStatus reduces a session entry into a coarse status. JSONL=idle
 // is treated as authoritative even over a recent Notification or
 // PermissionRequest — once Claude's engine has moved back to idle, the
 // user has either resolved or ignored the prompt and we follow the
 // engine's self-report. JSONL=busy paired with a user-attention event
 // stays "waiting" (engine working but user input still pending).
-func deriveStatus(r record) string {
+func deriveStatus(r Session) string {
 	if r.JSONLStatus == "idle" {
 		return "idle"
 	}
@@ -261,4 +262,16 @@ func deriveStatus(r record) string {
 
 func isTerminal(event string) bool {
 	return event == "SessionEnd"
+}
+
+// ShortID returns a display-friendly truncation of a session id (first 8
+// chars), or "?" when empty. Shared so logs and UI render ids identically.
+func ShortID(id string) string {
+	if id == "" {
+		return "?"
+	}
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
