@@ -1,6 +1,7 @@
 package focus
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -8,21 +9,23 @@ import (
 	"strings"
 )
 
-// Niri implements Compositor for the niri Wayland compositor via its
-// `niri msg` IPC.
-type Niri struct{}
+// niri is the Focuser for the niri Wayland compositor, talking over
+// `niri msg` IPC. Implements both Focuser and probingFocuser.
+type niri struct{}
 
-func (Niri) Name() string { return "niri" }
+func (*niri) Name() string { return "niri" }
 
-func (Niri) Available() bool {
-	_, err := exec.LookPath("niri")
-	return err == nil
+// Probe confirms the niri IPC is actually reachable. `niri msg
+// version` is a tiny round-trip that fails fast when the socket
+// isn't there or the binary isn't installed.
+func (*niri) Probe(ctx context.Context) error {
+	return exec.CommandContext(ctx, "niri", "msg", "version").Run()
 }
 
-func (n Niri) Focus(ancestors []int) (string, bool, error) {
-	windows, err := n.windows()
+func (n *niri) Focus(ctx context.Context, target Target) error {
+	windows, err := n.windows(ctx)
 	if err != nil {
-		return "", false, fmt.Errorf("niri windows: %w", err)
+		return fmt.Errorf("niri windows: %w", err)
 	}
 	pidToWindow := map[int]uint64{}
 	for _, w := range windows {
@@ -30,18 +33,18 @@ func (n Niri) Focus(ancestors []int) (string, bool, error) {
 			pidToWindow[*w.PID] = w.ID
 		}
 	}
-	for _, a := range ancestors {
+	for _, a := range target.Ancestors {
 		id, ok := pidToWindow[a]
 		if !ok {
 			continue
 		}
-		out, err := exec.Command("niri", "msg", "action", "focus-window", "--id", strconv.FormatUint(id, 10)).CombinedOutput()
+		out, err := exec.CommandContext(ctx, "niri", "msg", "action", "focus-window", "--id", strconv.FormatUint(id, 10)).CombinedOutput()
 		if err != nil {
-			return "", false, fmt.Errorf("niri focus-window: %v: %s", err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("niri focus-window: %v: %s", err, strings.TrimSpace(string(out)))
 		}
-		return "Focused window", true, nil
+		return nil
 	}
-	return "", false, nil
+	return ErrWindowNotFound
 }
 
 type niriWindow struct {
@@ -49,8 +52,8 @@ type niriWindow struct {
 	PID *int   `json:"pid"`
 }
 
-func (Niri) windows() ([]niriWindow, error) {
-	out, err := exec.Command("niri", "msg", "--json", "windows").Output()
+func (*niri) windows(ctx context.Context) ([]niriWindow, error) {
+	out, err := exec.CommandContext(ctx, "niri", "msg", "--json", "windows").Output()
 	if err != nil {
 		return nil, err
 	}

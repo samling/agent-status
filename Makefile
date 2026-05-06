@@ -2,13 +2,19 @@ BIN := bin/agent-status
 
 SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
 
-.PHONY: build install bootstrap install-service test clean
+# VERSION resolves to the closest git tag (with a "-dirty" suffix when
+# the working tree has uncommitted changes), or "dev" outside a git
+# checkout. Override with `make build VERSION=...`.
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -X github.com/samling/agent-status/internal/version.Version=$(VERSION)
+
+.PHONY: build install bootstrap install-service test check check-cross clean
 
 build:
-	go build -o $(BIN) ./cmd/agent-status
+	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/agent-status
 
 install:
-	go install ./cmd/agent-status
+	go install -ldflags "$(LDFLAGS)" ./cmd/agent-status
 
 bootstrap:
 	bash scripts/bootstrap.sh
@@ -22,6 +28,19 @@ install-service:
 
 test:
 	go test ./...
+
+# check runs vet + tests on the host platform.
+check:
+	go vet ./...
+	go test ./...
+
+# check-cross verifies every OS we ship build tags for compiles cleanly.
+# Useful when touching internal/focus/ or anything else with //go:build.
+check-cross:
+	@for os in linux darwin freebsd; do \
+	  echo "==> GOOS=$$os"; \
+	  GOOS=$$os go build ./... || exit 1; \
+	done
 
 clean:
 	rm -rf bin dist

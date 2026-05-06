@@ -6,11 +6,15 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/samling/agent-status/internal/cli/ui"
+	"github.com/samling/agent-status/internal/version"
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "agent-status",
-	Short: "Collect and inspect Claude Code hook events",
+	Use:     "agent-status",
+	Short:   "Collect and inspect Claude Code hook events",
+	Version: version.Get(),
 }
 
 func Execute() error {
@@ -39,5 +43,5 @@ func init() {
 	viper.SetEnvPrefix("AGENT_STATUS")
 	viper.AutomaticEnv()
 
-	rootCmd.AddCommand(serverCmd, stateCmd, uiCmd)
+	rootCmd.AddCommand(serverCmd, stateCmd, ui.Command())
 }

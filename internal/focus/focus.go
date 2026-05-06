@@ -1,47 +1,99 @@
+// Package focus brings external windows to the foreground for the
+// agent-status TUI. The public surface is a single capability —
+// PID(pid) — that walks the process ancestry and asks the appropriate
+// per-OS Focuser to focus the matching window.
+//
+// Layout:
+//
+//   - focus.go              public types, errors, and the PID() entry point
+//   - focus_linux.go        New() for Linux, with WSL-vs-compositor dispatch
+//   - focus_darwin.go       New() for macOS (stub today)
+//   - focus_unsupported.go  New() for everything else (always returns an error)
+//   - niri.go / wsl.go      per-environment Focuser implementations
+//   - proc.go / tmux.go     shared helpers (ancestry walk, tmux drilling)
 package focus
 
-import "fmt"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
 
-// PID focuses the OS window owning the given pid in its process ancestry,
-// then if a tmux pane is also in the ancestry, drills into that pane.
-//
-// The returned status string is human-readable and intended for a TUI
-// footer; the error is non-nil only on hard failures of subordinate
-// commands. Soft cases (no compositor available, no matching window, no
-// tmux pane in ancestry) return a descriptive status with nil error.
+// Focuser brings a session's window to the foreground. One Focuser is
+// selected per process by New() based on the runtime environment.
+type Focuser interface {
+	// Name is a short identifier used in status messages and logs.
+	Name() string
+	// Focus focuses the window matching target. Returns
+	// ErrWindowNotFound when no candidate window is owned by any pid
+	// in target.Ancestors; nil on success; another error on hard
+	// IPC failures.
+	Focus(ctx context.Context, target Target) error
+}
+
+// Target describes what to focus. Backends consume whichever fields
+// they can: today every focus call is anchored on a session pid and
+// its ancestry, but AppID/Title/WindowID exist for backends that
+// match windows by class/title/handle (Hyprland, KWin, macOS bundle
+// id) when they land.
+type Target struct {
+	PID       int
+	Ancestors []int // process ancestry, top-down from PID; populated by PID()
+	AppID     string
+	Title     string
+	WindowID  string
+}
+
+var (
+	// ErrUnsupportedPlatform is returned by New on operating systems
+	// where no integration has been wired up yet (everything outside
+	// Linux/macOS today).
+	ErrUnsupportedPlatform = errors.New("focus: unsupported platform")
+	// ErrNoBackend is returned by New when the platform is supported
+	// but no Focuser implementation matches the running environment
+	// (e.g. Linux with an unrecognised compositor).
+	ErrNoBackend = errors.New("focus: no usable backend detected")
+	// ErrWindowNotFound is returned by Focuser.Focus when none of the
+	// pids in Target.Ancestors own a window known to the backend.
+	ErrWindowNotFound = errors.New("focus: window not found")
+)
+
+// defaultTimeout caps each focus invocation so a hung IPC call (niri
+// socket, code shim, powershell.exe) can't freeze the TUI.
+const defaultTimeout = 5 * time.Second
+
+// PID is the high-level entry the TUI calls. It picks a Focuser for
+// the current environment, walks the ancestry of pid, focuses the
+// matching window, drills into a tmux pane if one exists, and returns
+// a status string suitable for the UI footer.
 func PID(pid int) (string, error) {
-	ancestors := walkAncestors(pid)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
 
-	var winMsg string
-	var winFound bool
-	for _, c := range compositors() {
-		if !c.Available() {
-			continue
-		}
-		msg, found, err := c.Focus(ancestors)
-		if err != nil {
-			return "", fmt.Errorf("%s: %w", c.Name(), err)
-		}
-		if found {
-			winMsg = msg
-			winFound = true
-			break
-		}
+	f, err := New(ctx)
+	if err != nil {
+		return "", err
 	}
 
-	paneMsg, err := findTmuxPane(ancestors)
-	if err != nil {
-		return winMsg, err
+	ancestors := walkAncestors(pid)
+	winErr := f.Focus(ctx, Target{PID: pid, Ancestors: ancestors})
+
+	paneMsg, paneErr := findAndFocusTmuxPane(ctx, ancestors)
+	if paneErr != nil {
+		return "", paneErr
 	}
 
 	switch {
-	case winFound && paneMsg != "":
+	case winErr == nil && paneMsg != "":
 		return "Focused window and tmux pane", nil
-	case winFound:
-		return winMsg, nil
-	case paneMsg != "":
+	case winErr == nil:
+		return fmt.Sprintf("Focused via %s", f.Name()), nil
+	case errors.Is(winErr, ErrWindowNotFound) && paneMsg != "":
 		return paneMsg, nil
-	default:
+	case errors.Is(winErr, ErrWindowNotFound):
 		return "Couldn't find a window or pane for this session", nil
+	default:
+		return "", fmt.Errorf("%s: %w", f.Name(), winErr)
 	}
 }
