@@ -10,68 +10,73 @@ For the higher-level picture, see [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md).
 
 1. `cmd/agent-status/main.go` calls `cli.Execute()`.
 2. Cobra's `PersistentPreRunE` runs `bootstrap` in `internal/cli/root.go`:
-   1. `loadConfig` reads `$XDG_CONFIG_HOME/agent-status/config.yaml` into viper.
-   2. `logging.Setup` installs `log/slog` as the default logger and, if
-      `LOG_TRACES` is not `off`, builds an OTel `TracerProvider` with
-      the configured exporter (`stdout`, `otlp-http`, or `otlp-grpc`).
+   1. `loadConfig` reads `$XDG_CONFIG_HOME/agent-status/config.yaml`
+      into viper. Precedence is CLI flags, then `AGENT_STATUS_*`
+      env vars, then the config file, then defaults.
+   2. `logging.Setup` (`internal/logging/logging.go`) installs
+      `log/slog` as the default logger and wraps it with
+      `traceHandler` (`internal/logging/handler.go`) so every record
+      auto-attaches `trace_id`/`span_id` whenever a span is in scope.
+      When `log.traces.enabled` is true it builds an OTel
+      `TracerProvider` with the configured exporter (`stdout`,
+      `otlp-http`, or `otlp-grpc`) and returns a shutdown func.
 3. The `server` subcommand's `runServer` (`internal/cli/server.go`):
    1. `state.Open(statePath)` reads the JSON state file into memory
       (creating an empty store if the file doesn't exist).
    2. Spawns `discovery.Watch(ctx, store)` in a goroutine.
-   3. If `server.notify.enabled`, builds and runs `notify.NewWatcher(...)`.
+   3. If `--notify` is set, builds and runs `notify.NewWatcher(...)`.
    4. Calls `http.ListenAndServe(addr, server.Handler(store))`.
 4. `discovery.Watch` (`internal/discovery/watcher.go`):
 
    The discovery system has two ways to learn about an agent's state:
 
    - **The slow path (always on)**: a 2 s poll that calls every
-     source's `scan` to enumerate the full alive set. Catches every
+     backend's `Scan` to enumerate the full alive set. Catches every
      change eventually, but only at tick granularity.
-   - **The fast path (per-agent, optional)**: a long-lived goroutine
-     that watches an agent-specific event source and pushes updates
-     directly into the store as they happen. For claude-code this
-     means an fsnotify watcher on `~/.claude/sessions/`, so a
-     SessionStart that creates a new JSON file shows up in the store
-     within milliseconds instead of waiting up to 2 s for the next
-     poll. There is no separate event from the agent itself; the
-     fast path is just "watch the place the agent already writes
-     state to, and react immediately."
+   - **The fast path (per-agent)**: a long-lived goroutine that
+     watches an agent-specific event source and pushes updates
+     directly into the store as they happen. For claude-code the
+     fast path is `claudecode.Watch`, an fsnotify watcher on
+     `~/.claude/sessions/`. For codex the fast path is `codex.Watch`,
+     an fsnotify watcher on `~/.codex/shell_snapshots/`; codex drops
+     a snapshot file at session open before any turns, so a
+     synthetic SessionStart shows up in the store within
+     milliseconds instead of waiting up to 2 s for the next poll.
 
-   An agent that has nothing useful to watch (like codex, which
-   stores everything in shared SQLite that gets rewritten constantly
-   for unrelated reasons) simply omits the fast path and lives on
-   the poll alone. Correctness never depends on the fast path - it
-   only changes how quickly a change is observed.
+   Correctness never depends on the fast path; the poll is the
+   backstop for both backends.
 
    Concretely:
 
    1. Calls `liveSources()` (`internal/discovery/discovery.go`) to
-      get the registered backends. Each `liveSource` has a required
-      `scan` (driven by the 2 s poll) and an optional `watch`
-      (the fast path). Today claude-code sets
-      `watch=watchClaudeFiles`; codex's `watch` is nil.
+      get the registered backends. Each `liveSource` carries a
+      required `scan` (driven by the 2 s poll) and an optional
+      `watch` (the fast path), plus per-agent `apply` and
+      `transcript` callbacks. Today both claudecode and codex set
+      `watch` to a non-nil function.
    2. For each source with a non-nil `watch`, spawns a goroutine
-      that runs `src.watch(ctx, store)` - claude-code's
-      `watchClaudeFiles` opens an fsnotify watcher and stays in a
-      Create/Write/Remove select for the lifetime of the server.
-      Errors from a fast path are logged but never block the poll.
+      that runs `src.watch(ctx, store)` for the lifetime of the
+      server. Errors from a fast path are logged but never block
+      the poll.
    3. Runs an initial `syncDiscovered("initial")` to populate the
       store from whatever's already alive on disk.
    4. Enters a loop on a 2 s ticker, calling `syncDiscovered("tick")`
       on each tick. `syncDiscovered` covers every agent:
-      1. Fires every source's `scan` in parallel goroutines
-         (claude-code reads `~/.claude/sessions/*.json`; codex opens
-         the two SQLite files read-only and joins `threads` against
-         `logs.process_uuid`). Both filter by `pidAlive(pid)`.
+      1. Fires every source's `scan` in parallel goroutines.
+         claudecode reads `~/.claude/sessions/*.json`; codex merges
+         the newest `state_*.sqlite` thread table, recent rollout
+         JSONLs (30 min grace), and `shell_snapshots/`, then joins
+         against `logs_*.sqlite` to map `thread_id -> pid`. Both
+         filter by `source.PIDAlive(pid)`.
       2. For each successful scan, applies the alive sessions via
-         `applyLiveSession` (which routes to `ApplyDiscovered` for
-         claude-code, `ReconcileDiscovered` for codex, or
-         `RecordObserved` for any future agent).
+         the per-agent upsert (`claudecode.Apply` in
+         `internal/discovery/claudecode/claudecode.go`,
+         `codex.Apply` in `internal/discovery/codex/codex.go`).
       3. Calls `store.ReapAbsentForAgent(ctx, src.agent, aliveSet)`
-         per source - the inline reap. Per-agent so a transient
-         scan error from one source can never drop another source's
-         rows. Dead sessions are dropped within ~2 s without
-         needing a separate periodic reap ticker.
+         per source: the inline reap. Per-agent so a transient
+         scan error from one source can never drop another
+         source's rows. Dead sessions are dropped within ~2 s
+         without needing a separate periodic reap ticker.
 
 ## 1. Claude Code: session start
 
@@ -79,141 +84,169 @@ When the user launches `claude` (or another claude-code entrypoint):
 
 1. Claude writes `~/.claude/sessions/<pid>.json` containing
    `{sessionId, pid, status:"idle", entrypoint, version, ...}`.
-2. fsnotify fires a Create event inside `watchClaudeFiles`
-   (`internal/discovery/claude_code.go`).
-3. `processClaudeSessionFile` reads and parses the file.
-4. `applyClaudeSessionFile` calls
-   `store.ApplyDiscovered(ctx, "claude-code", sessionID, "idle", createdAt)`,
-   which under one mutex acquisition:
-   1. Inserts a new `Session` row with `LastEvent="Discovered"`.
-   2. Sets `JSONLStatus="idle"`.
-   3. Persists the state file (`json.MarshalIndent` -> tmp -> rename).
-5. Logs `INFO discovery: new claude-code session`.
-6. Claude's `SessionStart` hook forwarder POSTs `/hook`.
-7. `traceMiddleware` (`internal/server/server.go`) extracts the W3C
-   `traceparent` header (if present) and starts an HTTP span.
+2. fsnotify Create fires inside `claudecode.Watch`
+   (`internal/discovery/claudecode/watch.go`).
+3. `processFile` reads and unmarshals the JSON.
+4. `applySessionFile` calls `claudecode.Apply`, which:
+   1. Calls `store.EnsureTrace(ctx, sessionID, "claude-code", mint)`
+      to allocate the session's persisted `(TraceID, RootSpanID)` on
+      first sight; `mint` runs `logging.NewSessionRoot`, which emits
+      a real exported `session.start` root span. Subsequent calls
+      are no-ops because the IDs are already on the row.
+   2. Inserts a new `Session` row with `LastEvent="Discovered"`,
+      `EngineStatus="idle"`, `Agent="claude-code"`, and persists.
+   3. Opens a backdated span via `logging.StartAt(...)` parented to
+      the session root, only when state actually changed.
+5. Logs `INFO discovery: claude-code session inserted`.
+6. Claude's `SessionStart` hook forwarder POSTs `/hook` with header
+   `X-Agent: claude-code` and a W3C `traceparent` (when tracing is
+   on at the agent side).
+7. `traceMiddleware` (`internal/server/server.go`) extracts the
+   `traceparent` via `logging.ExtractHTTP(r)` and runs the inner
+   handler with that context.
 8. `makeHookHandler`:
-   1. Opens a `server.hook` span.
-   2. Reads the body, decodes the JSON envelope.
-   3. `inferAgent` resolves the agent (`claude-code` here).
-   4. `state.NormalizeHookEvent` leaves `SessionStart` unchanged.
-   5. `store.RecordEvent(ctx, agent, sessionID, "SessionStart", turnID, receivedAt)`
-      finds the existing row (created in step 4), updates
-      `LastEvent`, persists. `deriveStatus` is unchanged because
-      `JSONLStatus="idle"` pins the row to `idle`.
-   6. Logs `INFO hook recorded`.
+   1. Reads the body and decodes the JSON envelope (`session_id`,
+      `hook_event_name`, `turn_id`, `tool_name`, `tool_use_id`,
+      `model`, `permission_mode`, `agent_id`, `agent_type`, ...).
+   2. Resolves the agent from the `X-Agent` header (defaults to
+      `unidentified` if absent).
+   3. Calls `store.EnsureTrace` (no-op here because step 4.1 already
+      stamped the IDs) and wraps the request context with
+      `logging.ContextWithSessionTrace` so child spans inherit the
+      session trace.
+   4. Opens a `server.hook` span carrying the parsed envelope as
+      attributes.
+   5. `store.RecordEvent(ctx, HookEvent{...})` finds the existing
+      row, updates `LastEvent="SessionStart"`, persists.
+      `DeriveStatus` is unchanged because `EngineStatus="idle"`
+      takes precedence over the hook event.
+   6. Logs `INFO hook recorded` (or `DEBUG hook ignored` when
+      `RecordEvent` reports `applied=false`).
 
 ## 2. Claude Code: turn
 
 The user submits a prompt:
 
 1. Claude writes `status:"busy"` to its session file.
-2. fsnotify Write → `applyClaudeSessionFile` →
-   `ApplyDiscovered(..., "busy", ...)`. `deriveStatus` flips
-   `idle` → `active`. Logs `INFO discovery: claude-code status transitioned`.
+2. fsnotify Write -> `claudecode.Apply(..., EngineStatus="busy", ...)`.
+   `DeriveStatus` flips `idle -> active`. Logs
+   `INFO discovery: claude-code status transitioned`.
 3. Claude's `UserPromptSubmit` hook POSTs `/hook`.
-4. `RecordEvent` upserts the row. `LastEvent` becomes
-   `UserPromptSubmit`, but `deriveStatus` keeps `active` because
-   `JSONLStatus="busy"` is still authoritative.
+4. `RecordEvent` updates the row. `LastEvent` becomes
+   `UserPromptSubmit`, but `DeriveStatus` keeps `active` because
+   `EngineStatus="busy"` takes precedence over the hook event.
 5. During tool calls, Claude fires `PreToolUse` and `PostToolUse`
-   hooks. Each goes through the same `/hook` -> `RecordEvent` path;
-   `deriveStatus` keeps the row at `active`.
+   hooks. Each goes through the same `/hook` -> `RecordEvent`
+   path; `DeriveStatus` keeps the row at `active`.
 6. If Claude needs the user's attention it fires `Notification` or
-   `PermissionRequest`. `deriveStatus`:
-   - `PermissionRequest` -> `waiting` even when `JSONLStatus="idle"`
+   `PermissionRequest`. `DeriveStatus`:
+   - `PermissionRequest` -> `waiting` even when `EngineStatus="idle"`
      (the engine being idle while a permission prompt is open just
      means "blocked on user").
-   - `Notification` -> `waiting`, but `JSONLStatus="idle"` overrides
-     it (intentional: once the engine is back to idle the user has
-     either resolved or ignored the prompt).
-7. Claude finishes, writes `status:"idle"`. fsnotify Write →
-   `ApplyDiscovered(..., "idle", ...)`. `deriveStatus` flips
-   `active` → `idle`.
+   - `Notification` -> `waiting`, but `EngineStatus="idle"`
+     overrides it (intentional: once the engine is back to idle
+     the user has either resolved or ignored the prompt).
+7. Claude finishes, writes `status:"idle"`. fsnotify Write ->
+   `claudecode.Apply(..., EngineStatus="idle", ...)`. `DeriveStatus`
+   flips `active -> idle`.
 8. Claude fires `Stop` hook. `RecordEvent("Stop")` updates
-   `LastEvent`; status stays `idle`.
+   `LastEvent`; `DeriveStatus` stays `idle` because `Stop` is in
+   the idle event list. There is no hook-event renaming on the
+   server side.
 
 ## 3. Claude Code: session end
 
 ### Clean exit
 
 1. Claude deletes its session file on shutdown.
-2. fsnotify Remove fires inside `watchClaudeFiles`.
-3. The handler runs `scanClaudeLive` (claude-only) to get the fresh
-   alive set, then calls
+2. fsnotify Remove fires inside `claudecode.Watch`.
+3. The handler runs `claudecode.Scan` (claude-only) to get the
+   fresh alive set, then calls
    `store.ReapAbsentForAgent(ctx, "claude-code", aliveSet)`.
-4. The exited session's row is deleted; the file is rewritten.
-5. The `SessionEnd` hook usually arrives shortly after. The handler
-   path is the same as step 1.7, but `RecordEvent` returns
-   `applied=false` because the row is already gone. The server logs
+4. The exited session's row is deleted; `state.json` is rewritten.
+5. The `SessionEnd` hook usually arrives shortly after.
+   `RecordEvent` short-circuits when it sees
+   `Event == "SessionEnd"` and deletes the row. If the row is
+   already gone (the watcher won the race), `RecordEvent` returns
+   `applied=false` and the server logs
    `DEBUG hook ignored (no state change)`.
 
 ### Hard exit (crash, kill -9, no Remove fires)
 
 1. The session file lingers; fsnotify sees nothing.
-2. Next 2 s `syncDiscovered` tick: `scanClaudeLive` filters by
-   `pidAlive(pid)`, which returns false. The dead session is absent
-   from the alive set.
-3. The inline `ReapAbsentForAgent` inside `syncDiscovered` drops the
-   row within ~2 s.
+2. Next 2 s `syncDiscovered` tick: `claudecode.Scan` filters by
+   `source.PIDAlive(pid)`, which returns false for the dead
+   process. The dead session is absent from the alive set.
+3. The inline `ReapAbsentForAgent` inside `syncDiscovered` drops
+   the row within ~2 s.
 
 ## 4. Codex: session start
 
-Codex has no per-session files; everything is in shared SQLite
-(`~/.codex/state_*.sqlite` and `logs_*.sqlite`).
+Codex has no per-session JSON files, but it writes a shell-snapshot
+file at session open, well before any turns:
 
-1. The user launches `codex`. Codex inserts a `threads` row and a
-   `process_uuid=pid:N` log entry.
-2. Codex's `SessionStart` hook POSTs `/hook?agent=codex`.
-3. `makeHookHandler` runs the same path as Claude's (read, decode,
-   `inferAgent` resolves `codex` from the query param).
-4. `state.NormalizeHookEvent("codex", "SessionStart")` leaves it
-   unchanged.
-5. `store.RecordEvent` inserts a new row with
-   `LastEvent="SessionStart"`, `JSONLStatus=""`. `deriveStatus`
-   returns `idle` because `SessionStart` is in the idle list.
-6. Logs `INFO hook recorded`.
-7. Up to 2 s later, `syncDiscovered` ticks. `scanCodexLive`
-   (`internal/discovery/codex.go`):
-   1. Opens `state_*.sqlite` read-only, queries the `threads` table
-      filtered by `archived=0`.
-   2. Opens `logs_*.sqlite` read-only, queries log rows whose
-      `process_uuid` starts with `pid:` to map `thread_id -> pid`.
-   3. For each thread, checks `pidAlive(pid)`; drops dead ones.
-8. `applyLiveSession` calls
-   `store.ReconcileDiscovered(ctx, "codex", sessionID, createdAt, event)`,
-   which corrects `FirstSeenAt` to the SQLite-derived creation
-   time. The `event` argument is `"SessionStart"` when the thread's
-   `created_at` is within `codexFreshSessionWindow` (30 s), else
-   `"Discovered"`; it is recorded on first insert only. The
-   reconcile path deliberately does NOT touch `LastEvent` or
-   `JSONLStatus` on existing rows, so the hook-driven status
-   survives subsequent polls.
+1. The user launches `codex`. Codex creates
+   `~/.codex/shell_snapshots/<sessionID>.<nanoTs>.sh`.
+2. fsnotify Create fires inside `codex.Watch`
+   (`internal/discovery/codex/watch.go`).
+3. `applySessionFromShellSnapshot` parses the filename to extract
+   the session UUID and start timestamp (falling back to mtime),
+   synthesizes a minimal `LiveSession` with `Event="SessionStart"`
+   and `Entrypoint="cli"`, and dispatches it through `codex.Apply`.
+4. `codex.Apply`:
+   1. Calls `store.EnsureTrace` (allocating IDs and a `session.start`
+      root span on first sight).
+   2. Inserts a new row with `LastEvent="SessionStart"`,
+      `Agent="codex"`, `EngineStatus=""` (codex has no
+      engine-status signal). `DeriveStatus` returns `idle` because
+      `SessionStart` is in the idle event list.
+   3. Opens a backdated span on the session trace.
+5. Codex's `SessionStart` hook POSTs `/hook` with header
+   `X-Agent: codex`. `makeHookHandler` runs the same path as
+   Claude's; `RecordEvent` finds the existing row and either
+   applies the update or returns `applied=false`.
+6. Up to 2 s later, the periodic `syncDiscovered` tick fires
+   `codex.Scan` (`internal/discovery/codex/codex.go`), which:
+   1. Reads the newest `~/.codex/state_*.sqlite` thread table
+      (filtered to `archived=0`) and the matching `logs_*.sqlite`
+      for the `thread_id -> pid` mapping.
+   2. Reads recent rollout JSONLs under `~/.codex/sessions/`
+      (30 min grace) for cwd, model, version, git branch.
+   3. Reads `shell_snapshots/` for any unmapped UUIDs still inside
+      the grace window.
+   4. Filters threads by `source.PIDAlive(pid)`.
+7. `codex.Apply` is called for each scan hit. On an existing row
+   it deliberately does NOT touch `LastEvent`, `LastEventAt`,
+   `TurnID`, or `EngineStatus`, so the hook-driven status survives
+   subsequent polls. It only refines durable metadata (e.g.
+   `FirstSeenAt` if discovery found an earlier timestamp, `Agent`
+   if still `unidentified`, `StatusAt` if never stamped).
 
 ## 5. Codex: turn
 
 1. User submits a prompt. Codex fires `UserPromptSubmit` (with a
-   `turn_id`). POST `/hook?agent=codex`.
-2. `RecordEvent("UserPromptSubmit")`. Codex has no `JSONLStatus`, so
-   `deriveStatus` falls through to the `default: active` branch.
-   Status flips `idle` → `active`.
+   `turn_id`). POST `/hook` with `X-Agent: codex`.
+2. `RecordEvent("UserPromptSubmit")`. Codex has no `EngineStatus`,
+   so `DeriveStatus` falls through to the default `active` branch.
+   Status flips `idle -> active`.
 3. Tool-call hooks (`PreToolUse`, `PostToolUse`) fire identically;
    the row stays `active`.
-4. Codex finishes the turn, fires `Stop`.
-5. `state.NormalizeHookEvent("codex", "Stop")` rewrites the event
-   to `TurnComplete` (claude uses `Stop` directly; codex's `Stop`
-   semantically matches a turn boundary, not a session end).
-6. `RecordEvent("TurnComplete")`. `deriveStatus` flips
-   `active` → `idle`.
+4. `PermissionRequest` flips status to `waiting`.
+5. Codex finishes the turn, fires `Stop`. `RecordEvent("Stop")`
+   updates `LastEvent`; `DeriveStatus` flips `active -> idle`
+   because `Stop` is in the idle event list. There is no
+   `Stop -> TurnComplete` rewrite anymore; the server records the
+   event as it was emitted.
 
 ## 6. Codex: session end
 
 Codex does not emit a `SessionEnd` hook. Exit looks like this:
 
-1. The user hits ctrl-c (or codex crashes). The process exits; the
-   SQLite thread row remains.
-2. Next 2 s `syncDiscovered` tick: `scanCodexLive` finds the thread
-   row but `pidAlive(pid)` returns false. The session is missing
-   from the alive set.
+1. The user hits ctrl-c (or codex crashes). The process exits;
+   the SQLite thread row remains.
+2. Next 2 s `syncDiscovered` tick: `codex.Scan` finds the thread
+   row but `source.PIDAlive(pid)` returns false. The session is
+   missing from the alive set.
 3. The inline `ReapAbsentForAgent(ctx, "codex", aliveSet)` inside
    `syncDiscovered` drops the row.
 
@@ -221,18 +254,23 @@ Codex does not emit a `SessionEnd` hook. Exit looks like this:
 
 There are no read-side HTTP endpoints. The collector is the single
 writer of `state.json` (via tmpfile + atomic rename in
-`internal/state/state.go`), which means any reader can `os.ReadFile`
-the file and get a consistent snapshot. Clients use this directly.
+`internal/state/state.go`), so any reader can `os.ReadFile` the
+file and get a consistent snapshot. Clients use this directly.
 
 ### Session list (TUI, `agent-status state`, `agent-status statusline`)
 
-1. `state.Load(path)` reads `state.json` and runs `materialize` to
-   fill derived fields (`SessionID`, `Status`, parsed timestamps).
-2. `discovery.LiveSessionMeta()` runs the per-agent scans in
-   parallel and returns a fresh `id -> SessionMeta` map (PID, cwd,
-   model, version) read from the agents' own home dirs.
-3. The TUI additionally calls `discovery.LoadTranscriptForMeta(...)`
-   for the focused row to render the detail panel.
+1. `state.Load(path)` reads `state.json` and parses derived fields
+   (`FirstSeenTime`, `StatusTime`).
+2. `discovery.LiveSessionMeta()` (`internal/discovery/discovery.go`)
+   fans the per-agent `Scan` calls out in parallel and returns a
+   fresh `id -> SessionMeta` map (PID, entrypoint, cwd, model,
+   version, transcript path) read from the agents' own home dirs.
+3. The TUI additionally calls
+   `discovery.LoadTranscript(sessionID, agent, meta)` for the
+   focused row to render the detail panel; the per-agent loaders
+   (`claudecode.Transcript`, `codex.Transcript`) go through
+   `source.LoadTranscriptPath`, which stat-caches the parsed
+   `TranscriptInfo` by path/mtime/size.
 
 ### Connectivity indicator
 
@@ -244,12 +282,12 @@ fraction of an HTTP round trip. Used by both the TUI tick and the
 
 ### Focus
 
-The TUI's `enter` handler (`internal/cli/ui/actions.go::focusSelected`)
-picks the active session, looks up its PID in the `meta` map already
-loaded by the tick (or re-runs `discovery.LiveSessionMeta()` if the
-session is brand new), and invokes `focus.PID(pid)`. No server
-involvement: compositor IPC must run on the host that owns the
-window, which is always the client.
+The TUI's `enter` handler
+(`internal/cli/ui/actions.go::focusSelected`) picks the active
+session, looks up its PID via `discovery.LiveSessionMeta()`, and
+invokes `focus.PID(pid)`. No server involvement: compositor IPC
+must run on the host that owns the window, which is always the
+client.
 
 `focus.PID(pid)` (`internal/focus/focus.go`):
 
@@ -262,38 +300,53 @@ window, which is always the client.
 
 ## 8. Notify watcher (when enabled)
 
-Runs in its own goroutine alongside `discovery.Watch`:
+Runs in its own goroutine alongside `discovery.Watch`
+(`internal/notify/watcher.go::(*Watcher).Run`):
 
-1. Polls `store.Sessions()` once per second; counts those with
-   `Status=="waiting"`.
-2. On a `0 -> 1+` transition, arms an initial timer
-   (`server.notify.initial-delay`).
-3. When that timer fires, builds `TemplateData`, renders the
-   `title` and `body` Go templates, calls the platform `Notifier`
-   (libnotify on Linux, ...) and arms a repeat timer if
-   `server.notify.repeat > 0`.
-4. If `server.notify.activation.enabled`, attaches an action button
-   whose click runs `focusFirstWaiting(store)`: it picks the
-   freshest waiting session straight from the in-process store,
-   resolves its PID via `discovery.LiveSessionMeta()`, and calls
-   `focus.PID` in the same process (the daemon and desktop are
-   always the same machine).
+1. Polls the in-process `store.Sessions()` once per second and
+   counts rows where `state.DeriveStatus(s) == "waiting"` via
+   `countWaiting()`.
+2. On a `0 -> 1+` transition, arms an `initial` timer
+   (`notify.initial-delay`).
+3. When the initial timer fires, the watcher calls `fire("initial")`,
+   which opens a `notify.fire` span, builds `TemplateData`, renders
+   the `title` and `body` Go templates, calls the platform
+   `Notifier` (libnotify on Linux, ...), and arms a repeat timer if
+   `notify.repeat > 0`.
+4. If `notify.activation.enabled`, attaches an action button whose
+   click runs `focusFirstWaiting(store)`: it picks the freshest
+   waiting session straight from the in-process store, resolves
+   its PID via `discovery.LiveSessionMeta()`, and calls `focus.PID`
+   in the same process (the daemon and desktop are always the same
+   machine).
 5. On `1+ -> 0`, stops both timers.
 
 ## 9. Cross-cutting: tracing and logging
 
-- Each public entry point on the server (the `/hook` handler,
-  discovery scans, notify fires, focus calls) opens a span via
-  `logging.Start`.
-- `traceHandler` (in `internal/logging/handler.go`) decorates the
-  default slog handler so every log record auto-attaches `trace_id`
-  and `span_id` whenever a span is in scope on the context.
+- Each session gets a persisted `(TraceID, RootSpanID)` pair on
+  first sight. `state.Store.EnsureTrace` allocates them lazily by
+  calling a `TraceMinter` (today: `logging.NewSessionRoot`, which
+  emits a real exported `session.start` OTel root span). Both
+  discovery's per-agent `Apply` and the hook handler call
+  `EnsureTrace`, so whichever sees the session first wins and
+  every later caller reuses the same IDs.
+- All session-scoped spans (claudecode/codex `Apply`,
+  `server.hook`, `notify.fire`) are parented to that session root,
+  producing one long-lived trace tree per session. Discovery's
+  `Apply` opens its span only when state actually changed, so
+  no-op polls don't pollute the trace.
+- `traceHandler` (`internal/logging/handler.go`) decorates the
+  default slog handler so every log record auto-attaches
+  `trace_id` and `span_id` whenever a span is in scope on the
+  context.
 - Cross-process trace propagation lives only on the hook path:
   agents that include a W3C `traceparent` header on their POST
   become parents of the server-side `server.hook` span. There is
-  no longer a CLI->server HTTP read path, so reads don't show up
-  in the trace stream.
-- When `LOG_TRACES=otlp[-grpc]` is set, all spans are exported via
-  the standard OTel SDK; configure the destination with the usual
-  `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS` env
-  vars.
+  no CLI -> server HTTP read path, so reads don't show up in the
+  trace stream.
+- When `log.traces.enabled` is true, all spans are exported via
+  the standard OTel SDK; `log.traces.exporter` selects between
+  `stdout`, `otlp-http`, and `otlp-grpc`, configured through the
+  `log.traces.otlp.*` keys (endpoint, headers, insecure, timeout,
+  compression). When disabled the global `TracerProvider` stays
+  `NoOp`.
