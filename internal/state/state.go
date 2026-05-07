@@ -1,7 +1,4 @@
-// Package state holds per-session status as a single point-in-time JSON
-// file. The server is the sole writer; readers (UI, `state` subcommand)
-// load the file directly. Writes use a temp-file + rename so readers
-// always see a consistent snapshot.
+// Package state persists live sessions as an atomically replaced JSON file.
 package state
 
 import (
@@ -17,15 +14,7 @@ import (
 	"time"
 )
 
-// Session is the unit of state, both on disk (as values in the
-// per-session map keyed by session id) and at the API surface.
-// SessionID and Status are derived: SessionID is filled from the map
-// key, and Status is computed by deriveStatus, both inside materialize.
-// They're tagged omitempty and the mutators never populate them on the
-// in-memory map values, so persist() omits them — derived state stays
-// out of the file. Reader paths (state.Load, `state --json`) go
-// through materialize, which sets them, so consumers always see the
-// derived fields populated.
+// Session is stored by session id; SessionID and Status are derived on read.
 type Session struct {
 	SessionID   string `json:"session_id,omitempty"`
 	Agent       string `json:"agent,omitempty"`
@@ -37,9 +26,7 @@ type Session struct {
 	JSONLStatus string `json:"jsonl_status"` // last observed engine status ("idle"|"busy") when the agent exposes one
 	StatusAt    string `json:"status_at"`    // when derived status last transitioned
 
-	// Parsed copies of FirstSeenAt and StatusAt, set by materialize so
-	// renderers don't re-parse RFC3339Nano strings on every frame.
-	// json:"-" keeps them off both the wire and the disk.
+	// Parsed timestamps for renderers; omitted from JSON.
 	FirstSeenTime time.Time `json:"-"`
 	StatusTime    time.Time `json:"-"`
 }
@@ -116,9 +103,7 @@ func (s *Store) persist(ctx context.Context) error {
 	return nil
 }
 
-// RecordEvent updates last_event / last_event_at for sessionID, setting
-// first_seen_at on first sight. Terminal events (SessionEnd) drop the
-// entry entirely; the UI shows only currently-live sessions.
+// RecordEvent applies one hook event to a live session.
 func (s *Store) RecordEvent(ctx context.Context, agent, sessionID, event, turnID, receivedAt string) (applied bool, err error) {
 	if sessionID == "" {
 		slog.DebugContext(ctx, "RecordEvent: empty session_id, dropping", "agent", agent, "event", event)
@@ -177,9 +162,6 @@ func (s *Store) RecordEvent(ctx context.Context, agent, sessionID, event, turnID
 			"agent", agent, "session", ShortID(sessionID), "event", event,
 			"prev_status", prevStatus, "new_status", newStatus)
 	} else {
-		// First time seeing this session: prev_status would be the
-		// deriveStatus of a zero-value Session, which is "active" by
-		// default and meaningless here. Log just the resulting status.
 		slog.DebugContext(ctx, "RecordEvent: applied (new session)",
 			"agent", agent, "session", ShortID(sessionID), "event", event,
 			"status", newStatus)
@@ -197,13 +179,7 @@ func NormalizeHookEvent(agent, event string) string {
 	return event
 }
 
-// ApplyDiscovered registers a session if it isn't present and sets its
-// JSONL engine status, all under one mutex acquisition. This is the
-// fsnotify hot path: every claude-code file write fires both an upsert
-// (cheap when the row already exists) and a status update, and merging
-// them halves the lock traffic vs. calling MarkDiscovered + SetJSONLStatus
-// separately. createdAt is the session's actual start time when known;
-// pass zero for the current time.
+// ApplyDiscovered upserts discovery status in one locked write.
 func (s *Store) ApplyDiscovered(ctx context.Context, agent, sessionID, jsonlStatus string, createdAt time.Time) (inserted, jsonlChanged, transitioned bool, err error) {
 	if sessionID == "" {
 		return false, false, false, nil
@@ -262,14 +238,7 @@ func (s *Store) ApplyDiscovered(ctx context.Context, agent, sessionID, jsonlStat
 	return inserted, jsonlChanged, transitioned, nil
 }
 
-// ReconcileDiscovered registers a session when absent and reconciles
-// durable identity metadata when present. It intentionally does not
-// update LastEvent or JSONLStatus on existing sessions, so database
-// polling cannot clobber hook-derived active/idle state. insertEvent
-// is the LastEvent value to record on first insert ("" defaults to
-// "Discovered"); pass "SessionStart" when the discovery layer can
-// distinguish a freshly-started session from one that was merely
-// noticed late.
+// ReconcileDiscovered updates durable metadata without clobbering hook state.
 func (s *Store) ReconcileDiscovered(ctx context.Context, agent, sessionID string, createdAt time.Time, insertEvent string) (bool, error) {
 	if sessionID == "" {
 		return false, nil
@@ -326,9 +295,7 @@ func (s *Store) ReconcileDiscovered(ctx context.Context, agent, sessionID string
 	return true, s.persist(ctx)
 }
 
-// RecordObserved upserts a session from a read-only agent state source,
-// preserving the original creation time and using the source's own event
-// timestamp when it is available.
+// RecordObserved upserts a session from a read-only agent source.
 func (s *Store) RecordObserved(ctx context.Context, agent, sessionID string, createdAt time.Time, event string, eventAt time.Time, engineStatus string) (bool, error) {
 	if sessionID == "" {
 		return false, nil
@@ -392,8 +359,7 @@ func (s *Store) RecordObserved(ctx context.Context, agent, sessionID string, cre
 	return true, s.persist(ctx)
 }
 
-// ReapAbsent drops any session whose id is not in alive. Returns the
-// number of entries removed.
+// ReapAbsent drops sessions not present in alive.
 func (s *Store) ReapAbsent(ctx context.Context, alive map[string]bool) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -412,9 +378,7 @@ func (s *Store) ReapAbsent(ctx context.Context, alive map[string]bool) (int, err
 	return n, s.persist(ctx)
 }
 
-// ReapAbsentForAgent is the provider-scoped variant of ReapAbsent. It
-// lets discovery sources fail independently without one missing scan
-// deleting another agent's rows.
+// ReapAbsentForAgent scopes reaping to one discovery source.
 func (s *Store) ReapAbsentForAgent(ctx context.Context, agent string, alive map[string]bool) (int, error) {
 	agent = NormalizeAgent(agent)
 	s.mu.Lock()
@@ -444,8 +408,7 @@ func (s *Store) Sessions() []Session {
 	return materialize(s.sessions)
 }
 
-// Load reads a state file without opening it for writes. Intended for
-// read-only consumers in separate processes.
+// Load reads state for separate read-only processes.
 func Load(path string) ([]Session, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -464,8 +427,7 @@ func Load(path string) ([]Session, error) {
 	return materialize(m), nil
 }
 
-// materialize fills the derived fields on each entry (SessionID,
-// Status, parsed timestamps) and returns a sorted slice for consumers.
+// materialize fills derived fields and returns newest status changes first.
 func materialize(m map[string]Session) []Session {
 	out := make([]Session, 0, len(m))
 	for id, s := range m {
@@ -485,24 +447,13 @@ func materialize(m map[string]Session) []Session {
 	return out
 }
 
-// deriveStatus reduces a session entry into a coarse status. JSONL=idle
-// is treated as authoritative even over a recent Notification or
-// PermissionRequest — once Claude's engine has moved back to idle, the
-// user has either resolved or ignored the prompt and we follow the
-// engine's self-report. JSONL=busy paired with a user-attention event
-// stays "waiting" (engine working but user input still pending).
+// deriveStatus reduces hook and engine state to active/waiting/idle.
 func deriveStatus(r Session) string {
-	// PermissionRequest is a hard block on user action: the engine
-	// reports JSONL=idle precisely *because* it's stuck waiting for
-	// approval. So it must beat the JSONL=idle override below.
+	// PermissionRequest is idle at the engine level but still user-blocked.
 	if r.LastEvent == "PermissionRequest" {
 		return "waiting"
 	}
-	// JSONL=idle is treated as authoritative even over a recent
-	// Notification — once Claude's engine has moved back to idle, the
-	// user has either resolved or ignored the prompt and we follow
-	// the engine's self-report. (PermissionRequest is the exception
-	// above, handled before this check.)
+	// Engine idle clears earlier user-attention events except permissions.
 	if r.JSONLStatus == "idle" {
 		return "idle"
 	}
@@ -521,10 +472,7 @@ func deriveStatus(r Session) string {
 }
 
 func isTerminal(event string) bool {
-	// Case-insensitive: Claude Code's hook payloads have varied
-	// between "SessionEnd" and lowercase variants in past versions,
-	// and we'd rather drop the entry than keep it around as a
-	// stale "active" row when the casing doesn't line up.
+	// Hook casing has varied across Claude Code versions.
 	return strings.EqualFold(event, "SessionEnd")
 }
 
@@ -542,8 +490,7 @@ func isTurnIdleEvent(event string) bool {
 	return event == "Stop" || event == "StopFailure" || event == "TurnComplete"
 }
 
-// ShortID returns a display-friendly truncation of a session id (first 8
-// chars), or "?" when empty. Shared so logs and UI render ids identically.
+// ShortID returns the first 8 chars of a session id, or "?".
 func ShortID(id string) string {
 	if id == "" {
 		return "?"

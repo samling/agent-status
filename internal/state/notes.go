@@ -7,11 +7,7 @@ import (
 	"path/filepath"
 )
 
-// NotesPath derives the notes file path from a state path: the notes
-// file lives next to state.json with the basename "notes.json". This
-// keeps user-supplied annotations out of the server-owned state file
-// (the server is the sole writer of state.json; the UI is the sole
-// writer of notes.json).
+// NotesPath places notes.json next to the state file.
 func NotesPath(statePath string) string {
 	if statePath == "" {
 		return "notes.json"
@@ -23,8 +19,7 @@ func NotesPath(statePath string) string {
 	return filepath.Join(dir, "notes.json")
 }
 
-// LoadNotes reads the notes file. A missing file is not an error and
-// returns an empty map.
+// LoadNotes reads notes, treating a missing file as empty.
 func LoadNotes(path string) (map[string]string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -46,10 +41,7 @@ func LoadNotes(path string) (map[string]string, error) {
 	return m, nil
 }
 
-// SaveNote writes (or clears, if text is empty) the note for sessionID
-// using a temp-file + rename so concurrent readers see a consistent
-// snapshot. Loads, mutates, and rewrites the whole file each call —
-// notes files are tiny and writes are rare.
+// SaveNote writes or clears one note via temp-file rename.
 func SaveNote(path, sessionID, text string) error {
 	if sessionID == "" {
 		return nil

@@ -24,12 +24,8 @@ var rootCmd = &cobra.Command{
 	PersistentPreRunE: bootstrap,
 }
 
-// configPathFlag overrides the config file location when set on the
-// command line. Empty means "look in the default search paths."
 var configPathFlag string
 
-// shutdownFn flushes any pending OTel spans on process exit. Set in
-// bootstrap, drained in Execute.
 var shutdownFn func(context.Context) error
 
 func Execute() error {
@@ -43,9 +39,6 @@ func Execute() error {
 	return err
 }
 
-// defaultConfigDir returns $XDG_CONFIG_HOME/agent-status, falling
-// back to $HOME/.config/agent-status. Used as the search root for
-// both the config file and the default state path.
 func defaultConfigDir() string {
 	base := os.Getenv("XDG_CONFIG_HOME")
 	if base == "" {
@@ -58,10 +51,6 @@ func defaultConfigDir() string {
 	return filepath.Join(base, "agent-status")
 }
 
-// defaultStatePath returns the default state.json path inside the
-// config dir, or a relative "state.json" when no home dir is
-// resolvable. The --state flag and AGENT_STATUS_STATE env var still
-// override.
 func defaultStatePath() string {
 	dir := defaultConfigDir()
 	if dir == "" {
@@ -70,12 +59,7 @@ func defaultStatePath() string {
 	return filepath.Join(dir, "state.json")
 }
 
-// ServerEndpoint joins server.addr and server.port into a single
-// host:port string. This is the canonical address for both the
-// collector's listen socket and every client that talks to it (TUI
-// connection probe, statusline probe, focus CLI, notify activation
-// callback). Consolidating here means the YAML config defines the
-// address exactly once instead of repeating it under each consumer.
+// ServerEndpoint returns server.addr[:server.port].
 func ServerEndpoint() string {
 	addr := viper.GetString("server.addr")
 	port := viper.GetString("server.port")
@@ -85,10 +69,6 @@ func ServerEndpoint() string {
 	return addr + ":" + port
 }
 
-// loadConfig reads the agent-status config file, if any, into the
-// viper instance. Best-effort: a missing file is not an error, since
-// most users will run on flag defaults alone. Parse errors are real
-// errors and abort startup so a typo doesn't silently fall back.
 func loadConfig() error {
 	if configPathFlag != "" {
 		viper.SetConfigFile(configPathFlag)
@@ -109,10 +89,6 @@ func loadConfig() error {
 	return nil
 }
 
-// bootstrap runs once before any command's RunE: it loads the YAML
-// config, then installs slog and (optionally) OTel using the merged
-// env+viper logging settings. Errors here abort the command rather
-// than running with no observability.
 func bootstrap(cmd *cobra.Command, _ []string) error {
 	if err := loadConfig(); err != nil {
 		return err
@@ -140,10 +116,7 @@ func init() {
 	_ = viper.BindPFlag("log.format", rootCmd.PersistentFlags().Lookup("log-format"))
 	_ = viper.BindPFlag("log.traces", rootCmd.PersistentFlags().Lookup("log-traces"))
 
-	// AGENT_STATUS_* env vars override config + defaults; flags
-	// override env. The replacer maps viper's dotted keys (e.g.
-	// "server.notify-body") to env names like
-	// AGENT_STATUS_SERVER_NOTIFY_BODY.
+	// Map dotted config keys to AGENT_STATUS_* env vars.
 	viper.SetEnvPrefix("AGENT_STATUS")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	viper.AutomaticEnv()

@@ -35,8 +35,7 @@ func init() {
 	genConfigCmd.Flags().Bool("force", false, "overwrite the output file if it already exists")
 }
 
-// defaultConfigYAML is the canonical "fresh install" config. Keep in
-// sync with the flag defaults defined in each subcommand's init().
+// defaultConfigYAML must stay in sync with flag defaults.
 const defaultConfigYAML = `# agent-status config
 #
 # All keys are optional. Precedence (high → low):

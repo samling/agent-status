@@ -14,59 +14,39 @@ import (
 	"github.com/samling/agent-status/internal/state"
 )
 
-// Config controls when and what the Watcher fires.
+// Config controls notification timing and templates.
 type Config struct {
-	// InitialDelay is the delay between the first 0→1 waiting
-	// transition and the first notification. Restarted only on
-	// fresh 0→1 transitions, so additional sessions joining the
-	// waiting bucket don't bump it.
+	// InitialDelay starts on a fresh 0->1 waiting transition.
 	InitialDelay time.Duration
 
-	// RepeatInterval is the gap between subsequent notifications
-	// while at least one session remains waiting. Set to 0 to fire
-	// only once per 0→1 episode.
+	// RepeatInterval is disabled when zero.
 	RepeatInterval time.Duration
 
-	// TitleTemplate and BodyTemplate are Go text/template strings
-	// rendered against TemplateData on each fire.
 	TitleTemplate string
 	BodyTemplate  string
 
-	// Activation, if non-nil, attaches an action button to every
-	// notification. The notify package never decides what an
-	// activation means; it just forwards clicks to OnActivate so
-	// the caller can call into the focus API (or anything else).
+	// Activation adds an action button and callback.
 	Activation *Activation
 }
 
-// Activation describes the optional action button. The notify package
-// has no opinion on what activation means: callers wire OnActivate to
-// whatever effect they want (today, picking the freshest waiting
-// session and calling focus.PID on its live PID).
+// Activation describes an optional action button.
 type Activation struct {
-	// Label is the user-visible button text (e.g. "Focus").
-	Label string
-	// OnActivate is invoked when the user clicks the action button.
-	// It runs in a goroutine owned by the Watcher; the ctx is the
-	// Watcher's Run ctx, so a shutdown will cancel in-flight calls.
+	Label      string
 	OnActivate func(ctx context.Context)
 }
 
-// TemplateData is what user-supplied templates render against.
-// Stable field set; new fields can be added without breaking
-// existing templates.
+// TemplateData is exposed to user notification templates.
 type TemplateData struct {
 	Total           int
 	Active          int
-	Waiting         int // count of waiting sessions
+	Waiting         int
 	Idle            int
-	Sessions        []state.Session // every live session
-	WaitingSessions []state.Session // just the waiting ones
-	First           *state.Session  // first waiting session (or nil)
+	Sessions        []state.Session
+	WaitingSessions []state.Session
+	First           *state.Session
 }
 
-// Watcher polls the state Store on a 1-second cadence, tracks the
-// waiting count, and fires the Notifier per the Config rules.
+// Watcher polls state and fires notifications.
 type Watcher struct {
 	cfg     Config
 	backend Notifier
@@ -75,9 +55,7 @@ type Watcher struct {
 	body    *template.Template
 }
 
-// NewWatcher builds a Watcher backed by the platform's Notifier.
-// Returns an error if the Config templates don't parse, or if no
-// Notifier is available (no daemon installed, unsupported OS, ...).
+// NewWatcher builds a Watcher with the platform Notifier.
 func NewWatcher(cfg Config, store *state.Store) (*Watcher, error) {
 	backend, err := New()
 	if err != nil {
@@ -94,23 +72,10 @@ func NewWatcher(cfg Config, store *state.Store) (*Watcher, error) {
 	return &Watcher{cfg: cfg, backend: backend, store: store, title: title, body: body}, nil
 }
 
-// Backend returns the underlying Notifier. Useful for logging which
-// daemon was selected.
+// Backend returns the selected Notifier.
 func (w *Watcher) Backend() Notifier { return w.backend }
 
-// Run polls every second until ctx is cancelled. Behavior:
-//
-//   - When waiting transitions 0 → 1+, start the InitialDelay timer.
-//   - When InitialDelay fires, send a notification and start the
-//     RepeatInterval timer.
-//   - On each RepeatInterval tick, re-check the waiting count: send
-//     another notification if still > 0, otherwise stop.
-//   - When waiting transitions 1+ → 0 at any point, cancel both
-//     timers and reset.
-//
-// Sessions joining the waiting bucket while we're already in a
-// pending or repeating cycle do NOT reset timers — only the 0 → 1+
-// edge starts a new cycle.
+// Run sends on the 0->1 waiting edge, then repeats while waiting remains.
 func (w *Watcher) Run(ctx context.Context) {
 	sample := time.NewTicker(1 * time.Second)
 	defer sample.Stop()
@@ -121,10 +86,6 @@ func (w *Watcher) Run(ctx context.Context) {
 		prevWaiting  int
 	)
 
-	// nilOrChan returns timer.C, or nil when timer is nil. Selecting
-	// on a nil channel blocks forever, which is exactly what we want
-	// when the timer is inactive — that case in the select is
-	// effectively skipped.
 	chanOf := func(t *time.Timer) <-chan time.Time {
 		if t == nil {
 			return nil
@@ -157,9 +118,6 @@ func (w *Watcher) Run(ctx context.Context) {
 					"prev_waiting", prevWaiting)
 				stopAll()
 			case waiting > 0 && prevWaiting == 0:
-				// Fresh 0 → 1+ transition: start the initial timer.
-				// (If existing timers somehow still exist, stop
-				// them first to be safe.)
 				slog.DebugContext(ctx, "notify: 0->1+ transition, arming initial timer",
 					"waiting", waiting, "delay", w.cfg.InitialDelay)
 				stopAll()
@@ -205,12 +163,6 @@ func (w *Watcher) countWaiting() int {
 	return n
 }
 
-// fire renders the title/body templates against the current state
-// and hands them to the backend. When Activation is configured, an
-// action button is attached and clicks are dispatched to a goroutine
-// that calls OnActivate; the goroutine exits when the backend closes
-// the activations channel (notification dismissed, expired, or
-// activated).
 func (w *Watcher) fire(ctx context.Context, reason string) error {
 	ctx, span := logging.Start(ctx, "notify.fire",
 		attribute.String("reason", reason))

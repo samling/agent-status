@@ -1,16 +1,4 @@
-// Package logging is the project's central logging and tracing setup.
-//
-// It wraps log/slog (level-gated structured logs) with optional
-// OpenTelemetry tracing. Every slog record automatically carries the
-// trace_id and span_id of the current span when one is in scope, so
-// you can correlate a log line back to the request/poll/fire that
-// produced it.
-//
-// Configuration sources (in precedence order):
-//
-//	1. Environment variables: LOG_LEVEL, LOG_FORMAT, LOG_TRACES.
-//	2. Viper keys: log.level, log.format, log.traces.
-//	3. Defaults: level=info, format=text, traces=off.
+// Package logging configures slog and optional tracing.
 package logging
 
 import (
@@ -22,8 +10,7 @@ import (
 	"strings"
 )
 
-// Config holds the resolved logging configuration. Use Resolve to
-// build one from env + viper.
+// Config holds resolved logging settings.
 type Config struct {
 	Level   slog.Level // log level threshold
 	Format  string     // "text" or "json"
@@ -32,8 +19,7 @@ type Config struct {
 	Service string     // OTel service.name; defaults to "agent-status"
 }
 
-// ParseLevel converts a string like "debug" or "DEBUG" to slog.Level.
-// Unrecognised values fall back to Info.
+// ParseLevel converts user input to slog.Level.
 func ParseLevel(s string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "debug", "trace":
@@ -49,11 +35,7 @@ func ParseLevel(s string) slog.Level {
 	}
 }
 
-// Redirect swaps the default slog handler to write to w, preserving
-// the configured level/format/trace attribution. Intended for
-// commands that take over the terminal (the TUI) and must not leak
-// log output onto the screen. Returns a function that restores the
-// previous handler.
+// Redirect sends default slog output to w until the returned restore runs.
 func Redirect(w io.Writer, cfg Config) func() {
 	prev := slog.Default()
 	opts := &slog.HandlerOptions{Level: cfg.Level}
@@ -68,9 +50,7 @@ func Redirect(w io.Writer, cfg Config) func() {
 	return func() { slog.SetDefault(prev) }
 }
 
-// Setup installs slog as the default logger and starts the OTel
-// tracer if configured. The returned shutdown function flushes any
-// pending spans; call it from main on exit.
+// Setup installs slog and tracing, returning a span-flush shutdown.
 func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error) {
 	out := cfg.Output
 	if out == nil {
@@ -107,15 +87,7 @@ func normFormat(s string) string {
 	return "text"
 }
 
-// normTraces collapses the user-facing exporter aliases into the
-// canonical mode names buildSpanExporter understands:
-//   - off                -> off
-//   - stdout / on / true -> stdout (pretty-prints to stderr)
-//   - otlp / otlp-http   -> otlp-http (default OTLP transport)
-//   - otlp-grpc          -> otlp-grpc
-//
-// Anything else is passed through verbatim so buildSpanExporter can
-// raise a clear error on it.
+// normTraces canonicalizes user-facing exporter aliases.
 func normTraces(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "", "off", "false", "no", "none":

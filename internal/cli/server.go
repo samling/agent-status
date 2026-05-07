@@ -16,12 +16,6 @@ import (
 	"github.com/samling/agent-status/internal/state"
 )
 
-// focusFirstWaiting returns a notification activation callback. The
-// notify watcher runs in-process with the collector, so this picks
-// the freshest waiting session straight from the store, scans for
-// its live PID, and calls focus.PID directly. No HTTP indirection —
-// the activation handler and the window-owning desktop are always
-// the same machine.
 func focusFirstWaiting(s *state.Store) func(context.Context) {
 	return func(ctx context.Context) {
 		var sessionID string
@@ -81,13 +75,13 @@ func init() {
 	serverCmd.Flags().String("notify-activation-label", "Focus", "label for the activation button when --notify-activation is set")
 
 	bindings := map[string]string{
-		"server.addr":                     "addr",
-		"server.port":                     "port",
-		"server.notify.enabled":           "notify",
-		"server.notify.initial-delay":     "notify-initial-delay",
-		"server.notify.repeat":            "notify-repeat",
-		"server.notify.title":             "notify-title",
-		"server.notify.body":              "notify-body",
+		"server.addr":                      "addr",
+		"server.port":                      "port",
+		"server.notify.enabled":            "notify",
+		"server.notify.initial-delay":      "notify-initial-delay",
+		"server.notify.repeat":             "notify-repeat",
+		"server.notify.title":              "notify-title",
+		"server.notify.body":               "notify-body",
 		"server.notify.activation.enabled": "notify-activation",
 		"server.notify.activation.label":   "notify-activation-label",
 	}
@@ -146,4 +140,3 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	slog.InfoContext(ctx, "collector listening", "addr", addr, "state", statePath)
 	return http.ListenAndServe(addr, server.Handler(s))
 }
-

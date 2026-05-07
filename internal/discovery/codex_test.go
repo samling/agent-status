@@ -31,8 +31,7 @@ func TestScanCodexLive(t *testing.T) {
 			model text,
 			git_branch text
 		)`)
-	// A live Codex process should be discovered even when its latest
-	// persisted activity is old; hooks provide the active/idle signal.
+	// Live process wins over old persisted activity.
 	now := time.Now().Add(-1 * time.Hour)
 	execTestSQL(t, stateDB, `
 		insert into threads (

@@ -1,10 +1,4 @@
-// Package server hosts the only network-facing surface of agent-status:
-// a single POST /hook endpoint that agent processes call to deliver
-// hook events. Everything else (session list, live meta, transcripts,
-// focus) is read directly from disk by clients on the same host. The
-// server's role in the architecture is "single writer of state.json
-// plus background watcher daemon"; readers are independent and atomic
-// rename guarantees they see consistent snapshots.
+// Package server hosts the POST /hook collector.
 package server
 
 import (
@@ -29,9 +23,6 @@ func Handler(s *state.Store) http.Handler {
 	return traceMiddleware(mux)
 }
 
-// traceMiddleware extracts any incoming W3C traceparent header so a
-// caller's span becomes the parent of the server-side span, then
-// emits a log line per request with method+path+status+duration.
 func traceMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, _ := logging.ExtractHTTP(r)
@@ -191,11 +182,6 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 				"record_dur", time.Since(recordStart),
 			)
 		} else {
-			// No-op writes happen when the session was already reaped
-			// (SessionEnd arriving after the file watcher dropped the
-			// row), when an event is for an unknown session, or when a
-			// turn-idle event repeats inside the same turn. Stay at
-			// DEBUG so INFO reflects only state-changing hooks.
 			slog.DebugContext(ctx, "hook ignored (no state change)",
 				"agent", agent,
 				"event", event,

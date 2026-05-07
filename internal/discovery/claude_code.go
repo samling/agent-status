@@ -20,7 +20,7 @@ import (
 type claudeSessionFile struct {
 	PID        int    `json:"pid"`
 	SessionID  string `json:"sessionId"`
-	StartedAt  int64  `json:"startedAt"` // Unix milliseconds; absent on some entrypoints
+	StartedAt  int64  `json:"startedAt"` // Unix milliseconds
 	Entrypoint string `json:"entrypoint"`
 	Cwd        string `json:"cwd"`
 	Status     string `json:"status"`  // "idle"|"busy"; absent for non-cli entrypoints
@@ -35,13 +35,6 @@ func claudeSessionsDir() (string, error) {
 	return filepath.Join(home, ".claude", "sessions"), nil
 }
 
-// watchClaudeFiles is claude-code's fast-path: an fsnotify watcher on
-// ~/.claude/sessions/ so per-session JSON updates land in state within
-// milliseconds instead of waiting up to one 2s poll. File removal
-// triggers a global reap so a session that exits without firing
-// SessionEnd doesn't linger. This is wired in as the watch field of
-// the claude-code liveSource (see liveSources in discovery.go); the
-// poll loop in Watch supervises it.
 func watchClaudeFiles(ctx context.Context, s *state.Store) error {
 	dir, err := claudeSessionsDir()
 	if err != nil {
@@ -82,11 +75,7 @@ func watchClaudeFiles(ctx context.Context, s *state.Store) error {
 					"file", filepath.Base(event.Name), "op", event.Op.String())
 				processClaudeSessionFile(eventCtx, s, event.Name)
 			case event.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
-				// File vanished: a claude session likely exited (incl.
-				// non-clean exits that skip SessionEnd). Reap claude
-				// only — a global Reap would also re-scan codex SQLite
-				// for nothing. The next 2s poll's inline reap is the
-				// backstop if this fast path errors.
+				// Reap only claude-code; the poll loop is the backstop.
 				slog.DebugContext(eventCtx, "discovery: claude file removed, reaping",
 					"file", filepath.Base(event.Name), "op", event.Op.String())
 				sessions, _, scanErr := scanClaudeLive()
@@ -147,12 +136,6 @@ func scanClaudeLive() ([]liveAgentSession, int, error) {
 	return out, scanned, nil
 }
 
-// walkClaudeAlive returns every parsed Claude session file whose PID is
-// still alive. scanned counts every parseable file regardless of
-// liveness. Parsed entries are cached keyed on (path, mtime, size) so
-// polling doesn't re-read every file under ~/.claude/sessions/ on each
-// refresh; pidAlive is checked unconditionally because liveness can
-// flip between polls without touching the file.
 func walkClaudeAlive() (alive []claudeSessionFile, scanned int, err error) {
 	dir, err := claudeSessionsDir()
 	if err != nil {
@@ -215,9 +198,6 @@ func processClaudeSessionFile(ctx context.Context, s *state.Store, path string) 
 	applyClaudeSessionFile(ctx, s, sf)
 }
 
-// applyClaudeSessionFile registers sf with the state store and syncs its
-// status in a single critical section. Returns true when the session
-// was newly inserted.
 func applyClaudeSessionFile(ctx context.Context, s *state.Store, sf claudeSessionFile) bool {
 	var createdAt time.Time
 	if sf.StartedAt > 0 {
@@ -238,14 +218,9 @@ func applyClaudeSessionFile(ctx context.Context, s *state.Store, sf claudeSessio
 			"pid", sf.PID, "entrypoint", sf.Entrypoint, "version", sf.Version,
 			"jsonl_status", sf.Status)
 	case transitioned:
-		// Real status change (e.g. idle -> active): worth INFO so a
-		// human reading the log sees the session move on.
 		slog.InfoContext(ctx, "discovery: claude-code status transitioned",
 			"session", state.ShortID(sf.SessionID), "jsonl_status", sf.Status)
 	case jsonlChanged:
-		// First observation of a JSONL status (or a same-derived-state
-		// flip): bookkeeping only, keep at DEBUG so INFO reflects real
-		// state changes.
 		slog.DebugContext(ctx, "discovery: claude-code jsonl_status recorded",
 			"session", state.ShortID(sf.SessionID), "jsonl_status", sf.Status)
 	}
@@ -263,10 +238,6 @@ var (
 	claudeWalkCache   = map[string]cachedClaudeSessionFile{}
 )
 
-// loadClaudeSessionFile returns the parsed session file at path, using
-// the (mtime, size) cache when present. The mutex is held only for
-// cache reads/writes; I/O happens unlocked, so concurrent callers may
-// race to re-parse the same file on a miss but that's harmless.
 func loadClaudeSessionFile(path string, mtime time.Time, size int64) (claudeSessionFile, bool) {
 	claudeWalkCacheMu.Lock()
 	cached, ok := claudeWalkCache[path]

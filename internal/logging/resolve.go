@@ -7,14 +7,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Resolve builds a Config from viper keys (log.level, log.format,
-// log.traces) with environment variables (LOG_LEVEL, LOG_FORMAT,
-// LOG_TRACES) taking precedence so a one-off `LOG_LEVEL=debug
-// agent-status server` works without touching the YAML.
-//
-// Resolve is safe to call before Viper has read its config file: it
-// will simply use whatever defaults Viper has registered, plus the
-// process environment.
+// Resolve builds Config from env first, then viper.
 func Resolve() Config {
 	level := envOr("LOG_LEVEL", viper.GetString("log.level"))
 	format := envOr("LOG_FORMAT", viper.GetString("log.format"))

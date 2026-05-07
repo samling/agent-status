@@ -26,9 +26,6 @@ func (m sortMode) String() string {
 	return "?"
 }
 
-// sortCycle orders sort modes left-to-right by their highlighted column,
-// so pressing `s` walks the highlight across the header in a predictable
-// direction rather than jumping around.
 var sortCycle = []sortMode{sortStatus, sortActivity, sortCreated}
 
 func (m sortMode) next() sortMode {
@@ -53,8 +50,6 @@ func sortSessions(ss []state.Session, mode sortMode) {
 			if ra != rb {
 				return ra < rb
 			}
-			// Within a status bucket, order by when the session
-			// started so rows don't churn on every JSONL blip.
 			if a.FirstSeenAt != b.FirstSeenAt {
 				return a.FirstSeenAt < b.FirstSeenAt
 			}

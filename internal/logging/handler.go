@@ -7,9 +7,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// traceHandler decorates an underlying slog.Handler so every record
-// carries the current span's trace_id and span_id when a span is in
-// scope on the context.
+// traceHandler adds trace IDs to slog records when present.
 type traceHandler struct {
 	slog.Handler
 }

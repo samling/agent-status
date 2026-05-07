@@ -40,12 +40,7 @@ type codexProcess struct {
 
 const codexUnlinkedThreadGrace = 30 * time.Minute
 
-// codexFreshSessionWindow is the grace period during which a newly
-// observed thread is treated as a brand-new session: the discovery
-// loop labels it "SessionStart" so the UI can distinguish "just
-// started" from "already running, just noticed". Wider than one poll
-// interval so a session created right before the watcher boots is
-// still labelled correctly on the initial sweep.
+// codexFreshSessionWindow labels very new threads as SessionStart.
 const codexFreshSessionWindow = 30 * time.Second
 
 func scanCodexLive() ([]liveAgentSession, int, error) {
@@ -110,11 +105,7 @@ func scanCodexLive() ([]liveAgentSession, int, error) {
 		}
 		event := "Discovered"
 		eventAt := updatedAt
-		// Fresh thread → emit SessionStart so first-time insertion in
-		// state records the actual lifecycle event instead of a
-		// generic "Discovered". The state store's ReconcileDiscovered
-		// only honors this on insert, so a re-poll of the same fresh
-		// session won't clobber later hook-driven events.
+		// ReconcileDiscovered only honors SessionStart on first insert.
 		if !th.CreatedAt.IsZero() && now.Sub(th.CreatedAt) < codexFreshSessionWindow {
 			event = "SessionStart"
 			eventAt = th.CreatedAt

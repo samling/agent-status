@@ -11,18 +11,10 @@ import (
 	"github.com/samling/agent-status/internal/state"
 )
 
-// Watch runs the polyglot discovery loop: a 2s scan that fans out to
-// every registered source and an inline+periodic reap. Sources that
-// have a faster fast-path (claude-code's per-session file, watched
-// via fsnotify) hook in by exposing a non-nil watch function on their
-// liveSource entry; this main loop just supervises them. Runs until
-// ctx is cancelled.
+// Watch polls every discovery source until ctx is cancelled.
 func Watch(ctx context.Context, s *state.Store) error {
 	sources := liveSources()
 
-	// Per-source live watchers. Each runs independently so a failing
-	// fast-path can't block the polling loop, and so adding a new
-	// agent never has to touch this function.
 	for _, src := range sources {
 		if src.watch == nil {
 			continue
@@ -35,10 +27,7 @@ func Watch(ctx context.Context, s *state.Store) error {
 		}(src)
 	}
 
-	// Initial sweep: register every live session and sync its on-disk
-	// status so the state file is populated before any hooks fire.
-	// Filtered through each provider's liveness check so dead-PID
-	// stragglers from prior crashes don't get inserted.
+	// Populate state before hook traffic arrives.
 	if scanned, alive, updated, err := syncDiscovered(ctx, s, "initial"); err != nil {
 		slog.ErrorContext(ctx, "discovery: initial sweep failed", "err", err)
 	} else {
@@ -48,11 +37,6 @@ func Watch(ctx context.Context, s *state.Store) error {
 
 	discover := time.NewTicker(2 * time.Second)
 	defer discover.Stop()
-
-	// No separate periodic reap: syncDiscovered now does a per-agent
-	// inline reap on every successful scan, so a 30s ticker would be
-	// pure redundancy. If a transient scan error skips the inline
-	// reap, the next 2s tick covers it.
 
 	for {
 		select {
@@ -119,12 +103,8 @@ func syncDiscovered(ctx context.Context, s *state.Store, reason string) (scanned
 				updated++
 			}
 		}
-		// Inline reap on a successful scan so a session whose process
-		// exited without firing SessionEnd (codex on ctrl-c, or any
-		// crash) is dropped within one poll cycle (~2s) instead of
-		// waiting up to 30s for the periodic reap. Per-agent so a
-		// missing scan from one source can't delete another agent's
-		// rows. Skipped on error for the same reason.
+		// Reap per-agent after successful scans so one source failure
+		// cannot delete another source's rows.
 		n, reapErr := s.ReapAbsentForAgent(ctx, res.agent, aliveSet)
 		if reapErr != nil {
 			slog.WarnContext(ctx, "discovery: inline reap failed",

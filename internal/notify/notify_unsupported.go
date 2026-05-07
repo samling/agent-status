@@ -2,9 +2,7 @@
 
 package notify
 
-// New is the catch-all stub for operating systems we don't yet
-// integrate with (FreeBSD, Windows native, etc.). Always returns
-// ErrUnsupportedPlatform.
+// New is the unsupported-platform stub.
 func New() (Notifier, error) {
 	return nil, ErrUnsupportedPlatform
 }

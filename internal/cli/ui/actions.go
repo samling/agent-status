@@ -10,10 +10,6 @@ import (
 	"github.com/samling/agent-status/internal/state"
 )
 
-// moveSelection shifts the highlighted row by delta, clamped to the
-// visible session range. If selectedID is unset or stale we treat
-// row 0 (the View's default) as the starting point so the delta
-// applies on the first keystroke.
 func (m *uiModel) moveSelection(delta int) {
 	if len(m.sessions) == 0 {
 		m.selectedID = ""
@@ -35,8 +31,6 @@ func (m *uiModel) moveSelection(delta int) {
 	m.selectedID = m.sessions[next].SessionID
 }
 
-// activeSelectionID returns the currently focused session id, falling
-// back to the visible first row when the user hasn't picked anything.
 func (m uiModel) activeSelectionID() string {
 	if m.selectedID != "" {
 		return m.selectedID
@@ -93,13 +87,6 @@ func (m uiModel) commitNote() uiModel {
 	return m
 }
 
-// focusSelected resolves the active session to a live PID and
-// invokes focus.PID locally. Both the meta lookup and the compositor
-// IPC must run on the host that owns the window — which is always
-// this process — so neither leaves the client. m.meta is refreshed
-// every tick from the same discovery scan; we re-scan here only when
-// the selected session was added since the last tick and isn't in
-// the cached map yet.
 func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 	id := m.activeSelectionID()
 	if id == "" {

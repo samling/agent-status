@@ -12,10 +12,7 @@ import (
 	"github.com/samling/agent-status/internal/state"
 )
 
-// TranscriptInfo summarizes the per-session transcript exposed by the
-// backing agent. Fields are derived from the most recent assistant turn
-// (Model, GitBranch, Version) or summed across the whole transcript
-// (token counts, TurnCount).
+// TranscriptInfo summarizes one agent transcript.
 type TranscriptInfo struct {
 	Model               string
 	GitBranch           string
@@ -29,9 +26,7 @@ type TranscriptInfo struct {
 	LastUserPrompt      string // raw text of the most recent user-typed prompt
 }
 
-// LoadTranscript reads the transcript for sessionID under cwd. Returns
-// the zero value (no error) if the file does not exist yet — useful for
-// freshly started sessions that have no assistant turns.
+// LoadTranscript reads a Claude transcript, returning zero for missing files.
 func LoadTranscript(sessionID, cwd string) (TranscriptInfo, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -98,9 +93,7 @@ var (
 	transcriptCache = map[string]cachedTranscript{}
 )
 
-// encodePath mirrors Claude Code's encoding of a cwd into a project
-// directory name: every non-alphanumeric byte becomes '-'. So
-// "/home/me/.local/x" → "-home-me--local-x".
+// encodePath mirrors Claude Code's cwd-to-project-dir encoding.
 func encodePath(p string) string {
 	var b strings.Builder
 	b.Grow(len(p))
@@ -289,8 +282,7 @@ type codexEventMsg struct {
 	} `json:"info"`
 }
 
-// extractUserPrompt pulls the textual content from a user-line message.
-// Returns "" if the content is a tool_result or otherwise non-textual.
+// extractUserPrompt returns typed text and ignores tool results.
 func extractUserPrompt(content json.RawMessage) string {
 	if len(content) == 0 {
 		return ""
@@ -300,8 +292,6 @@ func extractUserPrompt(content json.RawMessage) string {
 	if err := json.Unmarshal(content, &s); err == nil {
 		return s
 	}
-	// Multimodal prompts come through as a content-block array; take
-	// the first text block, ignoring tool_result entries.
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`

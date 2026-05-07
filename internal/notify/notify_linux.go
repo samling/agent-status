@@ -10,12 +10,7 @@ import (
 	"strings"
 )
 
-// New returns a notify-send-backed Notifier when the binary is on
-// PATH, otherwise an error explaining how to install it. notify-send
-// speaks the freedesktop.org org.freedesktop.Notifications D-Bus
-// spec, which every major Linux notification daemon implements
-// (Dunst, Mako, GNOME, KDE/Plasma, swaync, ...), so we don't pin to
-// any one daemon.
+// New returns a notify-send backend when available.
 func New() (Notifier, error) {
 	bin, err := exec.LookPath("notify-send")
 	if err != nil {
@@ -30,11 +25,7 @@ type notifySend struct {
 
 func (*notifySend) Name() string { return "notify-send" }
 
-// Notify shells to notify-send. For action-less notifications it's
-// fire-and-forget. With actions, we spawn notify-send under --wait
-// (which keeps it running until the notification is dismissed or
-// activated) and stream activation IDs from stdout to the returned
-// channel; the channel closes when notify-send exits.
+// Notify streams notify-send --wait action IDs when actions are configured.
 func (n *notifySend) Notify(ctx context.Context, msg Notification) (<-chan string, error) {
 	args := []string{"--app-name=agent-status"}
 	for _, a := range msg.Actions {

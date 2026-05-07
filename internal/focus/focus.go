@@ -1,16 +1,4 @@
-// Package focus brings external windows to the foreground for the
-// agent-status TUI. The public surface is a single capability —
-// PID(pid) — that walks the process ancestry and asks the appropriate
-// per-OS Focuser to focus the matching window.
-//
-// Layout:
-//
-//   - focus.go              public types, errors, and the PID() entry point
-//   - focus_linux.go        New() for Linux, with WSL-vs-compositor dispatch
-//   - focus_darwin.go       New() for macOS (stub today)
-//   - focus_unsupported.go  New() for everything else (always returns an error)
-//   - niri.go / wsl.go      per-environment Focuser implementations
-//   - proc.go / tmux.go     shared helpers (ancestry walk, tmux drilling)
+// Package focus brings an agent session's window to the foreground.
 package focus
 
 import (
@@ -21,53 +9,32 @@ import (
 	"time"
 )
 
-// Focuser brings a session's window to the foreground. One Focuser is
-// selected per process by New() based on the runtime environment.
+// Focuser brings a session's window to the foreground.
 type Focuser interface {
-	// Name is a short identifier used in status messages and logs.
 	Name() string
-	// Focus focuses the window matching target. Returns
-	// ErrWindowNotFound when no candidate window is owned by any pid
-	// in target.Ancestors; nil on success; another error on hard
-	// IPC failures.
+	// Focus returns ErrWindowNotFound when no ancestor owns a matching window.
 	Focus(ctx context.Context, target Target) error
 }
 
-// Target describes what to focus. Backends consume whichever fields
-// they can: today every focus call is anchored on a session pid and
-// its ancestry, but AppID/Title/WindowID exist for backends that
-// match windows by class/title/handle (Hyprland, KWin, macOS bundle
-// id) when they land.
+// Target describes the process/window to focus.
 type Target struct {
 	PID       int
-	Ancestors []int // process ancestry, top-down from PID; populated by PID()
+	Ancestors []int
 	AppID     string
 	Title     string
 	WindowID  string
 }
 
 var (
-	// ErrUnsupportedPlatform is returned by New on operating systems
-	// where no integration has been wired up yet (everything outside
-	// Linux/macOS today).
 	ErrUnsupportedPlatform = errors.New("focus: unsupported platform")
-	// ErrNoBackend is returned by New when the platform is supported
-	// but no Focuser implementation matches the running environment
-	// (e.g. Linux with an unrecognised compositor).
-	ErrNoBackend = errors.New("focus: no usable backend detected")
-	// ErrWindowNotFound is returned by Focuser.Focus when none of the
-	// pids in Target.Ancestors own a window known to the backend.
-	ErrWindowNotFound = errors.New("focus: window not found")
+	ErrNoBackend           = errors.New("focus: no usable backend detected")
+	ErrWindowNotFound      = errors.New("focus: window not found")
 )
 
-// defaultTimeout caps each focus invocation so a hung IPC call (niri
-// socket, code shim, powershell.exe) can't freeze the TUI.
+// defaultTimeout keeps backend IPC from hanging the TUI.
 const defaultTimeout = 5 * time.Second
 
-// PID is the high-level entry the TUI calls. It picks a Focuser for
-// the current environment, walks the ancestry of pid, focuses the
-// matching window, drills into a tmux pane if one exists, and returns
-// a status string suitable for the UI footer.
+// PID focuses the window and tmux pane associated with pid.
 func PID(pid int) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancel()

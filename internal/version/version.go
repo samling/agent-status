@@ -1,24 +1,12 @@
-// Package version exposes the build's version string. The string is
-// resolved at runtime in this order:
-//
-//  1. The Version package var, populated at build time via -ldflags
-//     "-X github.com/samling/agent-status/internal/version.Version=v1.2.3".
-//     This is the path the Makefile and release workflow take.
-//  2. runtime/debug.ReadBuildInfo: returns the module version for
-//     `go install` builds, or the VCS revision (with a "-dirty"
-//     suffix when the working tree had uncommitted changes) for
-//     plain `go build` runs that include VCS stamping.
-//  3. The literal "dev" fallback, when neither of the above
-//     produced anything useful.
+// Package version resolves the build version.
 package version
 
 import "runtime/debug"
 
-// Version is the override path: empty unless set via -ldflags.
+// Version is set by release builds via -ldflags.
 var Version = ""
 
-// Get returns the resolved version string. Always returns a non-empty
-// value.
+// Get returns Version, build metadata, or "dev".
 func Get() string {
 	if Version != "" {
 		return Version

@@ -56,9 +56,7 @@ func init() {
 	}
 }
 
-// statuslineView is the data passed to the user-provided template.
-// Field names are stable; new fields can be added without breaking
-// existing templates.
+// statuslineView is exposed to the user template.
 type statuslineView struct {
 	Total     int
 	Active    int
@@ -72,15 +70,8 @@ func runStatusline(_ *cobra.Command, _ []string) error {
 	format := viper.GetString("statusline.format")
 	asJSON := viper.GetBool("statusline.json")
 
-	// Read state.json directly; the collector is the only writer and
-	// its tmpfile+rename gives us a consistent snapshot. Connectivity
-	// is a separate cheap TCP dial — it answers "is the server up?"
-	// without paying for an HTTP round trip on every prompt render.
 	sessions, err := state.Load(viper.GetString("state"))
 	if err != nil {
-		// Statusline is meant to render every poll; surface "no
-		// sessions, disconnected" instead of failing so tmux/waybar
-		// don't show their fallback text on every transient blip.
 		sessions = nil
 	}
 	connected := server.Reachable(ServerEndpoint())

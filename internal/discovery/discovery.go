@@ -8,8 +8,7 @@ import (
 	"github.com/samling/agent-status/internal/state"
 )
 
-// SessionMeta is the live per-session metadata discovered from an agent's
-// local state files.
+// SessionMeta is live metadata from agent-owned files.
 type SessionMeta struct {
 	Agent      string
 	PID        int
@@ -31,12 +30,7 @@ type liveAgentSession struct {
 	Meta         SessionMeta
 }
 
-// liveSource is a per-agent discovery backend. Every source provides
-// scan (called on the global 2s poll). Sources with a faster fast-path
-// can also set watch, which Watch supervises in its own goroutine; the
-// fast path complements the poll, it does not replace it. claude-code
-// uses fsnotify on ~/.claude/sessions/*.json; codex (shared SQLite)
-// has no good equivalent and stays poll-only.
+// liveSource is one agent discovery backend.
 type liveSource struct {
 	agent string
 	scan  func() ([]liveAgentSession, int, error)
@@ -50,9 +44,7 @@ func liveSources() []liveSource {
 	}
 }
 
-// LiveSessionMeta returns a map of session_id -> SessionMeta for sessions
-// currently alive on disk. Read-only; used by the UI to enrich rows with
-// fields that are not part of persisted state.
+// LiveSessionMeta returns live metadata keyed by session id.
 func LiveSessionMeta() (map[string]SessionMeta, error) {
 	out := map[string]SessionMeta{}
 	type result struct {
@@ -80,8 +72,7 @@ func LiveSessionMeta() (map[string]SessionMeta, error) {
 	return out, firstErr
 }
 
-// Reap removes any state entry whose session_id is no longer backed by a
-// live session file. Returns the count removed.
+// Reap drops state rows no longer backed by any live source.
 func Reap(ctx context.Context, s *state.Store) (int, error) {
 	type result struct {
 		agent    string

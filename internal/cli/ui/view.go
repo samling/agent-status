@@ -12,9 +12,6 @@ import (
 )
 
 var (
-	// accentStyle is the bold-blue used for titles, active sort headers,
-	// panel headers, and key hints. They were four separate styles with
-	// identical settings; one alias keeps them in lockstep.
 	accentStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 	headerStyle = lipgloss.NewStyle().Bold(true)
 	dimStyle    = lipgloss.NewStyle().Faint(true)
@@ -31,9 +28,7 @@ func keyHint(key, desc string) string {
 	return accentStyle.Render(key) + " " + dimStyle.Render(desc)
 }
 
-// Column widths excluding CWD, which flexes to fill the remaining
-// horizontal space inside the border. The session hash isn't a column
-// any more; it's surfaced in the detail block at the bottom.
+// Fixed column widths; CWD flexes with terminal width.
 const (
 	colStatus     = 8
 	colAgent      = 11 // length of "claude-code"
@@ -44,9 +39,6 @@ const (
 	colNote       = 30
 )
 
-// fixedCols sums the non-CWD column widths plus the 14 chars of
-// inter-column separators (7 gaps x 2 spaces) and the 4 chars of border
-// + padding. cwdWidth() returns whatever is left of the terminal width.
 const fixedCols = colStatus + colAgent + colVersion + colLastEvent + colTransition + colCreated + colNote + 14 + 4
 
 func (m uiModel) cwdWidth() int {
@@ -63,9 +55,6 @@ func (m uiModel) cwdWidth() int {
 	return w
 }
 
-// renderHeader builds the column-header row. sortKey is the sortMode
-// whose active state highlights its column; -1 means the column does
-// not correspond to any sortable field.
 func renderHeader(active sortMode, cwd int) string {
 	cols := []struct {
 		title   string
@@ -96,9 +85,6 @@ func renderHeader(active sortMode, cwd int) string {
 	return strings.Join(parts, "  ")
 }
 
-// rowStyle composes the foreground for a row's status with an optional
-// background when the row is selected. Returning a single style avoids
-// nested-ANSI breakage when a background is layered over inner colors.
 func rowStyle(status string, selected bool) lipgloss.Style {
 	s := lipgloss.NewStyle()
 	switch status {
@@ -114,10 +100,6 @@ func rowStyle(status string, selected bool) lipgloss.Style {
 }
 
 func (m uiModel) View() string {
-	// head holds the title and either the error/empty-state or the
-	// session table. foot holds the per-session detail block. They are
-	// rendered separately so we can pad between them and anchor the
-	// detail block to the bottom of the inner box area.
 	var head, foot strings.Builder
 
 	head.WriteString(accentStyle.Render("agent-status"))
@@ -188,16 +170,9 @@ func (m uiModel) View() string {
 
 	inner := head.String()
 	if footStr := foot.String(); footStr != "" {
-		// Anchor the detail block to the bottom of the inner box. The
-		// box content area is m.height-4 rows tall (matching the
-		// box.Height set below); pad with blank rows between head and
-		// foot so foot's last line lands on the box's bottom row.
 		boxH := max(m.height-4, 1)
 		headLines := lineCount(inner)
 		footLines := lineCount(footStr)
-		// Always keep at least one blank row between table and
-		// detail; if the terminal is too short we'll overflow,
-		// which is preferable to running them together.
 		pad := max(boxH-headLines-footLines, 1)
 		inner = inner + strings.Repeat("\n", pad+1) + footStr
 	}
@@ -208,15 +183,10 @@ func (m uiModel) View() string {
 		box = box.Width(m.width - 2)
 	}
 	if m.height > 0 {
-		// Reserve 4 rows below the box content: 2 for the box's own
-		// border (top + bottom), 1 for the status row, 1 for the keymap.
 		box = box.Height(max(m.height-4, 1))
 	}
 	b.WriteString(box.Render(inner))
 	b.WriteString("\n")
-	// Status row. In note input mode the prompt replaces any ephemeral
-	// status; otherwise we always emit the row (even empty) so the
-	// keymap stays pinned to the bottom regardless of state.
 	if m.inputMode {
 		b.WriteString(dimStyle.Render("note: ") + m.inputBuf + "▏")
 	} else {
@@ -243,9 +213,6 @@ func (m uiModel) View() string {
 	return b.String()
 }
 
-// labeledField renders "label: value" with a faint label and falls back
-// to "-" when the value is empty. Shared between the detail and config
-// blocks so both panels stay visually consistent.
 func labeledField(label, value string) string {
 	if value == "" {
 		value = "-"
@@ -253,10 +220,6 @@ func labeledField(label, value string) string {
 	return dimStyle.Render(label+": ") + value
 }
 
-// renderConfig formats the UI's runtime configuration for the bottom
-// block. Mirrors renderDetail's faint-label / value layout so the box
-// looks consistent whether the foot is showing config or a session
-// detail.
 func (m uiModel) renderConfig() string {
 	return strings.Join([]string{
 		accentStyle.Render("Config"),

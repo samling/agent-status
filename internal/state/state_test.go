@@ -103,8 +103,7 @@ func TestReconcileDiscoveredInsertEventSessionStart(t *testing.T) {
 		t.Fatalf("Status = %q, want idle", sessions[0].Status)
 	}
 
-	// A second poll for the same session must not clobber a hook-driven
-	// LastEvent (e.g. UserPromptSubmit) by re-emitting SessionStart.
+	// Re-polling SessionStart must not clobber hook state.
 	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-fresh", "UserPromptSubmit", "turn-1", "2026-05-06T22:00:05Z"); err != nil {
 		t.Fatal(err)
 	}
