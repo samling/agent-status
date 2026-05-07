@@ -117,7 +117,7 @@ type uiModel struct {
 }
 
 func (m uiModel) Init() tea.Cmd {
-	return tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
+	return tea.Batch(loadSnapshot(m.statePath, m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
 }
 
 func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -169,7 +169,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showConfig = !m.showConfig
 		}
 	case tickMsg:
-		return m, tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
+		return m, tea.Batch(loadSnapshot(m.statePath, m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
 	case snapshotMsg:
 		m.sessions = msg.sessions
 		m.meta = msg.meta

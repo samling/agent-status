@@ -5,8 +5,10 @@
 package state
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,8 +23,9 @@ import (
 // key, and Status is computed by deriveStatus, both inside materialize.
 // They're tagged omitempty and the mutators never populate them on the
 // in-memory map values, so persist() omits them — derived state stays
-// out of the file. Consumer output (server /state, `state --json`) goes
-// through materialize, which sets them, so the wire shape is unchanged.
+// out of the file. Reader paths (state.Load, `state --json`) go
+// through materialize, which sets them, so consumers always see the
+// derived fields populated.
 type Session struct {
 	SessionID   string `json:"session_id,omitempty"`
 	Agent       string `json:"agent,omitempty"`
@@ -70,6 +73,7 @@ func Open(path string) (*Store, error) {
 	if err := s.load(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	slog.Debug("state opened", "path", path, "sessions", len(s.sessions))
 	return s, nil
 }
 
@@ -91,7 +95,8 @@ func (s *Store) load() error {
 	return nil
 }
 
-func (s *Store) persist() error {
+func (s *Store) persist(ctx context.Context) error {
+	start := time.Now()
 	b, err := json.MarshalIndent(s.sessions, "", "  ")
 	if err != nil {
 		return err
@@ -100,15 +105,24 @@ func (s *Store) persist() error {
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	slog.LogAttrs(ctx, slog.LevelDebug, "state persisted",
+		slog.Int("sessions", len(s.sessions)),
+		slog.Int("bytes", len(b)),
+		slog.Duration("dur", time.Since(start)),
+	)
+	return nil
 }
 
 // RecordEvent updates last_event / last_event_at for sessionID, setting
 // first_seen_at on first sight. Terminal events (SessionEnd) drop the
 // entry entirely; the UI shows only currently-live sessions.
-func (s *Store) RecordEvent(agent, sessionID, event, turnID, receivedAt string) error {
+func (s *Store) RecordEvent(ctx context.Context, agent, sessionID, event, turnID, receivedAt string) (applied bool, err error) {
 	if sessionID == "" {
-		return nil
+		slog.DebugContext(ctx, "RecordEvent: empty session_id, dropping", "agent", agent, "event", event)
+		return false, nil
 	}
 	agent = NormalizeAgent(agent)
 	event = NormalizeHookEvent(agent, event)
@@ -117,17 +131,30 @@ func (s *Store) RecordEvent(agent, sessionID, event, turnID, receivedAt string) 
 	if isTerminal(event) {
 		r, ok := s.sessions[sessionID]
 		if !ok {
-			return nil
+			slog.DebugContext(ctx, "RecordEvent: terminal for unknown session",
+				"agent", agent, "session", ShortID(sessionID), "event", event)
+			return false, nil
 		}
 		if NormalizeAgent(r.Agent) != agent {
-			return nil
+			slog.DebugContext(ctx, "RecordEvent: terminal agent mismatch, ignoring",
+				"agent", agent, "stored_agent", r.Agent,
+				"session", ShortID(sessionID), "event", event)
+			return false, nil
 		}
 		delete(s.sessions, sessionID)
-		return s.persist()
+		slog.InfoContext(ctx, "session terminated",
+			"agent", agent, "session", ShortID(sessionID), "event", event)
+		if err := s.persist(ctx); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	r, existed := s.sessions[sessionID]
 	if existed && shouldIgnoreHookEvent(r, event, turnID) {
-		return nil
+		slog.DebugContext(ctx, "RecordEvent: ignoring redundant turn event",
+			"session", ShortID(sessionID), "event", event,
+			"prev_event", r.LastEvent, "turn", turnID)
+		return false, nil
 	}
 	prevStatus := deriveStatus(r)
 	if !existed {
@@ -140,11 +167,27 @@ func (s *Store) RecordEvent(agent, sessionID, event, turnID, receivedAt string) 
 	if turnID != "" {
 		r.TurnID = turnID
 	}
-	if existed && deriveStatus(r) != prevStatus {
+	newStatus := deriveStatus(r)
+	if existed && newStatus != prevStatus {
 		r.StatusAt = receivedAt
 	}
 	s.sessions[sessionID] = r
-	return s.persist()
+	if existed {
+		slog.DebugContext(ctx, "RecordEvent: applied",
+			"agent", agent, "session", ShortID(sessionID), "event", event,
+			"prev_status", prevStatus, "new_status", newStatus)
+	} else {
+		// First time seeing this session: prev_status would be the
+		// deriveStatus of a zero-value Session, which is "active" by
+		// default and meaningless here. Log just the resulting status.
+		slog.DebugContext(ctx, "RecordEvent: applied (new session)",
+			"agent", agent, "session", ShortID(sessionID), "event", event,
+			"status", newStatus)
+	}
+	if err := s.persist(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func NormalizeHookEvent(agent, event string) string {
@@ -154,67 +197,76 @@ func NormalizeHookEvent(agent, event string) string {
 	return event
 }
 
-// SetJSONLStatus records the latest "status" field read from a session's
-// JSONL file. Empty string means "no info" and is treated as such by
-// deriveStatus. Returns true if the entry actually changed.
-func (s *Store) SetJSONLStatus(agent, sessionID, jsonlStatus string) (bool, error) {
+// ApplyDiscovered registers a session if it isn't present and sets its
+// JSONL engine status, all under one mutex acquisition. This is the
+// fsnotify hot path: every claude-code file write fires both an upsert
+// (cheap when the row already exists) and a status update, and merging
+// them halves the lock traffic vs. calling MarkDiscovered + SetJSONLStatus
+// separately. createdAt is the session's actual start time when known;
+// pass zero for the current time.
+func (s *Store) ApplyDiscovered(ctx context.Context, agent, sessionID, jsonlStatus string, createdAt time.Time) (inserted, jsonlChanged, transitioned bool, err error) {
 	if sessionID == "" {
-		return false, nil
+		return false, false, false, nil
 	}
 	agent = NormalizeAgent(agent)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.sessions[sessionID]
-	if !ok {
-		// We don't know about this session yet. Wait for discovery or a
-		// hook to register it before tracking JSONL status.
-		return false, nil
+
+	r, existed := s.sessions[sessionID]
+	if !existed {
+		if createdAt.IsZero() {
+			createdAt = time.Now()
+		}
+		ts := createdAt.UTC().Format(time.RFC3339Nano)
+		r = Session{
+			Agent:       agent,
+			FirstSeenAt: ts,
+			LastEvent:   "Discovered",
+			LastEventAt: ts,
+			StatusAt:    ts,
+		}
+		inserted = true
 	}
-	if r.JSONLStatus == jsonlStatus && NormalizeAgent(r.Agent) == agent {
-		return false, nil
-	}
+
 	prevStatus := deriveStatus(r)
-	r.Agent = agent
-	r.JSONLStatus = jsonlStatus
-	if deriveStatus(r) != prevStatus {
+	if r.JSONLStatus != jsonlStatus || NormalizeAgent(r.Agent) != agent {
+		r.Agent = agent
+		r.JSONLStatus = jsonlStatus
+		jsonlChanged = true
+	}
+	newStatus := deriveStatus(r)
+	transitioned = !inserted && jsonlChanged && newStatus != prevStatus
+	if transitioned {
 		r.StatusAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	s.sessions[sessionID] = r
-	return true, s.persist()
-}
 
-// MarkDiscovered registers a session only if it is not already present.
-// createdAt is the session's actual start time when known; pass zero for
-// the current time.
-func (s *Store) MarkDiscovered(agent, sessionID string, createdAt time.Time) (bool, error) {
-	if sessionID == "" {
-		return false, nil
+	if !inserted && !jsonlChanged {
+		return false, false, false, nil
 	}
-	agent = NormalizeAgent(agent)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.sessions[sessionID]; ok {
-		return false, nil
+
+	s.sessions[sessionID] = r
+	if inserted {
+		slog.DebugContext(ctx, "ApplyDiscovered: inserted",
+			"agent", agent, "session", ShortID(sessionID),
+			"created_at", r.FirstSeenAt, "jsonl_status", jsonlStatus)
+	} else {
+		slog.DebugContext(ctx, "ApplyDiscovered: jsonl applied",
+			"agent", agent, "session", ShortID(sessionID),
+			"jsonl_status", jsonlStatus,
+			"prev_status", prevStatus, "new_status", newStatus,
+			"transitioned", transitioned)
 	}
-	if createdAt.IsZero() {
-		createdAt = time.Now()
+	if perr := s.persist(ctx); perr != nil {
+		return inserted, jsonlChanged, transitioned, perr
 	}
-	ts := createdAt.UTC().Format(time.RFC3339Nano)
-	s.sessions[sessionID] = Session{
-		Agent:       agent,
-		FirstSeenAt: ts,
-		LastEvent:   "Discovered",
-		LastEventAt: ts,
-		StatusAt:    ts,
-	}
-	return true, s.persist()
+	return inserted, jsonlChanged, transitioned, nil
 }
 
 // ReconcileDiscovered registers a session when absent and reconciles
 // durable identity metadata when present. It intentionally does not
 // update LastEvent or JSONLStatus, so database polling cannot clobber
 // hook-derived active/idle state.
-func (s *Store) ReconcileDiscovered(agent, sessionID string, createdAt time.Time) (bool, error) {
+func (s *Store) ReconcileDiscovered(ctx context.Context, agent, sessionID string, createdAt time.Time) (bool, error) {
 	if sessionID == "" {
 		return false, nil
 	}
@@ -236,7 +288,9 @@ func (s *Store) ReconcileDiscovered(agent, sessionID string, createdAt time.Time
 			LastEventAt: ts,
 			StatusAt:    ts,
 		}
-		return true, s.persist()
+		slog.DebugContext(ctx, "ReconcileDiscovered: inserted",
+			"agent", agent, "session", ShortID(sessionID), "created_at", ts)
+		return true, s.persist(ctx)
 	}
 
 	changed := false
@@ -259,13 +313,15 @@ func (s *Store) ReconcileDiscovered(agent, sessionID string, createdAt time.Time
 		return false, nil
 	}
 	s.sessions[sessionID] = r
-	return true, s.persist()
+	slog.DebugContext(ctx, "ReconcileDiscovered: updated",
+		"agent", agent, "session", ShortID(sessionID))
+	return true, s.persist(ctx)
 }
 
 // RecordObserved upserts a session from a read-only agent state source,
 // preserving the original creation time and using the source's own event
 // timestamp when it is available.
-func (s *Store) RecordObserved(agent, sessionID string, createdAt time.Time, event string, eventAt time.Time, engineStatus string) (bool, error) {
+func (s *Store) RecordObserved(ctx context.Context, agent, sessionID string, createdAt time.Time, event string, eventAt time.Time, engineStatus string) (bool, error) {
 	if sessionID == "" {
 		return false, nil
 	}
@@ -320,12 +376,17 @@ func (s *Store) RecordObserved(agent, sessionID string, createdAt time.Time, eve
 		return false, nil
 	}
 	s.sessions[sessionID] = r
-	return true, s.persist()
+	slog.DebugContext(ctx, "RecordObserved: applied",
+		"agent", agent, "session", ShortID(sessionID),
+		"event", event, "engine_status", engineStatus,
+		"new", !existed, "prev_status", prevStatus,
+		"new_status", deriveStatus(r))
+	return true, s.persist(ctx)
 }
 
 // ReapAbsent drops any session whose id is not in alive. Returns the
 // number of entries removed.
-func (s *Store) ReapAbsent(alive map[string]bool) (int, error) {
+func (s *Store) ReapAbsent(ctx context.Context, alive map[string]bool) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
@@ -333,18 +394,20 @@ func (s *Store) ReapAbsent(alive map[string]bool) (int, error) {
 		if !alive[id] {
 			delete(s.sessions, id)
 			n++
+			slog.DebugContext(ctx, "ReapAbsent: dropping",
+				"session", ShortID(id))
 		}
 	}
 	if n == 0 {
 		return 0, nil
 	}
-	return n, s.persist()
+	return n, s.persist(ctx)
 }
 
 // ReapAbsentForAgent is the provider-scoped variant of ReapAbsent. It
 // lets discovery sources fail independently without one missing scan
 // deleting another agent's rows.
-func (s *Store) ReapAbsentForAgent(agent string, alive map[string]bool) (int, error) {
+func (s *Store) ReapAbsentForAgent(ctx context.Context, agent string, alive map[string]bool) (int, error) {
 	agent = NormalizeAgent(agent)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -356,12 +419,14 @@ func (s *Store) ReapAbsentForAgent(agent string, alive map[string]bool) (int, er
 		if !alive[id] {
 			delete(s.sessions, id)
 			n++
+			slog.DebugContext(ctx, "ReapAbsentForAgent: dropping",
+				"agent", agent, "session", ShortID(id))
 		}
 	}
 	if n == 0 {
 		return 0, nil
 	}
-	return n, s.persist()
+	return n, s.persist(ctx)
 }
 
 // Sessions returns the current state, newest event first.
@@ -419,11 +484,21 @@ func materialize(m map[string]Session) []Session {
 // engine's self-report. JSONL=busy paired with a user-attention event
 // stays "waiting" (engine working but user input still pending).
 func deriveStatus(r Session) string {
+	// PermissionRequest is a hard block on user action: the engine
+	// reports JSONL=idle precisely *because* it's stuck waiting for
+	// approval. So it must beat the JSONL=idle override below.
+	if r.LastEvent == "PermissionRequest" {
+		return "waiting"
+	}
+	// JSONL=idle is treated as authoritative even over a recent
+	// Notification — once Claude's engine has moved back to idle, the
+	// user has either resolved or ignored the prompt and we follow
+	// the engine's self-report. (PermissionRequest is the exception
+	// above, handled before this check.)
 	if r.JSONLStatus == "idle" {
 		return "idle"
 	}
-	switch r.LastEvent {
-	case "Notification", "PermissionRequest":
+	if r.LastEvent == "Notification" {
 		return "waiting"
 	}
 	if r.JSONLStatus == "busy" {

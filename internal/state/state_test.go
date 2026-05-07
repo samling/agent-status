@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,13 +13,13 @@ func TestRecordEventSameTurnStopWins(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := store.RecordEvent(AgentCodex, "session-1", "UserPromptSubmit", "turn-1", "2026-05-06T22:00:00Z"); err != nil {
+	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-1", "UserPromptSubmit", "turn-1", "2026-05-06T22:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordEvent(AgentCodex, "session-1", "Stop", "turn-1", "2026-05-06T22:00:01Z"); err != nil {
+	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-1", "Stop", "turn-1", "2026-05-06T22:00:01Z"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordEvent(AgentCodex, "session-1", "PostToolUse", "turn-1", "2026-05-06T22:00:02Z"); err != nil {
+	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-1", "PostToolUse", "turn-1", "2026-05-06T22:00:02Z"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -33,7 +34,7 @@ func TestRecordEventSameTurnStopWins(t *testing.T) {
 		t.Fatalf("Status = %q, want idle", sessions[0].Status)
 	}
 
-	if err := store.RecordEvent(AgentCodex, "session-1", "UserPromptSubmit", "turn-2", "2026-05-06T22:00:03Z"); err != nil {
+	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-1", "UserPromptSubmit", "turn-2", "2026-05-06T22:00:03Z"); err != nil {
 		t.Fatal(err)
 	}
 	sessions = store.Sessions()
@@ -51,10 +52,10 @@ func TestReconcileDiscoveredDoesNotClobberHookStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := store.RecordEvent(AgentCodex, "session-1", "Stop", "turn-1", "2026-05-06T22:00:10Z"); err != nil {
+	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-1", "Stop", "turn-1", "2026-05-06T22:00:10Z"); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := store.ReconcileDiscovered(AgentCodex, "session-1", mustParseTime(t, "2026-05-06T22:00:00Z"))
+	changed, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-1", mustParseTime(t, "2026-05-06T22:00:00Z"))
 	if err != nil {
 		t.Fatal(err)
 	}

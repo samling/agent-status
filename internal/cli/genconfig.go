@@ -53,11 +53,28 @@ const defaultConfigYAML = `# agent-status config
 # readers (TUI, statusline, state subcommand) load it directly.
 # state: ~/.config/agent-status/state.json
 
+# Logging and tracing for the collector and CLI clients. Each key has
+# a matching env var (LOG_LEVEL, LOG_FORMAT, LOG_TRACES) and CLI flag
+# (--log-level, --log-format, --log-traces) that takes precedence.
+log:
+  # Minimum log level: debug | info | warn | error.
+  level: info
+  # Output format: text (human-friendly key=value) or json.
+  format: text
+  # OpenTelemetry traces exporter:
+  #   off       traces disabled (default).
+  #   stdout    pretty-print spans to stderr; useful for local debugging.
+  #   otlp      send via OTLP/HTTP. Configure with the standard env vars,
+  #             e.g. OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318.
+  #   otlp-grpc same as otlp but over gRPC (default port 4317).
+  # trace_id and span_id are stamped on every log record while a span
+  # is in scope, regardless of whether an exporter is configured.
+  traces: off
+
 server:
-  # Listen address and port for the HTTP collector. The same values
-  # are reused by every client (TUI connection probe, statusline
-  # probe, focus CLI, notification activation callback), so the
-  # collector address only needs to be defined here.
+  # Listen address and port for the HTTP collector. The collector
+  # exposes only POST /hook for agent processes; the TUI and
+  # statusline use this address purely as a TCP-dial liveness probe.
   addr: 127.0.0.1
   port: "7878"
 
@@ -76,8 +93,8 @@ server:
     title: agent-status
     body: "{{.Waiting}} session(s) waiting for input"
     # Optional action button on the notification. When enabled, clicks
-    # POST to the local /focus endpoint, which focuses the first waiting
-    # session at click time. Requires libnotify (notify-send) on Linux.
+    # focus the first waiting session's window. Requires libnotify
+    # (notify-send) on Linux.
     activation:
       enabled: false
       label: Focus

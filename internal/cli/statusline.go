@@ -1,13 +1,11 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"text/template"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -74,16 +72,18 @@ func runStatusline(_ *cobra.Command, _ []string) error {
 	format := viper.GetString("statusline.format")
 	asJSON := viper.GetBool("statusline.json")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	sessions, err := server.LoadState(ctx, ServerEndpoint())
-	connected := err == nil
+	// Read state.json directly; the collector is the only writer and
+	// its tmpfile+rename gives us a consistent snapshot. Connectivity
+	// is a separate cheap TCP dial — it answers "is the server up?"
+	// without paying for an HTTP round trip on every prompt render.
+	sessions, err := state.Load(viper.GetString("state"))
 	if err != nil {
 		// Statusline is meant to render every poll; surface "no
 		// sessions, disconnected" instead of failing so tmux/waybar
 		// don't show their fallback text on every transient blip.
 		sessions = nil
 	}
+	connected := server.Reachable(ServerEndpoint())
 
 	view := statuslineView{
 		Total:     len(sessions),

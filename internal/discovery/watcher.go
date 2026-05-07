@@ -2,106 +2,84 @@ package discovery
 
 import (
 	"context"
-	"log"
-	"os"
-	"path/filepath"
+	"log/slog"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
+	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/state"
 )
 
-// Watch monitors Claude session-file events and polls all registered
-// discovery sources into our state file. Removal/rename triggers a reap.
-// Runs until ctx is cancelled.
+// Watch runs the polyglot discovery loop: a 2s scan that fans out to
+// every registered source and an inline+periodic reap. Sources that
+// have a faster fast-path (claude-code's per-session file, watched
+// via fsnotify) hook in by exposing a non-nil watch function on their
+// liveSource entry; this main loop just supervises them. Runs until
+// ctx is cancelled.
 func Watch(ctx context.Context, s *state.Store) error {
-	dir, err := claudeSessionsDir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
+	sources := liveSources()
 
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		return err
-	}
-	defer w.Close()
-
-	if err := w.Add(dir); err != nil {
-		return err
+	// Per-source live watchers. Each runs independently so a failing
+	// fast-path can't block the polling loop, and so adding a new
+	// agent never has to touch this function.
+	for _, src := range sources {
+		if src.watch == nil {
+			continue
+		}
+		go func(src liveSource) {
+			if err := src.watch(ctx, s); err != nil {
+				slog.ErrorContext(ctx, "discovery: source watcher exited",
+					"agent", src.agent, "err", err)
+			}
+		}(src)
 	}
 
 	// Initial sweep: register every live session and sync its on-disk
 	// status so the state file is populated before any hooks fire.
 	// Filtered through each provider's liveness check so dead-PID
 	// stragglers from prior crashes don't get inserted.
-	if scanned, alive, updated, err := syncDiscovered(s); err != nil {
-		log.Printf("watcher: initial sweep: %v", err)
+	if scanned, alive, updated, err := syncDiscovered(ctx, s, "initial"); err != nil {
+		slog.ErrorContext(ctx, "discovery: initial sweep failed", "err", err)
 	} else {
-		log.Printf("discovery: scanned=%d alive=%d updated=%d", scanned, alive, updated)
+		slog.InfoContext(ctx, "discovery: initial sweep",
+			"scanned", scanned, "alive", alive, "updated", updated)
 	}
 
 	discover := time.NewTicker(2 * time.Second)
 	defer discover.Stop()
 
-	// Periodic reap as a safety net for dead sessions whose file
-	// removal we missed (fsnotify drops events under load, the
-	// process crashed without unlinking, the SessionEnd hook had a
-	// case mismatch, etc.). Reap is cheap — one ReadDir + a stat
-	// per file plus a kill -0 per pid — so polling every 30s costs
-	// nothing and prevents stale rows from lingering in the TUI.
-	reap := time.NewTicker(30 * time.Second)
-	defer reap.Stop()
+	// No separate periodic reap: syncDiscovered now does a per-agent
+	// inline reap on every successful scan, so a 30s ticker would be
+	// pure redundancy. If a transient scan error skips the inline
+	// reap, the next 2s tick covers it.
 
 	for {
 		select {
 		case <-ctx.Done():
+			slog.InfoContext(ctx, "discovery: watcher stopped")
 			return nil
 		case <-discover.C:
-			if scanned, alive, updated, err := syncDiscovered(s); err != nil {
-				log.Printf("watcher: discovery poll: %v", err)
+			if scanned, alive, updated, err := syncDiscovered(ctx, s, "tick"); err != nil {
+				slog.WarnContext(ctx, "discovery: poll error", "err", err)
 			} else if updated > 0 {
-				log.Printf("discovery: scanned=%d alive=%d updated=%d", scanned, alive, updated)
+				slog.InfoContext(ctx, "discovery: tick",
+					"scanned", scanned, "alive", alive, "updated", updated)
+			} else {
+				slog.DebugContext(ctx, "discovery: tick (no changes)",
+					"scanned", scanned, "alive", alive)
 			}
-		case <-reap.C:
-			if n, err := Reap(s); err != nil {
-				log.Printf("watcher: periodic reap: %v", err)
-			} else if n > 0 {
-				log.Printf("watcher: periodic reap removed %d stale session(s)", n)
-			}
-		case event, ok := <-w.Events:
-			if !ok {
-				return nil
-			}
-			if filepath.Ext(event.Name) != ".json" {
-				continue
-			}
-			switch {
-			case event.Op&(fsnotify.Write|fsnotify.Create) != 0:
-				processClaudeSessionFile(s, event.Name)
-			case event.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
-				// File vanished: a session likely exited (including
-				// non-clean exits that skip SessionEnd). Trigger a reap.
-				if n, err := Reap(s); err != nil {
-					log.Printf("watcher: reap after %s: %v", filepath.Base(event.Name), err)
-				} else if n > 0 {
-					log.Printf("watcher: reaped %d session(s) after file removal", n)
-				}
-			}
-		case err, ok := <-w.Errors:
-			if !ok {
-				return nil
-			}
-			log.Printf("watcher: %v", err)
 		}
 	}
 }
 
-func syncDiscovered(s *state.Store) (scanned, alive, updated int, err error) {
+func syncDiscovered(ctx context.Context, s *state.Store, reason string) (scanned, alive, updated int, err error) {
+	ctx, span := logging.Start(ctx, "discovery.sync",
+		attribute.String("reason", reason))
+	defer span.End()
+
 	type result struct {
+		agent    string
 		sessions []liveAgentSession
 		scanned  int
 		err      error
@@ -109,11 +87,20 @@ func syncDiscovered(s *state.Store) (scanned, alive, updated int, err error) {
 	sources := liveSources()
 	ch := make(chan result, len(sources))
 	for _, src := range sources {
-		src := src
-		go func() {
+		go func(src liveSource) {
+			start := time.Now()
 			sessions, scanned, err := src.scan()
-			ch <- result{sessions: sessions, scanned: scanned, err: err}
-		}()
+			if err != nil {
+				slog.WarnContext(ctx, "discovery: source scan failed",
+					"agent", src.agent, "scanned", scanned, "alive", len(sessions),
+					"dur", time.Since(start), "err", err)
+			} else {
+				slog.DebugContext(ctx, "discovery: source scanned",
+					"agent", src.agent, "scanned", scanned, "alive", len(sessions),
+					"dur", time.Since(start))
+			}
+			ch <- result{agent: src.agent, sessions: sessions, scanned: scanned, err: err}
+		}(src)
 	}
 	for range sources {
 		res := <-ch
@@ -125,19 +112,46 @@ func syncDiscovered(s *state.Store) (scanned, alive, updated int, err error) {
 		}
 		scanned += res.scanned
 		alive += len(res.sessions)
+		aliveSet := make(map[string]bool, len(res.sessions))
 		for _, sess := range res.sessions {
-			if applyLiveSession(s, sess) {
+			aliveSet[sess.SessionID] = true
+			if applyLiveSession(ctx, s, sess) {
 				updated++
 			}
 		}
+		// Inline reap on a successful scan so a session whose process
+		// exited without firing SessionEnd (codex on ctrl-c, or any
+		// crash) is dropped within one poll cycle (~2s) instead of
+		// waiting up to 30s for the periodic reap. Per-agent so a
+		// missing scan from one source can't delete another agent's
+		// rows. Skipped on error for the same reason.
+		n, reapErr := s.ReapAbsentForAgent(ctx, res.agent, aliveSet)
+		if reapErr != nil {
+			slog.WarnContext(ctx, "discovery: inline reap failed",
+				"agent", res.agent, "err", reapErr)
+			if err == nil {
+				err = reapErr
+			}
+			continue
+		}
+		if n > 0 {
+			slog.InfoContext(ctx, "discovery: reaped stale sessions",
+				"agent", res.agent, "n", n, "alive", len(res.sessions))
+			updated += n
+		}
 	}
+	span.SetAttributes(
+		attribute.Int("scanned", scanned),
+		attribute.Int("alive", alive),
+		attribute.Int("updated", updated),
+	)
 	return scanned, alive, updated, err
 }
 
-func applyLiveSession(s *state.Store, sess liveAgentSession) bool {
+func applyLiveSession(ctx context.Context, s *state.Store, sess liveAgentSession) bool {
 	switch sess.Agent {
 	case state.AgentClaudeCode:
-		return applyClaudeSessionFile(s, claudeSessionFile{
+		return applyClaudeSessionFile(ctx, s, claudeSessionFile{
 			PID:        sess.Meta.PID,
 			SessionID:  sess.SessionID,
 			Entrypoint: sess.Meta.Entrypoint,
@@ -147,17 +161,20 @@ func applyLiveSession(s *state.Store, sess liveAgentSession) bool {
 			StartedAt:  unixMilli(sess.StartedAt),
 		})
 	case state.AgentCodex:
-		changed, err := s.ReconcileDiscovered(sess.Agent, sess.SessionID, sess.StartedAt)
+		changed, err := s.ReconcileDiscovered(ctx, sess.Agent, sess.SessionID, sess.StartedAt)
 		if err != nil {
-			log.Printf("watcher: reconcile discovered %s %s: %v", sess.Agent, state.ShortID(sess.SessionID), err)
+			slog.WarnContext(ctx, "discovery: reconcile failed",
+				"agent", sess.Agent, "session", state.ShortID(sess.SessionID), "err", err)
 		} else if changed {
-			log.Printf("watcher: reconciled %s session %s", sess.Agent, state.ShortID(sess.SessionID))
+			slog.InfoContext(ctx, "discovery: session reconciled",
+				"agent", sess.Agent, "session", state.ShortID(sess.SessionID))
 		}
 		return changed
 	default:
-		changed, err := s.RecordObserved(sess.Agent, sess.SessionID, sess.StartedAt, sess.Event, sess.EventAt, sess.EngineStatus)
+		changed, err := s.RecordObserved(ctx, sess.Agent, sess.SessionID, sess.StartedAt, sess.Event, sess.EventAt, sess.EngineStatus)
 		if err != nil {
-			log.Printf("watcher: record observed %s %s: %v", sess.Agent, state.ShortID(sess.SessionID), err)
+			slog.WarnContext(ctx, "discovery: record observed failed",
+				"agent", sess.Agent, "session", state.ShortID(sess.SessionID), "err", err)
 		}
 		return changed
 	}

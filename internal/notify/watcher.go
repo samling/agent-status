@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"text/template"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -38,8 +41,8 @@ type Config struct {
 
 // Activation describes the optional action button. The notify package
 // has no opinion on what activation means: callers wire OnActivate to
-// whatever effect they want (typically a POST to the server's /focus
-// endpoint so the activation always targets the freshest state).
+// whatever effect they want (today, picking the freshest waiting
+// session and calling focus.PID on its live PID).
 type Activation struct {
 	// Label is the user-visible button text (e.g. "Focus").
 	Label string
@@ -142,6 +145,7 @@ func (w *Watcher) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			slog.InfoContext(ctx, "notify: watcher stopped")
 			stopAll()
 			return
 
@@ -149,11 +153,15 @@ func (w *Watcher) Run(ctx context.Context) {
 			waiting := w.countWaiting()
 			switch {
 			case waiting == 0 && prevWaiting > 0:
+				slog.DebugContext(ctx, "notify: waiting cleared, stopping timers",
+					"prev_waiting", prevWaiting)
 				stopAll()
 			case waiting > 0 && prevWaiting == 0:
 				// Fresh 0 → 1+ transition: start the initial timer.
 				// (If existing timers somehow still exist, stop
 				// them first to be safe.)
+				slog.DebugContext(ctx, "notify: 0->1+ transition, arming initial timer",
+					"waiting", waiting, "delay", w.cfg.InitialDelay)
 				stopAll()
 				initialTimer = time.NewTimer(w.cfg.InitialDelay)
 			}
@@ -161,8 +169,11 @@ func (w *Watcher) Run(ctx context.Context) {
 
 		case <-chanOf(initialTimer):
 			initialTimer = nil
-			if err := w.fire(ctx); err != nil {
-				log.Printf("notify: fire initial: %v", err)
+			waiting := w.countWaiting()
+			slog.InfoContext(ctx, "notify: initial timer fired",
+				"waiting", waiting)
+			if err := w.fire(ctx, "initial"); err != nil {
+				slog.ErrorContext(ctx, "notify: fire initial failed", "err", err)
 			}
 			if w.cfg.RepeatInterval > 0 {
 				repeatTimer = time.NewTimer(w.cfg.RepeatInterval)
@@ -170,11 +181,14 @@ func (w *Watcher) Run(ctx context.Context) {
 
 		case <-chanOf(repeatTimer):
 			repeatTimer = nil
-			if w.countWaiting() == 0 {
+			waiting := w.countWaiting()
+			if waiting == 0 {
+				slog.DebugContext(ctx, "notify: repeat fired but waiting=0, skipping")
 				continue
 			}
-			if err := w.fire(ctx); err != nil {
-				log.Printf("notify: fire repeat: %v", err)
+			slog.InfoContext(ctx, "notify: repeat timer fired", "waiting", waiting)
+			if err := w.fire(ctx, "repeat"); err != nil {
+				slog.ErrorContext(ctx, "notify: fire repeat failed", "err", err)
 			}
 			repeatTimer = time.NewTimer(w.cfg.RepeatInterval)
 		}
@@ -197,7 +211,11 @@ func (w *Watcher) countWaiting() int {
 // that calls OnActivate; the goroutine exits when the backend closes
 // the activations channel (notification dismissed, expired, or
 // activated).
-func (w *Watcher) fire(ctx context.Context) error {
+func (w *Watcher) fire(ctx context.Context, reason string) error {
+	ctx, span := logging.Start(ctx, "notify.fire",
+		attribute.String("reason", reason))
+	defer span.End()
+
 	sessions := w.store.Sessions()
 	data := TemplateData{
 		Total:    len(sessions),
@@ -218,6 +236,11 @@ func (w *Watcher) fire(ctx context.Context) error {
 			data.Idle++
 		}
 	}
+	span.SetAttributes(
+		attribute.Int("waiting", data.Waiting),
+		attribute.Int("active", data.Active),
+		attribute.Int("idle", data.Idle),
+	)
 
 	var titleBuf, bodyBuf bytes.Buffer
 	if err := w.title.Execute(&titleBuf, data); err != nil {
@@ -231,6 +254,12 @@ func (w *Watcher) fire(ctx context.Context) error {
 	if w.cfg.Activation != nil {
 		note.Actions = []Action{{ID: "focus", Label: w.cfg.Activation.Label}}
 	}
+	slog.DebugContext(ctx, "notify: dispatching",
+		"backend", w.backend.Name(),
+		"reason", reason,
+		"title", note.Title,
+		"body", note.Body,
+		"actions", len(note.Actions))
 	ch, err := w.backend.Notify(ctx, note)
 	if err != nil {
 		return err
@@ -238,6 +267,7 @@ func (w *Watcher) fire(ctx context.Context) error {
 	if w.cfg.Activation != nil {
 		go func() {
 			for range ch {
+				slog.DebugContext(ctx, "notify: activation clicked")
 				w.cfg.Activation.OnActivate(ctx)
 			}
 		}()

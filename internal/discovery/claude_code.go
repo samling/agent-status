@@ -1,14 +1,19 @@
 package discovery
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -28,6 +33,89 @@ func claudeSessionsDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".claude", "sessions"), nil
+}
+
+// watchClaudeFiles is claude-code's fast-path: an fsnotify watcher on
+// ~/.claude/sessions/ so per-session JSON updates land in state within
+// milliseconds instead of waiting up to one 2s poll. File removal
+// triggers a global reap so a session that exits without firing
+// SessionEnd doesn't linger. This is wired in as the watch field of
+// the claude-code liveSource (see liveSources in discovery.go); the
+// poll loop in Watch supervises it.
+func watchClaudeFiles(ctx context.Context, s *state.Store) error {
+	dir, err := claudeSessionsDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+	if err := w.Add(dir); err != nil {
+		return err
+	}
+	slog.InfoContext(ctx, "discovery: claude fsnotify watcher started", "dir", dir)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case event, ok := <-w.Events:
+			if !ok {
+				return nil
+			}
+			if filepath.Ext(event.Name) != ".json" {
+				continue
+			}
+			eventCtx, span := logging.Start(ctx, "discovery.fs_event",
+				attribute.String("agent", state.AgentClaudeCode),
+				attribute.String("file", filepath.Base(event.Name)),
+				attribute.String("op", event.Op.String()),
+			)
+			switch {
+			case event.Op&(fsnotify.Write|fsnotify.Create) != 0:
+				slog.DebugContext(eventCtx, "discovery: claude file changed",
+					"file", filepath.Base(event.Name), "op", event.Op.String())
+				processClaudeSessionFile(eventCtx, s, event.Name)
+			case event.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
+				// File vanished: a claude session likely exited (incl.
+				// non-clean exits that skip SessionEnd). Reap claude
+				// only — a global Reap would also re-scan codex SQLite
+				// for nothing. The next 2s poll's inline reap is the
+				// backstop if this fast path errors.
+				slog.DebugContext(eventCtx, "discovery: claude file removed, reaping",
+					"file", filepath.Base(event.Name), "op", event.Op.String())
+				sessions, _, scanErr := scanClaudeLive()
+				if scanErr != nil {
+					slog.WarnContext(eventCtx, "discovery: claude rescan after remove failed",
+						"file", filepath.Base(event.Name), "err", scanErr)
+					break
+				}
+				aliveSet := make(map[string]bool, len(sessions))
+				for _, sess := range sessions {
+					aliveSet[sess.SessionID] = true
+				}
+				n, reapErr := s.ReapAbsentForAgent(eventCtx, state.AgentClaudeCode, aliveSet)
+				if reapErr != nil {
+					slog.WarnContext(eventCtx, "discovery: reap after file removal failed",
+						"file", filepath.Base(event.Name), "err", reapErr)
+				} else if n > 0 {
+					slog.InfoContext(eventCtx, "discovery: reaped after file removal",
+						"file", filepath.Base(event.Name), "n", n)
+				}
+			}
+			span.End()
+		case err, ok := <-w.Errors:
+			if !ok {
+				return nil
+			}
+			slog.WarnContext(ctx, "discovery: claude fsnotify error", "err", err)
+		}
+	}
 }
 
 func scanClaudeLive() ([]liveAgentSession, int, error) {
@@ -105,45 +193,61 @@ func walkClaudeAlive() (alive []claudeSessionFile, scanned int, err error) {
 	return alive, scanned, nil
 }
 
-func processClaudeSessionFile(s *state.Store, path string) {
+func processClaudeSessionFile(ctx context.Context, s *state.Store, path string) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			log.Printf("watcher: read %s: %v", filepath.Base(path), err)
+			slog.WarnContext(ctx, "discovery: read session file",
+				"file", filepath.Base(path), "err", err)
 		}
 		return
 	}
 	var sf claudeSessionFile
 	if err := json.Unmarshal(b, &sf); err != nil {
 		// Mid-write race or unrelated file; ignore quietly.
+		slog.DebugContext(ctx, "discovery: unparseable session file (likely mid-write)",
+			"file", filepath.Base(path), "err", err)
 		return
 	}
 	if sf.SessionID == "" {
 		return
 	}
-	applyClaudeSessionFile(s, sf)
+	applyClaudeSessionFile(ctx, s, sf)
 }
 
 // applyClaudeSessionFile registers sf with the state store and syncs its
-// status. Returns true when the session was newly inserted.
-func applyClaudeSessionFile(s *state.Store, sf claudeSessionFile) bool {
+// status in a single critical section. Returns true when the session
+// was newly inserted.
+func applyClaudeSessionFile(ctx context.Context, s *state.Store, sf claudeSessionFile) bool {
 	var createdAt time.Time
 	if sf.StartedAt > 0 {
 		createdAt = time.UnixMilli(sf.StartedAt)
 	}
-	inserted, err := s.MarkDiscovered(state.AgentClaudeCode, sf.SessionID, createdAt)
+	inserted, jsonlChanged, transitioned, err := s.ApplyDiscovered(
+		ctx, state.AgentClaudeCode, sf.SessionID, sf.Status, createdAt,
+	)
 	if err != nil {
-		log.Printf("watcher: mark discovered %s: %v", state.ShortID(sf.SessionID), err)
-	} else if inserted {
-		log.Printf("watcher: discovered new session %s", state.ShortID(sf.SessionID))
-	}
-	changed, err := s.SetJSONLStatus(state.AgentClaudeCode, sf.SessionID, sf.Status)
-	if err != nil {
-		log.Printf("watcher: set jsonl status for %s: %v", state.ShortID(sf.SessionID), err)
+		slog.WarnContext(ctx, "discovery: apply discovered failed",
+			"session", state.ShortID(sf.SessionID), "err", err)
 		return inserted
 	}
-	if changed {
-		log.Printf("watcher: session %s jsonl_status=%q", state.ShortID(sf.SessionID), sf.Status)
+	switch {
+	case inserted:
+		slog.InfoContext(ctx, "discovery: new claude-code session",
+			"session", state.ShortID(sf.SessionID),
+			"pid", sf.PID, "entrypoint", sf.Entrypoint, "version", sf.Version,
+			"jsonl_status", sf.Status)
+	case transitioned:
+		// Real status change (e.g. idle -> active): worth INFO so a
+		// human reading the log sees the session move on.
+		slog.InfoContext(ctx, "discovery: claude-code status transitioned",
+			"session", state.ShortID(sf.SessionID), "jsonl_status", sf.Status)
+	case jsonlChanged:
+		// First observation of a JSONL status (or a same-derived-state
+		// flip): bookkeeping only, keep at DEBUG so INFO reflects real
+		// state changes.
+		slog.DebugContext(ctx, "discovery: claude-code jsonl_status recorded",
+			"session", state.ShortID(sf.SessionID), "jsonl_status", sf.Status)
 	}
 	return inserted
 }

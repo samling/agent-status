@@ -1,6 +1,8 @@
 package discovery
 
 import (
+	"context"
+	"log/slog"
 	"time"
 
 	"github.com/samling/agent-status/internal/state"
@@ -29,14 +31,21 @@ type liveAgentSession struct {
 	Meta         SessionMeta
 }
 
+// liveSource is a per-agent discovery backend. Every source provides
+// scan (called on the global 2s poll). Sources with a faster fast-path
+// can also set watch, which Watch supervises in its own goroutine; the
+// fast path complements the poll, it does not replace it. claude-code
+// uses fsnotify on ~/.claude/sessions/*.json; codex (shared SQLite)
+// has no good equivalent and stays poll-only.
 type liveSource struct {
 	agent string
 	scan  func() ([]liveAgentSession, int, error)
+	watch func(ctx context.Context, s *state.Store) error
 }
 
 func liveSources() []liveSource {
 	return []liveSource{
-		{agent: state.AgentClaudeCode, scan: scanClaudeLive},
+		{agent: state.AgentClaudeCode, scan: scanClaudeLive, watch: watchClaudeFiles},
 		{agent: state.AgentCodex, scan: scanCodexLive},
 	}
 }
@@ -53,11 +62,10 @@ func LiveSessionMeta() (map[string]SessionMeta, error) {
 	sources := liveSources()
 	ch := make(chan result, len(sources))
 	for _, src := range sources {
-		src := src
-		go func() {
+		go func(src liveSource) {
 			sessions, _, err := src.scan()
 			ch <- result{sessions: sessions, err: err}
-		}()
+		}(src)
 	}
 	var firstErr error
 	for range sources {
@@ -74,7 +82,7 @@ func LiveSessionMeta() (map[string]SessionMeta, error) {
 
 // Reap removes any state entry whose session_id is no longer backed by a
 // live session file. Returns the count removed.
-func Reap(s *state.Store) (int, error) {
+func Reap(ctx context.Context, s *state.Store) (int, error) {
 	type result struct {
 		agent    string
 		sessions []liveAgentSession
@@ -83,11 +91,10 @@ func Reap(s *state.Store) (int, error) {
 	sources := liveSources()
 	ch := make(chan result, len(sources))
 	for _, src := range sources {
-		src := src
-		go func() {
+		go func(src liveSource) {
 			sessions, _, err := src.scan()
 			ch <- result{agent: src.agent, sessions: sessions, err: err}
-		}()
+		}(src)
 	}
 	total := 0
 	var firstErr error
@@ -97,16 +104,22 @@ func Reap(s *state.Store) (int, error) {
 			if firstErr == nil {
 				firstErr = res.err
 			}
+			slog.WarnContext(ctx, "discovery.Reap: source scan failed",
+				"agent", res.agent, "err", res.err)
 			continue
 		}
 		set := make(map[string]bool, len(res.sessions))
 		for _, sess := range res.sessions {
 			set[sess.SessionID] = true
 		}
-		n, err := s.ReapAbsentForAgent(res.agent, set)
+		n, err := s.ReapAbsentForAgent(ctx, res.agent, set)
 		total += n
 		if err != nil && firstErr == nil {
 			firstErr = err
+		}
+		if n > 0 {
+			slog.InfoContext(ctx, "discovery.Reap: dropped stale sessions",
+				"agent", res.agent, "n", n, "alive", len(res.sessions))
 		}
 	}
 	return total, firstErr

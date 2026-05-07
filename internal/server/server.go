@@ -1,30 +1,68 @@
+// Package server hosts the only network-facing surface of agent-status:
+// a single POST /hook endpoint that agent processes call to deliver
+// hook events. Everything else (session list, live meta, transcripts,
+// focus) is read directly from disk by clients on the same host. The
+// server's role in the architecture is "single writer of state.json
+// plus background watcher daemon"; readers are independent and atomic
+// rename guarantees they see consistent snapshots.
 package server
 
 import (
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/samling/agent-status/internal/discovery"
-	"github.com/samling/agent-status/internal/focus"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
+	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/state"
 )
 
 func Handler(s *state.Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hook", makeHookHandler(s))
-	mux.HandleFunc("/state", makeStateHandler(s))
-	// /focus       -> focus the first waiting session (404 if none)
-	// /focus/{id}  -> focus the named session (404 if missing/dead)
-	// Registered with and without trailing slash so both match.
-	focusH := makeFocusHandler(s)
-	mux.HandleFunc("/focus", focusH)
-	mux.HandleFunc("/focus/", focusH)
-	return mux
+	return traceMiddleware(mux)
+}
+
+// traceMiddleware extracts any incoming W3C traceparent header so a
+// caller's span becomes the parent of the server-side span, then
+// emits a log line per request with method+path+status+duration.
+func traceMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, _ := logging.ExtractHTTP(r)
+		r = r.WithContext(ctx)
+		rw := &statusRecorder{ResponseWriter: w, status: 200}
+		start := time.Now()
+		next.ServeHTTP(rw, r)
+		dur := time.Since(start)
+		level := slog.LevelDebug
+		if rw.status >= 500 {
+			level = slog.LevelError
+		} else if rw.status >= 400 {
+			level = slog.LevelWarn
+		}
+		slog.LogAttrs(ctx, level, "http",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", rw.status),
+			slog.Duration("dur", dur),
+		)
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
 }
 
 type envelope struct {
@@ -78,43 +116,96 @@ func (e envelope) toolName() string {
 
 func makeHookHandler(s *state.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, span := logging.Start(r.Context(), "server.hook")
+		defer span.End()
+
 		if r.Method != http.MethodPost {
-			log.Printf("hook: %s %s rejected (method not allowed)", r.Method, r.URL.Path)
+			slog.WarnContext(ctx, "hook rejected: method not allowed",
+				"method", r.Method, "path", r.URL.Path)
+			span.SetStatus(codes.Error, "method not allowed")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			log.Printf("hook: read body: %v", err)
+			slog.ErrorContext(ctx, "hook: read body", "err", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "read body")
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		slog.DebugContext(ctx, "hook body received", "bytes", len(body))
+
 		var env envelope
 		if err := json.Unmarshal(body, &env); err != nil {
-			log.Printf("hook: unmarshal: %v (%d bytes)", err, len(body))
+			slog.WarnContext(ctx, "hook: unmarshal failed (continuing with zero envelope)",
+				"err", err, "bytes", len(body))
 		}
 
 		agent := inferAgent(env, r.URL.Query().Get("agent"))
 		sessionID := env.sessionID()
-		event := state.NormalizeHookEvent(agent, env.hookEventName())
+		rawEvent := env.hookEventName()
+		event := state.NormalizeHookEvent(agent, rawEvent)
 		receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
-		if err := s.RecordEvent(agent, sessionID, event, env.turnID(), receivedAt); err != nil {
-			log.Printf("hook: record error session=%s event=%s: %v", state.ShortID(sessionID), event, err)
+
+		span.SetAttributes(
+			attribute.String("agent", agent),
+			attribute.String("session_id", sessionID),
+			attribute.String("hook_event", event),
+			attribute.String("hook_event_raw", rawEvent),
+			attribute.String("turn_id", env.turnID()),
+			attribute.String("tool", env.toolName()),
+		)
+
+		slog.DebugContext(ctx, "hook envelope parsed",
+			"agent", agent,
+			"session", state.ShortID(sessionID),
+			"event_raw", rawEvent,
+			"event_norm", event,
+			"turn", env.turnID(),
+			"tool", env.toolName(),
+			"transcript", env.transcriptPath(),
+		)
+
+		recordStart := time.Now()
+		applied, err := s.RecordEvent(ctx, agent, sessionID, event, env.turnID(), receivedAt)
+		if err != nil {
+			slog.ErrorContext(ctx, "hook: record event failed",
+				"agent", agent,
+				"session", state.ShortID(sessionID),
+				"event", event,
+				"err", err,
+			)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "record event")
 			http.Error(w, "record failed", http.StatusInternalServerError)
 			return
 		}
-		log.Printf("hook: agent=%s event=%s session=%s%s", agent, event, state.ShortID(sessionID), hookLogDetail(env))
+		span.SetAttributes(attribute.Bool("applied", applied))
+		if applied {
+			slog.InfoContext(ctx, "hook recorded",
+				"agent", agent,
+				"event", event,
+				"session", state.ShortID(sessionID),
+				"tool", env.toolName(),
+				"record_dur", time.Since(recordStart),
+			)
+		} else {
+			// No-op writes happen when the session was already reaped
+			// (SessionEnd arriving after the file watcher dropped the
+			// row), when an event is for an unknown session, or when a
+			// turn-idle event repeats inside the same turn. Stay at
+			// DEBUG so INFO reflects only state-changing hooks.
+			slog.DebugContext(ctx, "hook ignored (no state change)",
+				"agent", agent,
+				"event", event,
+				"session", state.ShortID(sessionID),
+				"record_dur", time.Since(recordStart),
+			)
+		}
 
 		w.WriteHeader(http.StatusNoContent)
 	}
-}
-
-func hookLogDetail(env envelope) string {
-	toolName := env.toolName()
-	if toolName == "" {
-		return ""
-	}
-	return " tool=" + toolName
 }
 
 func inferAgent(env envelope, agentHint string) string {
@@ -136,72 +227,4 @@ func isCodexTranscriptPath(path string) bool {
 	}
 	path = filepath.ToSlash(path)
 	return strings.Contains(path, "/.codex/") || strings.HasPrefix(path, ".codex/")
-}
-
-func makeStateHandler(s *state.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// No log line: /state is polled every refresh tick by the
-		// TUI and statusline, so anything written here drowns the
-		// genuinely interesting events (hooks, focus calls).
-		sessions := s.Sessions()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(sessions)
-	}
-}
-
-// FocusResponse is the JSON body returned by /focus on success. Kept
-// here so CLI and other clients can decode without redefining the shape.
-type FocusResponse struct {
-	SessionID string `json:"session_id"`
-	Message   string `json:"message"`
-}
-
-// makeFocusHandler resolves a session id (explicit or "first waiting")
-// to a live PID and invokes focus.PID. The endpoint is the single
-// source of truth for "focus a session" so notification activations,
-// CLI invocations, and any future clients all behave identically.
-func makeFocusHandler(s *state.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		id := strings.TrimPrefix(r.URL.Path, "/focus")
-		id = strings.TrimPrefix(id, "/")
-		if id == "" {
-			for _, sess := range s.Sessions() {
-				if sess.Status == "waiting" {
-					id = sess.SessionID
-					break
-				}
-			}
-			if id == "" {
-				http.Error(w, "no waiting session", http.StatusNotFound)
-				return
-			}
-		}
-		meta, err := discovery.LiveSessionMeta()
-		if err != nil {
-			http.Error(w, "lookup session meta: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		sm, ok := meta[id]
-		if !ok {
-			http.Error(w, "session not found: "+id, http.StatusNotFound)
-			return
-		}
-		if sm.PID <= 0 {
-			http.Error(w, "session has no live PID", http.StatusUnprocessableEntity)
-			return
-		}
-		msg, err := focus.PID(sm.PID)
-		if err != nil {
-			log.Printf("focus: session=%s pid=%d error: %v", state.ShortID(id), sm.PID, err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		log.Printf("focus: session=%s pid=%d %s", state.ShortID(id), sm.PID, msg)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(FocusResponse{SessionID: id, Message: msg})
-	}
 }

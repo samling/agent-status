@@ -2,7 +2,7 @@ package cli
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -10,26 +10,55 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/focus"
 	"github.com/samling/agent-status/internal/notify"
 	"github.com/samling/agent-status/internal/server"
 	"github.com/samling/agent-status/internal/state"
 )
 
-// focusViaAPI returns a callback that POSTs to the collector's own
-// /focus endpoint via the shared server.Focus client. Routing through
-// HTTP — even though the call lands in the same process — keeps a
-// single source of truth for "focus the right session right now":
-// the server picks the first waiting session at click time, so
-// activations always reflect the latest state instead of whatever
-// was waiting when the notification was rendered.
-func focusViaAPI(addr string) func(context.Context) {
+// focusFirstWaiting returns a notification activation callback. The
+// notify watcher runs in-process with the collector, so this picks
+// the freshest waiting session straight from the store, scans for
+// its live PID, and calls focus.PID directly. No HTTP indirection —
+// the activation handler and the window-owning desktop are always
+// the same machine.
+func focusFirstWaiting(s *state.Store) func(context.Context) {
 	return func(ctx context.Context) {
-		resp, err := server.Focus(ctx, addr, "")
-		if err != nil {
-			log.Printf("notify: focus call: %v", err)
+		var sessionID string
+		for _, sess := range s.Sessions() {
+			if sess.Status == "waiting" {
+				sessionID = sess.SessionID
+				break
+			}
+		}
+		if sessionID == "" {
+			slog.DebugContext(ctx, "notify: no waiting session at click time")
 			return
 		}
-		log.Printf("notify: activation -> %s", resp.Message)
+		meta, err := discovery.LiveSessionMeta()
+		if err != nil {
+			slog.WarnContext(ctx, "notify: live meta lookup failed", "err", err)
+			return
+		}
+		sm, ok := meta[sessionID]
+		if !ok {
+			slog.WarnContext(ctx, "notify: session not in live meta",
+				"session", state.ShortID(sessionID))
+			return
+		}
+		if sm.PID <= 0 {
+			slog.WarnContext(ctx, "notify: session has no live PID",
+				"session", state.ShortID(sessionID))
+			return
+		}
+		msg, err := focus.PID(sm.PID)
+		if err != nil {
+			slog.WarnContext(ctx, "notify: focus failed",
+				"session", state.ShortID(sessionID), "pid", sm.PID, "err", err)
+			return
+		}
+		slog.InfoContext(ctx, "notify: activation handled",
+			"session", state.ShortID(sessionID), "pid", sm.PID, "msg", msg)
 	}
 }
 
@@ -48,7 +77,7 @@ func init() {
 	serverCmd.Flags().Duration("notify-repeat", 5*time.Minute, "interval between subsequent notifications while sessions remain waiting (0 disables repeats)")
 	serverCmd.Flags().String("notify-title", "agent-status", "Go template for the notification title")
 	serverCmd.Flags().String("notify-body", "{{.Waiting}} session(s) waiting for input", "Go template for the notification body; see internal/notify TemplateData for available fields")
-	serverCmd.Flags().Bool("notify-activation", false, "attach a focus action button; clicking it POSTs to the local /focus endpoint")
+	serverCmd.Flags().Bool("notify-activation", false, "attach a focus action button; clicking it focuses the first waiting session")
 	serverCmd.Flags().String("notify-activation-label", "Focus", "label for the activation button when --notify-activation is set")
 
 	bindings := map[string]string{
@@ -68,6 +97,7 @@ func init() {
 }
 
 func runServer(cmd *cobra.Command, _ []string) error {
+	ctx := cmd.Context()
 	statePath := viper.GetString("state")
 	addr := ServerEndpoint()
 
@@ -77,8 +107,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 
 	go func() {
-		if err := discovery.Watch(cmd.Context(), s); err != nil {
-			log.Printf("watcher: %v", err)
+		if err := discovery.Watch(ctx, s); err != nil {
+			slog.ErrorContext(ctx, "discovery: watcher exited with error", "err", err)
 		}
 	}()
 
@@ -93,23 +123,27 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			label := viper.GetString("server.notify.activation.label")
 			cfg.Activation = &notify.Activation{
 				Label:      label,
-				OnActivate: focusViaAPI(addr),
+				OnActivate: focusFirstWaiting(s),
 			}
 		}
 		w, err := notify.NewWatcher(cfg, s)
 		if err != nil {
-			log.Printf("notify: disabled: %v", err)
+			slog.WarnContext(ctx, "notify: disabled", "err", err)
 		} else {
 			activation := "off"
 			if cfg.Activation != nil {
 				activation = "on (" + cfg.Activation.Label + ")"
 			}
-			log.Printf("notify: enabled via %s (initial=%s repeat=%s activation=%s)", w.Backend().Name(), cfg.InitialDelay, cfg.RepeatInterval, activation)
-			go w.Run(cmd.Context())
+			slog.InfoContext(ctx, "notify: enabled",
+				"backend", w.Backend().Name(),
+				"initial_delay", cfg.InitialDelay,
+				"repeat", cfg.RepeatInterval,
+				"activation", activation)
+			go w.Run(ctx)
 		}
 	}
 
-	log.Printf("collector listening on %s (state: %s)", addr, statePath)
+	slog.InfoContext(ctx, "collector listening", "addr", addr, "state", statePath)
 	return http.ListenAndServe(addr, server.Handler(s))
 }
 

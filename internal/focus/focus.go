@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -73,15 +74,25 @@ func PID(pid int) (string, error) {
 
 	f, err := New(ctx)
 	if err != nil {
+		slog.DebugContext(ctx, "focus.PID: no backend", "pid", pid, "err", err)
 		return "", err
 	}
 
 	ancestors := walkAncestors(pid)
+	slog.DebugContext(ctx, "focus.PID: ancestry resolved",
+		"pid", pid, "backend", f.Name(), "ancestors", ancestors)
+
 	winErr := f.Focus(ctx, Target{PID: pid, Ancestors: ancestors})
+	slog.DebugContext(ctx, "focus.PID: window focus result",
+		"pid", pid, "backend", f.Name(), "err", winErr)
 
 	paneMsg, paneErr := findAndFocusTmuxPane(ctx, ancestors)
 	if paneErr != nil {
+		slog.DebugContext(ctx, "focus.PID: tmux pane error", "err", paneErr)
 		return "", paneErr
+	}
+	if paneMsg != "" {
+		slog.DebugContext(ctx, "focus.PID: tmux pane focused", "msg", paneMsg)
 	}
 
 	switch {

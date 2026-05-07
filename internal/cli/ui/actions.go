@@ -1,13 +1,12 @@
 package ui
 
 import (
-	"context"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/samling/agent-status/internal/server"
+	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/focus"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -94,11 +93,13 @@ func (m uiModel) commitNote() uiModel {
 	return m
 }
 
-// focusSelected POSTs to /focus/{id} on the collector. The TUI used
-// to call focus.PID directly, but routing through the same REST
-// endpoint as notification activations means there's exactly one
-// place that knows how to focus a session — the server. The PID
-// lookup, ancestry walk, and compositor IPC all happen server-side.
+// focusSelected resolves the active session to a live PID and
+// invokes focus.PID locally. Both the meta lookup and the compositor
+// IPC must run on the host that owns the window — which is always
+// this process — so neither leaves the client. m.meta is refreshed
+// every tick from the same discovery scan; we re-scan here only when
+// the selected session was added since the last tick and isn't in
+// the cached map yet.
 func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 	id := m.activeSelectionID()
 	if id == "" {
@@ -106,14 +107,30 @@ func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 		return m, nil
 	}
 	m.selectedID = id
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	resp, err := server.Focus(ctx, m.serverAddr, id)
+
+	sm, ok := m.meta[id]
+	if !ok {
+		fresh, err := discovery.LiveSessionMeta()
+		if err != nil {
+			m.status = "focus error: " + err.Error()
+			return m, nil
+		}
+		sm, ok = fresh[id]
+	}
+	if !ok {
+		m.status = "session not found in live meta"
+		return m, nil
+	}
+	if sm.PID <= 0 {
+		m.status = "session has no live PID"
+		return m, nil
+	}
+	msg, err := focus.PID(sm.PID)
 	if err != nil {
 		m.status = "focus error: " + err.Error()
 		return m, nil
 	}
-	m.status = resp.Message
+	m.status = msg
 	if m.quitAfterFocus {
 		return m, tea.Quit
 	}

@@ -1,31 +1,46 @@
 package cli
 
 import (
+	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
 	"github.com/samling/agent-status/internal/cli/ui"
+	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/version"
 )
 
 var rootCmd = &cobra.Command{
-	Use:     "agent-status",
-	Short:   "Collect and inspect local coding-agent sessions",
-	Version: version.Get(),
+	Use:               "agent-status",
+	Short:             "Collect and inspect local coding-agent sessions",
+	Version:           version.Get(),
+	PersistentPreRunE: bootstrap,
 }
 
 // configPathFlag overrides the config file location when set on the
 // command line. Empty means "look in the default search paths."
 var configPathFlag string
 
+// shutdownFn flushes any pending OTel spans on process exit. Set in
+// bootstrap, drained in Execute.
+var shutdownFn func(context.Context) error
+
 func Execute() error {
-	return rootCmd.Execute()
+	err := rootCmd.Execute()
+	if shutdownFn != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownFn(ctx)
+		shutdownFn = nil
+	}
+	return err
 }
 
 // defaultConfigDir returns $XDG_CONFIG_HOME/agent-status, falling
@@ -91,20 +106,39 @@ func loadConfig() error {
 		}
 		return err
 	}
-	log.Printf("config: loaded %s", viper.ConfigFileUsed())
+	return nil
+}
+
+// bootstrap runs once before any command's RunE: it loads the YAML
+// config, then installs slog and (optionally) OTel using the merged
+// env+viper logging settings. Errors here abort the command rather
+// than running with no observability.
+func bootstrap(cmd *cobra.Command, _ []string) error {
+	if err := loadConfig(); err != nil {
+		return err
+	}
+	cfg := logging.Resolve()
+	sd, err := logging.Setup(cmd.Context(), cfg)
+	if err != nil {
+		return err
+	}
+	shutdownFn = sd
+	if path := viper.ConfigFileUsed(); path != "" {
+		slog.Info("config loaded", "path", path)
+	}
 	return nil
 }
 
 func init() {
-	cobra.OnInitialize(func() {
-		if err := loadConfig(); err != nil {
-			log.Fatalf("config: %v", err)
-		}
-	})
-
 	rootCmd.PersistentFlags().StringVar(&configPathFlag, "config", "", "path to config file (default: $XDG_CONFIG_HOME/agent-status/config.yaml)")
 	rootCmd.PersistentFlags().String("state", defaultStatePath(), "path to state file")
+	rootCmd.PersistentFlags().String("log-level", "", "log level: debug, info, warn, error (also: LOG_LEVEL, log.level)")
+	rootCmd.PersistentFlags().String("log-format", "", "log format: text or json (also: LOG_FORMAT, log.format)")
+	rootCmd.PersistentFlags().String("log-traces", "", "OTel traces exporter: off or stdout (also: LOG_TRACES, log.traces)")
 	_ = viper.BindPFlag("state", rootCmd.PersistentFlags().Lookup("state"))
+	_ = viper.BindPFlag("log.level", rootCmd.PersistentFlags().Lookup("log-level"))
+	_ = viper.BindPFlag("log.format", rootCmd.PersistentFlags().Lookup("log-format"))
+	_ = viper.BindPFlag("log.traces", rootCmd.PersistentFlags().Lookup("log-traces"))
 
 	// AGENT_STATUS_* env vars override config + defaults; flags
 	// override env. The replacer maps viper's dotted keys (e.g.
