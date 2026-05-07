@@ -1,63 +1,59 @@
+// Package discovery orchestrates the per-agent discovery backends in the
+// claudecode and codex subpackages: it registers each backend, runs an initial
+// sweep at startup, and polls them on a 2-second tick.
 package discovery
 
 import (
-	"time"
+	"context"
 
+	"github.com/samling/agent-status/internal/discovery/claudecode"
+	"github.com/samling/agent-status/internal/discovery/codex"
+	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/state"
 )
 
-// SessionMeta is the live per-session metadata discovered from an agent's
-// local state files.
-type SessionMeta struct {
-	Agent      string
-	PID        int
-	Entrypoint string
-	Cwd        string
-	Version    string
-	Model      string
-	Path       string
-	UpdatedAt  time.Time
-}
-
-type liveAgentSession struct {
-	Agent        string
-	SessionID    string
-	StartedAt    time.Time
-	Event        string
-	EventAt      time.Time
-	EngineStatus string
-	Meta         SessionMeta
-}
-
+// liveSource is one agent discovery backend.
 type liveSource struct {
-	agent string
-	scan  func() ([]liveAgentSession, int, error)
+	agent      string
+	scan       func() ([]source.LiveSession, int, error)
+	watch      func(ctx context.Context, s *state.Store) error
+	apply      func(ctx context.Context, s *state.Store, sess source.LiveSession) bool
+	transcript func(sessionID string, meta source.SessionMeta) (source.TranscriptInfo, error)
 }
 
 func liveSources() []liveSource {
 	return []liveSource{
-		{agent: state.AgentClaudeCode, scan: scanClaudeLive},
-		{agent: state.AgentCodex, scan: scanCodexLive},
+		{
+			agent:      state.AgentClaudeCode,
+			scan:       claudecode.Scan,
+			watch:      claudecode.Watch,
+			apply:      claudecode.Apply,
+			transcript: claudecode.Transcript,
+		},
+		{
+			agent:      state.AgentCodex,
+			scan:       codex.Scan,
+			apply:      codex.Apply,
+			transcript: codex.Transcript,
+		},
 	}
 }
 
-// LiveSessionMeta returns a map of session_id -> SessionMeta for sessions
-// currently alive on disk. Read-only; used by the UI to enrich rows with
-// fields that are not part of persisted state.
-func LiveSessionMeta() (map[string]SessionMeta, error) {
-	out := map[string]SessionMeta{}
+// LiveSessionMeta returns the UI-facing metadata for every currently-live
+// session, keyed by session id, by fanning out scans across every backend.
+func LiveSessionMeta() (map[string]source.SessionMeta, error) {
+	out := map[string]source.SessionMeta{}
 	type result struct {
-		sessions []liveAgentSession
+		sessions []source.LiveSession
 		err      error
 	}
 	sources := liveSources()
 	ch := make(chan result, len(sources))
 	for _, src := range sources {
-		src := src
-		go func() {
+		go func(src liveSource) {
 			sessions, _, err := src.scan()
 			ch <- result{sessions: sessions, err: err}
-		}()
+		}(src)
 	}
 	var firstErr error
 	for range sources {
@@ -72,42 +68,13 @@ func LiveSessionMeta() (map[string]SessionMeta, error) {
 	return out, firstErr
 }
 
-// Reap removes any state entry whose session_id is no longer backed by a
-// live session file. Returns the count removed.
-func Reap(s *state.Store) (int, error) {
-	type result struct {
-		agent    string
-		sessions []liveAgentSession
-		err      error
-	}
-	sources := liveSources()
-	ch := make(chan result, len(sources))
-	for _, src := range sources {
-		src := src
-		go func() {
-			sessions, _, err := src.scan()
-			ch <- result{agent: src.agent, sessions: sessions, err: err}
-		}()
-	}
-	total := 0
-	var firstErr error
-	for range sources {
-		res := <-ch
-		if res.err != nil {
-			if firstErr == nil {
-				firstErr = res.err
-			}
-			continue
-		}
-		set := make(map[string]bool, len(res.sessions))
-		for _, sess := range res.sessions {
-			set[sess.SessionID] = true
-		}
-		n, err := s.ReapAbsentForAgent(res.agent, set)
-		total += n
-		if err != nil && firstErr == nil {
-			firstErr = err
+// LoadTranscript dispatches transcript loading to the registered backend for
+// the given agent.
+func LoadTranscript(sessionID, agent string, meta source.SessionMeta) (source.TranscriptInfo, error) {
+	for _, src := range liveSources() {
+		if src.agent == agent {
+			return src.transcript(sessionID, meta)
 		}
 	}
-	return total, firstErr
+	return source.TranscriptInfo{}, nil
 }

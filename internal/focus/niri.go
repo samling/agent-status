@@ -9,15 +9,11 @@ import (
 	"strings"
 )
 
-// niri is the Focuser for the niri Wayland compositor, talking over
-// `niri msg` IPC. Implements both Focuser and probingFocuser.
 type niri struct{}
 
 func (*niri) Name() string { return "niri" }
 
-// Probe confirms the niri IPC is actually reachable. `niri msg
-// version` is a tiny round-trip that fails fast when the socket
-// isn't there or the binary isn't installed.
+// Probe confirms niri IPC is reachable.
 func (*niri) Probe(ctx context.Context) error {
 	return exec.CommandContext(ctx, "niri", "msg", "version").Run()
 }

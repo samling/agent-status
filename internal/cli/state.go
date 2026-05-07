@@ -1,16 +1,14 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"text/tabwriter"
-	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
-	"github.com/samling/agent-status/internal/server"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -25,9 +23,7 @@ func init() {
 }
 
 func runState(cmd *cobra.Command, _ []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	sessions, err := server.LoadState(ctx, ServerEndpoint())
+	sessions, err := state.Load(viper.GetString("state"))
 	if err != nil {
 		return err
 	}
@@ -47,7 +43,7 @@ func runState(cmd *cobra.Command, _ []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "STATUS\tAGENT\tSESSION_ID\tLAST_EVENT\tLAST_EVENT_AT\tFIRST_SEEN_AT")
 	for _, s := range sessions {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.Status, state.NormalizeAgent(s.Agent), s.SessionID, s.LastEvent, s.LastEventAt, s.FirstSeenAt)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", state.DeriveStatus(s), s.Agent, s.SessionID, s.LastEvent, s.LastEventAt, s.FirstSeenAt)
 	}
 	return w.Flush()
 }

@@ -16,15 +16,15 @@ CLAUDE_SETTINGS="$CLAUDE_DIR/settings.json"
 
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 CODEX_SCRIPT_DEST="$CODEX_DIR/scripts/post-agent-status.sh"
-CODEX_HOOKS="$CODEX_DIR/hooks/hooks.json"
+CODEX_HOOKS="$CODEX_DIR/hooks.json"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_SCRIPT="$REPO_ROOT/scripts/post-agent-status.sh"
-SRC_CLAUDE_HOOKS="$REPO_ROOT/hooks.json"
-SRC_CODEX_HOOKS="$REPO_ROOT/codex-hooks.json"
+SRC_CLAUDE_HOOKS="$REPO_ROOT/hooks/claude-code.json"
+SRC_CODEX_HOOKS="$REPO_ROOT/hooks/codex.json"
 
 if [ ! -f "$SRC_SCRIPT" ] || [ ! -f "$SRC_CLAUDE_HOOKS" ] || [ ! -f "$SRC_CODEX_HOOKS" ]; then
-    echo "error: must be run from the agent-status repo (missing scripts/, hooks.json, or codex-hooks.json)" >&2
+    echo "error: must be run from the agent-status repo (missing scripts/post-agent-status.sh, hooks/claude-code.json, or hooks/codex.json)" >&2
     exit 1
 fi
 

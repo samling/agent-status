@@ -1,20 +1,15 @@
 package ui
 
 import (
-	"context"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/samling/agent-status/internal/server"
+	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/focus"
 	"github.com/samling/agent-status/internal/state"
 )
 
-// moveSelection shifts the highlighted row by delta, clamped to the
-// visible session range. If selectedID is unset or stale we treat
-// row 0 (the View's default) as the starting point so the delta
-// applies on the first keystroke.
 func (m *uiModel) moveSelection(delta int) {
 	if len(m.sessions) == 0 {
 		m.selectedID = ""
@@ -36,8 +31,6 @@ func (m *uiModel) moveSelection(delta int) {
 	m.selectedID = m.sessions[next].SessionID
 }
 
-// activeSelectionID returns the currently focused session id, falling
-// back to the visible first row when the user hasn't picked anything.
 func (m uiModel) activeSelectionID() string {
 	if m.selectedID != "" {
 		return m.selectedID
@@ -94,11 +87,6 @@ func (m uiModel) commitNote() uiModel {
 	return m
 }
 
-// focusSelected POSTs to /focus/{id} on the collector. The TUI used
-// to call focus.PID directly, but routing through the same REST
-// endpoint as notification activations means there's exactly one
-// place that knows how to focus a session — the server. The PID
-// lookup, ancestry walk, and compositor IPC all happen server-side.
 func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 	id := m.activeSelectionID()
 	if id == "" {
@@ -106,14 +94,30 @@ func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 		return m, nil
 	}
 	m.selectedID = id
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	resp, err := server.Focus(ctx, m.serverAddr, id)
+
+	sm, ok := m.meta[id]
+	if !ok {
+		fresh, err := discovery.LiveSessionMeta()
+		if err != nil {
+			m.status = "focus error: " + err.Error()
+			return m, nil
+		}
+		sm, ok = fresh[id]
+	}
+	if !ok {
+		m.status = "session not found in live meta"
+		return m, nil
+	}
+	if sm.PID <= 0 {
+		m.status = "session has no live PID"
+		return m, nil
+	}
+	msg, err := focus.PID(sm.PID)
 	if err != nil {
 		m.status = "focus error: " + err.Error()
 		return m, nil
 	}
-	m.status = resp.Message
+	m.status = msg
 	if m.quitAfterFocus {
 		return m, tea.Quit
 	}

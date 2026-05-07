@@ -2,118 +2,93 @@ package discovery
 
 import (
 	"context"
-	"log"
-	"os"
-	"path/filepath"
+	"log/slog"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
-
+	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/state"
 )
 
-// Watch monitors Claude session-file events and polls all registered
-// discovery sources into our state file. Removal/rename triggers a reap.
-// Runs until ctx is cancelled.
+// Watch polls every discovery source until ctx is cancelled.
 func Watch(ctx context.Context, s *state.Store) error {
-	dir, err := claudeSessionsDir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+	sources := liveSources()
+
+	for _, src := range sources {
+		if src.watch == nil {
+			continue
+		}
+		// Start filewatchers per source (agent type) for sources that expose one.
+		// These react to push-side filesystem events for session creation/deletion;
+		// the periodic syncDiscovered tick is the backstop.
+		go func(src liveSource) {
+			if err := src.watch(ctx, s); err != nil {
+				slog.ErrorContext(ctx, "discovery: source watcher exited",
+					"agent", src.agent, "err", err)
+			}
+		}(src)
 	}
 
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		return err
-	}
-	defer w.Close()
-
-	if err := w.Add(dir); err != nil {
-		return err
-	}
-
-	// Initial sweep: register every live session and sync its on-disk
-	// status so the state file is populated before any hooks fire.
-	// Filtered through each provider's liveness check so dead-PID
-	// stragglers from prior crashes don't get inserted.
-	if scanned, alive, updated, err := syncDiscovered(s); err != nil {
-		log.Printf("watcher: initial sweep: %v", err)
+	// Initial sweep of existing on-disk sessions; watchers (already armed above)
+	// handle anything that changes from this point on.
+	if scanned, alive, updated, err := syncDiscovered(ctx, s, sources); err != nil {
+		slog.ErrorContext(ctx, "discovery: initial sweep failed", "err", err)
 	} else {
-		log.Printf("discovery: scanned=%d alive=%d updated=%d", scanned, alive, updated)
+		slog.InfoContext(ctx, "discovery: initial sweep",
+			"scanned", scanned, "alive", alive, "updated", updated)
 	}
 
 	discover := time.NewTicker(2 * time.Second)
 	defer discover.Stop()
 
-	// Periodic reap as a safety net for dead sessions whose file
-	// removal we missed (fsnotify drops events under load, the
-	// process crashed without unlinking, the SessionEnd hook had a
-	// case mismatch, etc.). Reap is cheap — one ReadDir + a stat
-	// per file plus a kill -0 per pid — so polling every 30s costs
-	// nothing and prevents stale rows from lingering in the TUI.
-	reap := time.NewTicker(30 * time.Second)
-	defer reap.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
+			slog.InfoContext(ctx, "discovery: watcher stopped")
 			return nil
 		case <-discover.C:
-			if scanned, alive, updated, err := syncDiscovered(s); err != nil {
-				log.Printf("watcher: discovery poll: %v", err)
+			if scanned, alive, updated, err := syncDiscovered(ctx, s, sources); err != nil {
+				slog.WarnContext(ctx, "discovery: poll error", "err", err)
 			} else if updated > 0 {
-				log.Printf("discovery: scanned=%d alive=%d updated=%d", scanned, alive, updated)
+				slog.InfoContext(ctx, "discovery: tick",
+					"scanned", scanned, "alive", alive, "updated", updated)
+			} else {
+				slog.DebugContext(ctx, "discovery: tick (no changes)",
+					"scanned", scanned, "alive", alive)
 			}
-		case <-reap.C:
-			if n, err := Reap(s); err != nil {
-				log.Printf("watcher: periodic reap: %v", err)
-			} else if n > 0 {
-				log.Printf("watcher: periodic reap removed %d stale session(s)", n)
-			}
-		case event, ok := <-w.Events:
-			if !ok {
-				return nil
-			}
-			if filepath.Ext(event.Name) != ".json" {
-				continue
-			}
-			switch {
-			case event.Op&(fsnotify.Write|fsnotify.Create) != 0:
-				processClaudeSessionFile(s, event.Name)
-			case event.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
-				// File vanished: a session likely exited (including
-				// non-clean exits that skip SessionEnd). Trigger a reap.
-				if n, err := Reap(s); err != nil {
-					log.Printf("watcher: reap after %s: %v", filepath.Base(event.Name), err)
-				} else if n > 0 {
-					log.Printf("watcher: reaped %d session(s) after file removal", n)
-				}
-			}
-		case err, ok := <-w.Errors:
-			if !ok {
-				return nil
-			}
-			log.Printf("watcher: %v", err)
 		}
 	}
 }
 
-func syncDiscovered(s *state.Store) (scanned, alive, updated int, err error) {
+// syncDiscovered fans out scans across every source concurrently, applies each
+// returned session through that source's apply func, and reaps any store rows
+// not present in the alive set.
+//
+// No span is opened for the tick itself: each apply that touches a session
+// emits its own span parented to that session's persisted trace, which is the
+// granularity we want for the trace UI. The tick is logged via slog only.
+func syncDiscovered(ctx context.Context, s *state.Store, sources []liveSource) (scanned, alive, updated int, err error) {
 	type result struct {
-		sessions []liveAgentSession
+		src      liveSource
+		sessions []source.LiveSession
 		scanned  int
 		err      error
 	}
-	sources := liveSources()
 	ch := make(chan result, len(sources))
 	for _, src := range sources {
-		src := src
-		go func() {
+		go func(src liveSource) {
+			start := time.Now()
 			sessions, scanned, err := src.scan()
-			ch <- result{sessions: sessions, scanned: scanned, err: err}
-		}()
+			if err != nil {
+				slog.WarnContext(ctx, "discovery: source scan failed",
+					"agent", src.agent, "scanned", scanned, "alive", len(sessions),
+					"dur", time.Since(start), "err", err)
+			} else {
+				slog.DebugContext(ctx, "discovery: source scanned",
+					"agent", src.agent, "scanned", scanned, "alive", len(sessions),
+					"dur", time.Since(start))
+			}
+			ch <- result{src: src, sessions: sessions, scanned: scanned, err: err}
+		}(src)
 	}
 	for range sources {
 		res := <-ch
@@ -125,47 +100,29 @@ func syncDiscovered(s *state.Store) (scanned, alive, updated int, err error) {
 		}
 		scanned += res.scanned
 		alive += len(res.sessions)
+		aliveSet := make(map[string]bool, len(res.sessions))
 		for _, sess := range res.sessions {
-			if applyLiveSession(s, sess) {
+			aliveSet[sess.SessionID] = true
+			if res.src.apply(ctx, s, sess) {
 				updated++
 			}
 		}
+		// Reap per-agent after successful scans so one source failure
+		// cannot delete another source's rows.
+		n, reapErr := s.ReapAbsentForAgent(ctx, res.src.agent, aliveSet)
+		if reapErr != nil {
+			slog.WarnContext(ctx, "discovery: inline reap failed",
+				"agent", res.src.agent, "err", reapErr)
+			if err == nil {
+				err = reapErr
+			}
+			continue
+		}
+		if n > 0 {
+			slog.InfoContext(ctx, "discovery: reaped stale sessions",
+				"agent", res.src.agent, "n", n, "alive", len(res.sessions))
+			updated += n
+		}
 	}
 	return scanned, alive, updated, err
-}
-
-func applyLiveSession(s *state.Store, sess liveAgentSession) bool {
-	switch sess.Agent {
-	case state.AgentClaudeCode:
-		return applyClaudeSessionFile(s, claudeSessionFile{
-			PID:        sess.Meta.PID,
-			SessionID:  sess.SessionID,
-			Entrypoint: sess.Meta.Entrypoint,
-			Cwd:        sess.Meta.Cwd,
-			Status:     sess.EngineStatus,
-			Version:    sess.Meta.Version,
-			StartedAt:  unixMilli(sess.StartedAt),
-		})
-	case state.AgentCodex:
-		changed, err := s.ReconcileDiscovered(sess.Agent, sess.SessionID, sess.StartedAt)
-		if err != nil {
-			log.Printf("watcher: reconcile discovered %s %s: %v", sess.Agent, state.ShortID(sess.SessionID), err)
-		} else if changed {
-			log.Printf("watcher: reconciled %s session %s", sess.Agent, state.ShortID(sess.SessionID))
-		}
-		return changed
-	default:
-		changed, err := s.RecordObserved(sess.Agent, sess.SessionID, sess.StartedAt, sess.Event, sess.EventAt, sess.EngineStatus)
-		if err != nil {
-			log.Printf("watcher: record observed %s %s: %v", sess.Agent, state.ShortID(sess.SessionID), err)
-		}
-		return changed
-	}
-}
-
-func unixMilli(t time.Time) int64 {
-	if t.IsZero() {
-		return 0
-	}
-	return t.UnixMilli()
 }

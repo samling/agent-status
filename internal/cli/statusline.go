@@ -1,13 +1,11 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"text/template"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -58,9 +56,7 @@ func init() {
 	}
 }
 
-// statuslineView is the data passed to the user-provided template.
-// Field names are stable; new fields can be added without breaking
-// existing templates.
+// statuslineView is exposed to the user template.
 type statuslineView struct {
 	Total     int
 	Active    int
@@ -74,16 +70,11 @@ func runStatusline(_ *cobra.Command, _ []string) error {
 	format := viper.GetString("statusline.format")
 	asJSON := viper.GetBool("statusline.json")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	sessions, err := server.LoadState(ctx, ServerEndpoint())
-	connected := err == nil
+	sessions, err := state.Load(viper.GetString("state"))
 	if err != nil {
-		// Statusline is meant to render every poll; surface "no
-		// sessions, disconnected" instead of failing so tmux/waybar
-		// don't show their fallback text on every transient blip.
 		sessions = nil
 	}
+	connected := server.Reachable(ServerEndpoint())
 
 	view := statuslineView{
 		Total:     len(sessions),
@@ -91,7 +82,7 @@ func runStatusline(_ *cobra.Command, _ []string) error {
 		Sessions:  sessions,
 	}
 	for _, s := range sessions {
-		switch s.Status {
+		switch state.DeriveStatus(s) {
 		case "active":
 			view.Active++
 		case "waiting":
