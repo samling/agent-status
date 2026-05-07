@@ -203,7 +203,7 @@ func applyClaudeSessionFile(ctx context.Context, s *state.Store, sf claudeSessio
 	if sf.StartedAt > 0 {
 		createdAt = time.UnixMilli(sf.StartedAt)
 	}
-	inserted, jsonlChanged, transitioned, err := s.ApplyDiscovered(
+	inserted, engineChanged, transitioned, err := s.ApplyDiscovered(
 		ctx, state.AgentClaudeCode, sf.SessionID, sf.Status, createdAt,
 	)
 	if err != nil {
@@ -216,13 +216,13 @@ func applyClaudeSessionFile(ctx context.Context, s *state.Store, sf claudeSessio
 		slog.InfoContext(ctx, "discovery: new claude-code session",
 			"session", state.ShortID(sf.SessionID),
 			"pid", sf.PID, "entrypoint", sf.Entrypoint, "version", sf.Version,
-			"jsonl_status", sf.Status)
+			"engine_status", sf.Status)
 	case transitioned:
 		slog.InfoContext(ctx, "discovery: claude-code status transitioned",
-			"session", state.ShortID(sf.SessionID), "jsonl_status", sf.Status)
-	case jsonlChanged:
-		slog.DebugContext(ctx, "discovery: claude-code jsonl_status recorded",
-			"session", state.ShortID(sf.SessionID), "jsonl_status", sf.Status)
+			"session", state.ShortID(sf.SessionID), "engine_status", sf.Status)
+	case engineChanged:
+		slog.DebugContext(ctx, "discovery: claude-code engine_status recorded",
+			"session", state.ShortID(sf.SessionID), "engine_status", sf.Status)
 	}
 	return inserted
 }

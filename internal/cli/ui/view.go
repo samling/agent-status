@@ -143,7 +143,7 @@ func (m uiModel) View() string {
 				note := truncate(collapseWS(m.notes[s.SessionID]), colNote)
 				rowText := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
 					colStatus, s.Status,
-					colAgent, state.NormalizeAgent(s.Agent),
+					colAgent, s.Agent,
 					colVersion, ver,
 					cwdWidth, cwd,
 					colLastEvent, s.LastEvent,
@@ -254,7 +254,7 @@ func renderDetail(sessionID, note string, info discovery.TranscriptInfo, meta di
 		pid = fmt.Sprintf("%d", meta.PID)
 	}
 	line1 := strings.Join([]string{
-		labeledField("agent", state.NormalizeAgent(meta.Agent)),
+		labeledField("agent", meta.Agent),
 		labeledField("session", state.ShortID(sessionID)),
 		labeledField("pid", pid),
 		labeledField("model", info.Model),

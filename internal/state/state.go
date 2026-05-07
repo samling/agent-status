@@ -9,22 +9,21 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
 
 // Session is stored by session id; SessionID and Status are derived on read.
 type Session struct {
-	SessionID   string `json:"session_id,omitempty"`
-	Agent       string `json:"agent,omitempty"`
-	Status      string `json:"status,omitempty"`
-	FirstSeenAt string `json:"first_seen_at"`
-	LastEvent   string `json:"last_event"`
-	LastEventAt string `json:"last_event_at"`
-	TurnID      string `json:"turn_id,omitempty"`
-	JSONLStatus string `json:"jsonl_status"` // last observed engine status ("idle"|"busy") when the agent exposes one
-	StatusAt    string `json:"status_at"`    // when derived status last transitioned
+	SessionID    string `json:"session_id,omitempty"`
+	Agent        string `json:"agent,omitempty"`
+	Status       string `json:"status,omitempty"`
+	FirstSeenAt  string `json:"first_seen_at"`
+	LastEvent    string `json:"last_event"`
+	LastEventAt  string `json:"last_event_at"`
+	TurnID       string `json:"turn_id,omitempty"`
+	EngineStatus string `json:"engine_status"` // most recent self-reported engine status ("idle"|"busy") when the agent exposes one
+	StatusAt     string `json:"status_at"`     // when derived status last transitioned
 
 	// Parsed timestamps for renderers; omitted from JSON.
 	FirstSeenTime time.Time `json:"-"`
@@ -38,17 +37,10 @@ type Store struct {
 }
 
 const (
-	AgentClaudeCode = "claude-code"
-	AgentCodex      = "codex"
+	AgentClaudeCode   = "claude-code"
+	AgentCodex        = "codex"
+	AgentUnidentified = "unidentified"
 )
-
-func NormalizeAgent(agent string) string {
-	agent = strings.TrimSpace(agent)
-	if agent == "" {
-		return AgentClaudeCode
-	}
-	return agent
-}
 
 func Open(path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
@@ -103,98 +95,91 @@ func (s *Store) persist(ctx context.Context) error {
 	return nil
 }
 
+// HookEvent is one inbound hook payload, normalized for ingestion by RecordEvent.
+type HookEvent struct {
+	Agent      string
+	SessionID  string
+	Event      string
+	TurnID     string
+	ReceivedAt string
+}
+
 // RecordEvent applies one hook event to a live session.
-func (s *Store) RecordEvent(ctx context.Context, agent, sessionID, event, turnID, receivedAt string) (applied bool, err error) {
-	if sessionID == "" {
-		slog.DebugContext(ctx, "RecordEvent: empty session_id, dropping", "agent", agent, "event", event)
+func (s *Store) RecordEvent(ctx context.Context, e HookEvent) (applied bool, err error) {
+	if e.SessionID == "" {
+		slog.DebugContext(ctx, "RecordEvent: empty session_id, dropping", "agent", e.Agent, "event", e.Event)
 		return false, nil
 	}
-	agent = NormalizeAgent(agent)
-	event = NormalizeHookEvent(agent, event)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if isTerminal(event) {
-		r, ok := s.sessions[sessionID]
-		if !ok {
-			slog.DebugContext(ctx, "RecordEvent: terminal for unknown session",
-				"agent", agent, "session", ShortID(sessionID), "event", event)
+	if e.Event == "SessionEnd" {
+		if _, ok := s.sessions[e.SessionID]; !ok {
 			return false, nil
 		}
-		if NormalizeAgent(r.Agent) != agent {
-			slog.DebugContext(ctx, "RecordEvent: terminal agent mismatch, ignoring",
-				"agent", agent, "stored_agent", r.Agent,
-				"session", ShortID(sessionID), "event", event)
-			return false, nil
-		}
-		delete(s.sessions, sessionID)
-		slog.InfoContext(ctx, "session terminated",
-			"agent", agent, "session", ShortID(sessionID), "event", event)
+		delete(s.sessions, e.SessionID)
 		if err := s.persist(ctx); err != nil {
 			return false, err
 		}
+		slog.InfoContext(ctx, "session terminated",
+			"agent", e.Agent, "session", ShortID(e.SessionID))
 		return true, nil
 	}
-	r, existed := s.sessions[sessionID]
-	if existed && shouldIgnoreHookEvent(r, event, turnID) {
-		slog.DebugContext(ctx, "RecordEvent: ignoring redundant turn event",
-			"session", ShortID(sessionID), "event", event,
-			"prev_event", r.LastEvent, "turn", turnID)
+	sess, existed := s.sessions[e.SessionID]
+	// if an event comes in during the agent's turn after a stop event,
+	// ignore it so that we don't clobber our idle status
+	if existed && e.TurnID != "" && e.TurnID == sess.TurnID &&
+		(sess.LastEvent == "Stop" || sess.LastEvent == "StopFailure") {
+		slog.DebugContext(ctx, "RecordEvent: ignoring late event for concluded turn",
+			"session", ShortID(e.SessionID), "event", e.Event,
+			"prev_event", sess.LastEvent, "turn", e.TurnID)
 		return false, nil
 	}
-	prevStatus := deriveStatus(r)
+	prevStatus := deriveStatus(sess)
 	if !existed {
-		r.FirstSeenAt = receivedAt
-		r.StatusAt = receivedAt
+		sess.Agent = e.Agent
+		sess.FirstSeenAt = e.ReceivedAt
+		sess.StatusAt = e.ReceivedAt
 	}
-	r.Agent = agent
-	r.LastEvent = event
-	r.LastEventAt = receivedAt
-	if turnID != "" {
-		r.TurnID = turnID
+	sess.LastEvent = e.Event
+	sess.LastEventAt = e.ReceivedAt
+	if e.TurnID != "" {
+		sess.TurnID = e.TurnID
 	}
-	newStatus := deriveStatus(r)
+	newStatus := deriveStatus(sess)
 	if existed && newStatus != prevStatus {
-		r.StatusAt = receivedAt
+		sess.StatusAt = e.ReceivedAt
 	}
-	s.sessions[sessionID] = r
+	s.sessions[e.SessionID] = sess
+	if err := s.persist(ctx); err != nil {
+		return false, err
+	}
 	if existed {
 		slog.DebugContext(ctx, "RecordEvent: applied",
-			"agent", agent, "session", ShortID(sessionID), "event", event,
+			"agent", sess.Agent, "session", ShortID(e.SessionID), "event", e.Event,
 			"prev_status", prevStatus, "new_status", newStatus)
 	} else {
 		slog.DebugContext(ctx, "RecordEvent: applied (new session)",
-			"agent", agent, "session", ShortID(sessionID), "event", event,
+			"agent", sess.Agent, "session", ShortID(e.SessionID), "event", e.Event,
 			"status", newStatus)
-	}
-	if err := s.persist(ctx); err != nil {
-		return false, err
 	}
 	return true, nil
 }
 
-func NormalizeHookEvent(agent, event string) string {
-	if NormalizeAgent(agent) == AgentCodex && event == "Stop" {
-		return "TurnComplete"
-	}
-	return event
-}
-
 // ApplyDiscovered upserts discovery status in one locked write.
-func (s *Store) ApplyDiscovered(ctx context.Context, agent, sessionID, jsonlStatus string, createdAt time.Time) (inserted, jsonlChanged, transitioned bool, err error) {
+func (s *Store) ApplyDiscovered(ctx context.Context, agent, sessionID, engineStatus string, createdAt time.Time) (inserted, engineChanged, transitioned bool, err error) {
 	if sessionID == "" {
 		return false, false, false, nil
 	}
-	agent = NormalizeAgent(agent)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	r, existed := s.sessions[sessionID]
+	sess, existed := s.sessions[sessionID]
 	if !existed {
 		if createdAt.IsZero() {
 			createdAt = time.Now()
 		}
 		ts := createdAt.UTC().Format(time.RFC3339Nano)
-		r = Session{
+		sess = Session{
 			Agent:       agent,
 			FirstSeenAt: ts,
 			LastEvent:   "Discovered",
@@ -204,38 +189,38 @@ func (s *Store) ApplyDiscovered(ctx context.Context, agent, sessionID, jsonlStat
 		inserted = true
 	}
 
-	prevStatus := deriveStatus(r)
-	if r.JSONLStatus != jsonlStatus || NormalizeAgent(r.Agent) != agent {
-		r.Agent = agent
-		r.JSONLStatus = jsonlStatus
-		jsonlChanged = true
+	prevStatus := deriveStatus(sess)
+	if sess.EngineStatus != engineStatus || sess.Agent != agent {
+		sess.Agent = agent
+		sess.EngineStatus = engineStatus
+		engineChanged = true
 	}
-	newStatus := deriveStatus(r)
-	transitioned = !inserted && jsonlChanged && newStatus != prevStatus
+	newStatus := deriveStatus(sess)
+	transitioned = !inserted && engineChanged && newStatus != prevStatus
 	if transitioned {
-		r.StatusAt = time.Now().UTC().Format(time.RFC3339Nano)
+		sess.StatusAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 
-	if !inserted && !jsonlChanged {
+	if !inserted && !engineChanged {
 		return false, false, false, nil
 	}
 
-	s.sessions[sessionID] = r
+	s.sessions[sessionID] = sess
+	if perr := s.persist(ctx); perr != nil {
+		return inserted, engineChanged, transitioned, perr
+	}
 	if inserted {
 		slog.DebugContext(ctx, "ApplyDiscovered: inserted",
 			"agent", agent, "session", ShortID(sessionID),
-			"created_at", r.FirstSeenAt, "jsonl_status", jsonlStatus)
+			"created_at", sess.FirstSeenAt, "engine_status", engineStatus)
 	} else {
-		slog.DebugContext(ctx, "ApplyDiscovered: jsonl applied",
+		slog.DebugContext(ctx, "ApplyDiscovered: engine status applied",
 			"agent", agent, "session", ShortID(sessionID),
-			"jsonl_status", jsonlStatus,
+			"engine_status", engineStatus,
 			"prev_status", prevStatus, "new_status", newStatus,
 			"transitioned", transitioned)
 	}
-	if perr := s.persist(ctx); perr != nil {
-		return inserted, jsonlChanged, transitioned, perr
-	}
-	return inserted, jsonlChanged, transitioned, nil
+	return inserted, engineChanged, transitioned, nil
 }
 
 // ReconcileDiscovered updates durable metadata without clobbering hook state.
@@ -243,7 +228,6 @@ func (s *Store) ReconcileDiscovered(ctx context.Context, agent, sessionID string
 	if sessionID == "" {
 		return false, nil
 	}
-	agent = NormalizeAgent(agent)
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
@@ -255,7 +239,7 @@ func (s *Store) ReconcileDiscovered(ctx context.Context, agent, sessionID string
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	r, ok := s.sessions[sessionID]
+	sess, ok := s.sessions[sessionID]
 	if !ok {
 		s.sessions[sessionID] = Session{
 			Agent:       agent,
@@ -264,35 +248,41 @@ func (s *Store) ReconcileDiscovered(ctx context.Context, agent, sessionID string
 			LastEventAt: ts,
 			StatusAt:    ts,
 		}
+		if err := s.persist(ctx); err != nil {
+			return false, err
+		}
 		slog.DebugContext(ctx, "ReconcileDiscovered: inserted",
 			"agent", agent, "session", ShortID(sessionID),
 			"created_at", ts, "event", insertEvent)
-		return true, s.persist(ctx)
+		return true, nil
 	}
 
 	changed := false
-	if NormalizeAgent(r.Agent) != agent {
-		r.Agent = agent
+	if sess.Agent != agent {
+		sess.Agent = agent
 		changed = true
 	}
-	if r.FirstSeenAt == "" || ts < r.FirstSeenAt {
-		r.FirstSeenAt = ts
+	if sess.FirstSeenAt == "" || ts < sess.FirstSeenAt {
+		sess.FirstSeenAt = ts
 		changed = true
 	}
-	if r.StatusAt == "" {
-		r.StatusAt = r.LastEventAt
-		if r.StatusAt == "" {
-			r.StatusAt = ts
+	if sess.StatusAt == "" {
+		sess.StatusAt = sess.LastEventAt
+		if sess.StatusAt == "" {
+			sess.StatusAt = ts
 		}
 		changed = true
 	}
 	if !changed {
 		return false, nil
 	}
-	s.sessions[sessionID] = r
+	s.sessions[sessionID] = sess
+	if err := s.persist(ctx); err != nil {
+		return false, err
+	}
 	slog.DebugContext(ctx, "ReconcileDiscovered: updated",
 		"agent", agent, "session", ShortID(sessionID))
-	return true, s.persist(ctx)
+	return true, nil
 }
 
 // RecordObserved upserts a session from a read-only agent source.
@@ -300,7 +290,6 @@ func (s *Store) RecordObserved(ctx context.Context, agent, sessionID string, cre
 	if sessionID == "" {
 		return false, nil
 	}
-	agent = NormalizeAgent(agent)
 	now := time.Now().UTC()
 	if createdAt.IsZero() {
 		createdAt = now
@@ -314,49 +303,52 @@ func (s *Store) RecordObserved(ctx context.Context, agent, sessionID string, cre
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	r, existed := s.sessions[sessionID]
-	prevStatus := deriveStatus(r)
+	sess, existed := s.sessions[sessionID]
+	prevStatus := deriveStatus(sess)
 	changed := false
 	if !existed {
-		r.FirstSeenAt = createdTS
-		r.StatusAt = eventTS
+		sess.FirstSeenAt = createdTS
+		sess.StatusAt = eventTS
 		changed = true
 	}
-	if NormalizeAgent(r.Agent) != agent {
-		r.Agent = agent
+	if sess.Agent != agent {
+		sess.Agent = agent
 		changed = true
 	}
-	if r.FirstSeenAt == "" || createdTS < r.FirstSeenAt {
-		r.FirstSeenAt = createdTS
+	if sess.FirstSeenAt == "" || createdTS < sess.FirstSeenAt {
+		sess.FirstSeenAt = createdTS
 		changed = true
 	}
-	if event != "" && (r.LastEvent != event || r.LastEventAt == "" || eventTS > r.LastEventAt) {
-		r.LastEvent = event
-		r.LastEventAt = eventTS
+	if event != "" && (sess.LastEvent != event || sess.LastEventAt == "" || eventTS > sess.LastEventAt) {
+		sess.LastEvent = event
+		sess.LastEventAt = eventTS
 		changed = true
 	}
-	if engineStatus != "" && r.JSONLStatus != engineStatus {
-		r.JSONLStatus = engineStatus
+	if engineStatus != "" && sess.EngineStatus != engineStatus {
+		sess.EngineStatus = engineStatus
 		changed = true
 	}
-	if r.StatusAt == "" {
-		r.StatusAt = eventTS
+	if sess.StatusAt == "" {
+		sess.StatusAt = eventTS
 		changed = true
 	}
-	if existed && deriveStatus(r) != prevStatus {
-		r.StatusAt = eventTS
+	if existed && deriveStatus(sess) != prevStatus {
+		sess.StatusAt = eventTS
 		changed = true
 	}
 	if !changed {
 		return false, nil
 	}
-	s.sessions[sessionID] = r
+	s.sessions[sessionID] = sess
+	if err := s.persist(ctx); err != nil {
+		return false, err
+	}
 	slog.DebugContext(ctx, "RecordObserved: applied",
 		"agent", agent, "session", ShortID(sessionID),
 		"event", event, "engine_status", engineStatus,
 		"new", !existed, "prev_status", prevStatus,
-		"new_status", deriveStatus(r))
-	return true, s.persist(ctx)
+		"new_status", deriveStatus(sess))
+	return true, nil
 }
 
 // ReapAbsent drops sessions not present in alive.
@@ -380,12 +372,11 @@ func (s *Store) ReapAbsent(ctx context.Context, alive map[string]bool) (int, err
 
 // ReapAbsentForAgent scopes reaping to one discovery source.
 func (s *Store) ReapAbsentForAgent(ctx context.Context, agent string, alive map[string]bool) (int, error) {
-	agent = NormalizeAgent(agent)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
-	for id, r := range s.sessions {
-		if NormalizeAgent(r.Agent) != agent {
+	for id, sess := range s.sessions {
+		if sess.Agent != agent {
 			continue
 		}
 		if !alive[id] {
@@ -432,7 +423,6 @@ func materialize(m map[string]Session) []Session {
 	out := make([]Session, 0, len(m))
 	for id, s := range m {
 		s.SessionID = id
-		s.Agent = NormalizeAgent(s.Agent)
 		s.Status = deriveStatus(s)
 		s.FirstSeenTime, _ = time.Parse(time.RFC3339Nano, s.FirstSeenAt)
 		s.StatusTime, _ = time.Parse(time.RFC3339Nano, s.StatusAt)
@@ -447,47 +437,37 @@ func materialize(m map[string]Session) []Session {
 	return out
 }
 
-// deriveStatus reduces hook and engine state to active/waiting/idle.
-func deriveStatus(r Session) string {
-	// PermissionRequest is idle at the engine level but still user-blocked.
-	if r.LastEvent == "PermissionRequest" {
+// deriveStatus reduces various states to one of {active, waiting, idle}:
+//   - LastEvent: the most recent hook event we saw for this session
+//   - EngineStatus: the agent's self-reported engine status ("idle"/"busy"), when available
+//
+// Here we account for some asymmetry in what we want to show versus
+// what the agent engine (codex, claude-code, etc.) itself reports for its current state.
+func deriveStatus(sess Session) string {
+	// 1. User is blocked on a permission prompt, regardless of engine state.
+	if sess.LastEvent == "PermissionRequest" {
 		return "waiting"
 	}
-	// Engine idle clears earlier user-attention events except permissions.
-	if r.JSONLStatus == "idle" {
+	// 2. Engine signal (when present) is authoritative for idle, overriding
+	//    any in-flight hook event below.
+	if sess.EngineStatus == "idle" {
 		return "idle"
 	}
-	if r.LastEvent == "Notification" {
+	// 3. User attention requested and engine isn't idle.
+	if sess.LastEvent == "Notification" {
 		return "waiting"
 	}
-	if r.JSONLStatus == "busy" {
+	// 4. Engine signal authoritative for busy.
+	if sess.EngineStatus == "busy" {
 		return "active"
 	}
-	switch r.LastEvent {
-	case "SessionStart", "Stop", "StopFailure", "TurnComplete", "Discovered":
+	// 5. No engine signal: fall back to the hook event.
+	switch sess.LastEvent {
+	case "SessionStart", "Stop", "StopFailure", "Discovered":
 		return "idle"
 	default:
 		return "active"
 	}
-}
-
-func isTerminal(event string) bool {
-	// Hook casing has varied across Claude Code versions.
-	return strings.EqualFold(event, "SessionEnd")
-}
-
-func shouldIgnoreHookEvent(r Session, event, turnID string) bool {
-	if turnID == "" || r.TurnID == "" || turnID != r.TurnID {
-		return false
-	}
-	if !isTurnIdleEvent(r.LastEvent) {
-		return false
-	}
-	return true
-}
-
-func isTurnIdleEvent(event string) bool {
-	return event == "Stop" || event == "StopFailure" || event == "TurnComplete"
 }
 
 // ShortID returns the first 8 chars of a session id, or "?".

@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -57,52 +56,17 @@ func (r *statusRecorder) WriteHeader(code int) {
 }
 
 type envelope struct {
-	Agent               string `json:"agent"`
-	SessionID           string `json:"session_id"`
-	SessionIDCamel      string `json:"sessionId"`
-	HookEventName       string `json:"hook_event_name"`
-	HookEventNameCamel  string `json:"hookEventName"`
-	TranscriptPath      string `json:"transcript_path"`
-	TranscriptPathCamel string `json:"transcriptPath"`
-	TurnID              string `json:"turn_id"`
-	TurnIDCamel         string `json:"turnId"`
-	ToolName            string `json:"tool_name"`
-	ToolNameCamel       string `json:"toolName"`
-}
-
-func (e envelope) sessionID() string {
-	if e.SessionID != "" {
-		return e.SessionID
-	}
-	return e.SessionIDCamel
-}
-
-func (e envelope) hookEventName() string {
-	if e.HookEventName != "" {
-		return e.HookEventName
-	}
-	return e.HookEventNameCamel
-}
-
-func (e envelope) transcriptPath() string {
-	if e.TranscriptPath != "" {
-		return e.TranscriptPath
-	}
-	return e.TranscriptPathCamel
-}
-
-func (e envelope) turnID() string {
-	if e.TurnID != "" {
-		return e.TurnID
-	}
-	return e.TurnIDCamel
-}
-
-func (e envelope) toolName() string {
-	if e.ToolName != "" {
-		return e.ToolName
-	}
-	return e.ToolNameCamel
+	SessionID      string `json:"session_id"`
+	HookEventName  string `json:"hook_event_name"`
+	TranscriptPath string `json:"transcript_path"`
+	Cwd            string `json:"cwd"`
+	Model          string `json:"model"`
+	PermissionMode string `json:"permission_mode"`
+	AgentID        string `json:"agent_id"`
+	AgentType      string `json:"agent_type"`
+	TurnID         string `json:"turn_id"`
+	ToolName       string `json:"tool_name"`
+	ToolUseID      string `json:"tool_use_id"`
 }
 
 func makeHookHandler(s *state.Store) http.HandlerFunc {
@@ -133,38 +97,53 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 				"err", err, "bytes", len(body))
 		}
 
-		agent := inferAgent(env, r.URL.Query().Get("agent"))
-		sessionID := env.sessionID()
-		rawEvent := env.hookEventName()
-		event := state.NormalizeHookEvent(agent, rawEvent)
+		agent := strings.TrimSpace(r.Header.Get("X-Agent"))
+		if agent == "" {
+			agent = state.AgentUnidentified
+		}
 		receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
 
 		span.SetAttributes(
 			attribute.String("agent", agent),
-			attribute.String("session_id", sessionID),
-			attribute.String("hook_event", event),
-			attribute.String("hook_event_raw", rawEvent),
-			attribute.String("turn_id", env.turnID()),
-			attribute.String("tool", env.toolName()),
+			attribute.String("session_id", env.SessionID),
+			attribute.String("hook_event", env.HookEventName),
+			attribute.String("turn_id", env.TurnID),
+			attribute.String("tool", env.ToolName),
+			attribute.String("tool_use_id", env.ToolUseID),
+			attribute.String("model", env.Model),
+			attribute.String("permission_mode", env.PermissionMode),
+			attribute.String("agent_id", env.AgentID),
+			attribute.String("agent_type", env.AgentType),
 		)
 
 		slog.DebugContext(ctx, "hook envelope parsed",
 			"agent", agent,
-			"session", state.ShortID(sessionID),
-			"event_raw", rawEvent,
-			"event_norm", event,
-			"turn", env.turnID(),
-			"tool", env.toolName(),
-			"transcript", env.transcriptPath(),
+			"session", state.ShortID(env.SessionID),
+			"event", env.HookEventName,
+			"turn", env.TurnID,
+			"tool", env.ToolName,
+			"tool_use", env.ToolUseID,
+			"model", env.Model,
+			"permission_mode", env.PermissionMode,
+			"hook_agent_id", state.ShortID(env.AgentID),
+			"hook_agent_type", env.AgentType,
+			"cwd", env.Cwd,
+			"transcript", env.TranscriptPath,
 		)
 
 		recordStart := time.Now()
-		applied, err := s.RecordEvent(ctx, agent, sessionID, event, env.turnID(), receivedAt)
+		applied, err := s.RecordEvent(ctx, state.HookEvent{
+			Agent:      agent,
+			SessionID:  env.SessionID,
+			Event:      env.HookEventName,
+			TurnID:     env.TurnID,
+			ReceivedAt: receivedAt,
+		})
 		if err != nil {
 			slog.ErrorContext(ctx, "hook: record event failed",
 				"agent", agent,
-				"session", state.ShortID(sessionID),
-				"event", event,
+				"session", state.ShortID(env.SessionID),
+				"event", env.HookEventName,
 				"err", err,
 			)
 			span.RecordError(err)
@@ -176,16 +155,16 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 		if applied {
 			slog.InfoContext(ctx, "hook recorded",
 				"agent", agent,
-				"event", event,
-				"session", state.ShortID(sessionID),
-				"tool", env.toolName(),
+				"event", env.HookEventName,
+				"session", state.ShortID(env.SessionID),
+				"tool", env.ToolName,
 				"record_dur", time.Since(recordStart),
 			)
 		} else {
 			slog.DebugContext(ctx, "hook ignored (no state change)",
 				"agent", agent,
-				"event", event,
-				"session", state.ShortID(sessionID),
+				"event", env.HookEventName,
+				"session", state.ShortID(env.SessionID),
 				"record_dur", time.Since(recordStart),
 			)
 		}
@@ -194,23 +173,3 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 	}
 }
 
-func inferAgent(env envelope, agentHint string) string {
-	if agent := strings.TrimSpace(env.Agent); agent != "" {
-		return state.NormalizeAgent(agent)
-	}
-	if agent := strings.TrimSpace(agentHint); agent != "" {
-		return state.NormalizeAgent(agent)
-	}
-	if isCodexTranscriptPath(env.transcriptPath()) {
-		return state.AgentCodex
-	}
-	return state.AgentClaudeCode
-}
-
-func isCodexTranscriptPath(path string) bool {
-	if strings.TrimSpace(path) == "" {
-		return false
-	}
-	path = filepath.ToSlash(path)
-	return strings.Contains(path, "/.codex/") || strings.HasPrefix(path, ".codex/")
-}

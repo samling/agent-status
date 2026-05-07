@@ -10,7 +10,56 @@ import (
 	"github.com/samling/agent-status/internal/state"
 )
 
-func TestHookInfersCodexFromTranscriptPath(t *testing.T) {
+func TestHookUsesAgentHeader(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"session_id":"session-1","hook_event_name":"SessionStart"}`
+	req := httptest.NewRequest(http.MethodPost, "/hook", strings.NewReader(body))
+	req.Header.Set("X-Agent", "codex")
+	rr := httptest.NewRecorder()
+
+	Handler(store).ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
+	}
+
+	sessions := store.Sessions()
+	if len(sessions) != 1 {
+		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
+	}
+	if sessions[0].Agent != state.AgentCodex {
+		t.Fatalf("Agent = %q, want %q", sessions[0].Agent, state.AgentCodex)
+	}
+}
+
+func TestHookMissingHeaderIsUnidentified(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"session_id":"session-1","hook_event_name":"SessionStart"}`
+	req := httptest.NewRequest(http.MethodPost, "/hook", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	Handler(store).ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
+	}
+
+	sessions := store.Sessions()
+	if len(sessions) != 1 {
+		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
+	}
+	if sessions[0].Agent != state.AgentUnidentified {
+		t.Fatalf("Agent = %q, want %q", sessions[0].Agent, state.AgentUnidentified)
+	}
+}
+
+func TestHookAcceptsCodexDocumentedFields(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -18,62 +67,16 @@ func TestHookInfersCodexFromTranscriptPath(t *testing.T) {
 
 	body := `{
 		"session_id": "session-1",
+		"transcript_path": null,
+		"cwd": "/tmp/project",
+		"hook_event_name": "UserPromptSubmit",
+		"model": "gpt-5.5",
+		"permission_mode": "default",
 		"turn_id": "turn-1",
-		"hook_event_name": "Stop",
-		"transcript_path": "/home/test/.codex/sessions/2026/05/06/rollout.jsonl"
+		"prompt": "hello"
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/hook", strings.NewReader(body))
-	rr := httptest.NewRecorder()
-
-	Handler(store).ServeHTTP(rr, req)
-	if rr.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
-	}
-
-	sessions := store.Sessions()
-	if len(sessions) != 1 {
-		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
-	}
-	if sessions[0].Agent != state.AgentCodex {
-		t.Fatalf("Agent = %q, want %q", sessions[0].Agent, state.AgentCodex)
-	}
-	if sessions[0].Status != "idle" {
-		t.Fatalf("Status = %q, want idle", sessions[0].Status)
-	}
-}
-
-func TestHookUsesAgentQueryHint(t *testing.T) {
-	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	body := `{"session_id":"session-1","hook_event_name":"SessionStart"}`
-	req := httptest.NewRequest(http.MethodPost, "/hook?agent=codex", strings.NewReader(body))
-	rr := httptest.NewRecorder()
-
-	Handler(store).ServeHTTP(rr, req)
-	if rr.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
-	}
-
-	sessions := store.Sessions()
-	if len(sessions) != 1 {
-		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
-	}
-	if sessions[0].Agent != state.AgentCodex {
-		t.Fatalf("Agent = %q, want %q", sessions[0].Agent, state.AgentCodex)
-	}
-}
-
-func TestHookAcceptsCamelCaseEnvelope(t *testing.T) {
-	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	body := `{"sessionId":"session-1","hookEventName":"UserPromptSubmit","turnId":"turn-1","transcriptPath":"/home/test/.codex/sessions/rollout.jsonl"}`
-	req := httptest.NewRequest(http.MethodPost, "/hook", strings.NewReader(body))
+	req.Header.Set("X-Agent", "codex")
 	rr := httptest.NewRecorder()
 
 	Handler(store).ServeHTTP(rr, req)
@@ -92,5 +95,42 @@ func TestHookAcceptsCamelCaseEnvelope(t *testing.T) {
 	}
 	if sessions[0].TurnID != "turn-1" {
 		t.Fatalf("TurnID = %q, want turn-1", sessions[0].TurnID)
+	}
+}
+
+func TestHookAcceptsClaudeAgentFields(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{
+		"session_id": "session-1",
+		"hook_event_name": "PreToolUse",
+		"transcript_path": "/home/test/.claude/projects/project/session-1.jsonl",
+		"cwd": "/tmp/project",
+		"permission_mode": "default",
+		"agent_id": "agent-1",
+		"agent_type": "Explore",
+		"tool_name": "Bash",
+		"tool_input": {"command":"npm test"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/hook", strings.NewReader(body))
+	req.Header.Set("X-Agent", "claude-code")
+	rr := httptest.NewRecorder()
+
+	Handler(store).ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
+	}
+	sessions := store.Sessions()
+	if len(sessions) != 1 {
+		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
+	}
+	if sessions[0].Agent != state.AgentClaudeCode {
+		t.Fatalf("Agent = %q, want %q", sessions[0].Agent, state.AgentClaudeCode)
+	}
+	if sessions[0].LastEvent != "PreToolUse" {
+		t.Fatalf("LastEvent = %q, want PreToolUse", sessions[0].LastEvent)
 	}
 }

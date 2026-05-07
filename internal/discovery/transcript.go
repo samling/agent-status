@@ -37,7 +37,7 @@ func LoadTranscript(sessionID, cwd string) (TranscriptInfo, error) {
 }
 
 func LoadTranscriptForMeta(sessionID string, meta SessionMeta) (TranscriptInfo, error) {
-	if state.NormalizeAgent(meta.Agent) == state.AgentCodex {
+	if meta.Agent == state.AgentCodex {
 		if meta.Path == "" {
 			return TranscriptInfo{}, nil
 		}

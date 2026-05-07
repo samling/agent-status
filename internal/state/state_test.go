@@ -13,13 +13,13 @@ func TestRecordEventSameTurnStopWins(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-1", "UserPromptSubmit", "turn-1", "2026-05-06T22:00:00Z"); err != nil {
+	if _, err := store.RecordEvent(context.Background(), HookEvent{Agent: AgentCodex, SessionID: "session-1", Event: "UserPromptSubmit", TurnID: "turn-1", ReceivedAt: "2026-05-06T22:00:00Z"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-1", "Stop", "turn-1", "2026-05-06T22:00:01Z"); err != nil {
+	if _, err := store.RecordEvent(context.Background(), HookEvent{Agent: AgentCodex, SessionID: "session-1", Event: "Stop", TurnID: "turn-1", ReceivedAt: "2026-05-06T22:00:01Z"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-1", "PostToolUse", "turn-1", "2026-05-06T22:00:02Z"); err != nil {
+	if _, err := store.RecordEvent(context.Background(), HookEvent{Agent: AgentCodex, SessionID: "session-1", Event: "PostToolUse", TurnID: "turn-1", ReceivedAt: "2026-05-06T22:00:02Z"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -27,14 +27,14 @@ func TestRecordEventSameTurnStopWins(t *testing.T) {
 	if len(sessions) != 1 {
 		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
 	}
-	if sessions[0].LastEvent != "TurnComplete" {
-		t.Fatalf("LastEvent = %q, want TurnComplete", sessions[0].LastEvent)
+	if sessions[0].LastEvent != "Stop" {
+		t.Fatalf("LastEvent = %q, want Stop", sessions[0].LastEvent)
 	}
 	if sessions[0].Status != "idle" {
 		t.Fatalf("Status = %q, want idle", sessions[0].Status)
 	}
 
-	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-1", "UserPromptSubmit", "turn-2", "2026-05-06T22:00:03Z"); err != nil {
+	if _, err := store.RecordEvent(context.Background(), HookEvent{Agent: AgentCodex, SessionID: "session-1", Event: "UserPromptSubmit", TurnID: "turn-2", ReceivedAt: "2026-05-06T22:00:03Z"}); err != nil {
 		t.Fatal(err)
 	}
 	sessions = store.Sessions()
@@ -52,7 +52,7 @@ func TestReconcileDiscoveredDoesNotClobberHookStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-1", "Stop", "turn-1", "2026-05-06T22:00:10Z"); err != nil {
+	if _, err := store.RecordEvent(context.Background(), HookEvent{Agent: AgentCodex, SessionID: "session-1", Event: "Stop", TurnID: "turn-1", ReceivedAt: "2026-05-06T22:00:10Z"}); err != nil {
 		t.Fatal(err)
 	}
 	changed, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-1", mustParseTime(t, "2026-05-06T22:00:00Z"), "Discovered")
@@ -67,8 +67,8 @@ func TestReconcileDiscoveredDoesNotClobberHookStatus(t *testing.T) {
 	if len(sessions) != 1 {
 		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
 	}
-	if sessions[0].LastEvent != "TurnComplete" {
-		t.Fatalf("LastEvent = %q, want TurnComplete", sessions[0].LastEvent)
+	if sessions[0].LastEvent != "Stop" {
+		t.Fatalf("LastEvent = %q, want Stop", sessions[0].LastEvent)
 	}
 	if sessions[0].Status != "idle" {
 		t.Fatalf("Status = %q, want idle", sessions[0].Status)
@@ -104,7 +104,7 @@ func TestReconcileDiscoveredInsertEventSessionStart(t *testing.T) {
 	}
 
 	// Re-polling SessionStart must not clobber hook state.
-	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-fresh", "UserPromptSubmit", "turn-1", "2026-05-06T22:00:05Z"); err != nil {
+	if _, err := store.RecordEvent(context.Background(), HookEvent{Agent: AgentCodex, SessionID: "session-fresh", Event: "UserPromptSubmit", TurnID: "turn-1", ReceivedAt: "2026-05-06T22:00:05Z"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-fresh", created, "SessionStart"); err != nil {
