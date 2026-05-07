@@ -1,7 +1,11 @@
 package discovery
 
 import (
+	"bufio"
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -33,19 +37,31 @@ type codexProcess struct {
 	LatestAt time.Time
 }
 
+const codexUnlinkedThreadGrace = 30 * time.Minute
+
 func scanCodexLive() ([]liveAgentSession, int, error) {
 	dir, err := codexDir()
 	if err != nil {
 		return nil, 0, err
 	}
+	now := time.Now()
+	threads := []codexThread{}
 	statePath, ok, err := newestSQLite(dir, "state_*.sqlite")
-	if err != nil || !ok {
-		return nil, 0, err
-	}
-	threads, err := loadCodexThreads(statePath)
 	if err != nil {
 		return nil, 0, err
 	}
+	if ok {
+		threads, err = loadCodexThreads(statePath)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+
+	rolloutThreads, err := loadRecentCodexRolloutThreads(dir, now.Add(-codexUnlinkedThreadGrace))
+	if err != nil {
+		return nil, len(threads), err
+	}
+	threads = mergeCodexThreads(threads, rolloutThreads)
 
 	processes := map[string]codexProcess{}
 	if logsPath, ok, err := newestSQLite(dir, "logs_*.sqlite"); err != nil {
@@ -62,13 +78,16 @@ func scanCodexLive() ([]liveAgentSession, int, error) {
 		if th.Archived {
 			continue
 		}
-		proc := processes[th.ID]
-		if proc.PID <= 0 || !pidAlive(proc.PID) {
+		proc, hasProc := processes[th.ID]
+		if hasProc && (proc.PID <= 0 || !pidAlive(proc.PID)) {
 			continue
 		}
 		updatedAt := th.UpdatedAt
 		if proc.LatestAt.After(updatedAt) {
 			updatedAt = proc.LatestAt
+		}
+		if !hasProc && !recentUnlinkedCodexThread(th, now) {
+			continue
 		}
 		out = append(out, liveAgentSession{
 			Agent:     state.AgentCodex,
@@ -89,6 +108,157 @@ func scanCodexLive() ([]liveAgentSession, int, error) {
 		})
 	}
 	return out, len(threads), nil
+}
+
+func mergeCodexThreads(primary, fallback []codexThread) []codexThread {
+	index := make(map[string]int, len(primary))
+	for i, th := range primary {
+		if th.ID != "" {
+			index[th.ID] = i
+		}
+	}
+	for _, th := range fallback {
+		if th.ID == "" {
+			continue
+		}
+		i, ok := index[th.ID]
+		if !ok {
+			index[th.ID] = len(primary)
+			primary = append(primary, th)
+			continue
+		}
+		primary[i] = mergeCodexThread(primary[i], th)
+	}
+	return primary
+}
+
+func mergeCodexThread(a, b codexThread) codexThread {
+	if a.RolloutPath == "" {
+		a.RolloutPath = b.RolloutPath
+	}
+	if a.CreatedAt.IsZero() || (!b.CreatedAt.IsZero() && b.CreatedAt.Before(a.CreatedAt)) {
+		a.CreatedAt = b.CreatedAt
+	}
+	if b.UpdatedAt.After(a.UpdatedAt) {
+		a.UpdatedAt = b.UpdatedAt
+	}
+	if a.Source == "" {
+		a.Source = b.Source
+	}
+	if a.Cwd == "" {
+		a.Cwd = b.Cwd
+	}
+	if a.Version == "" {
+		a.Version = b.Version
+	}
+	if a.Model == "" {
+		a.Model = b.Model
+	}
+	if a.GitBranch == "" {
+		a.GitBranch = b.GitBranch
+	}
+	return a
+}
+
+func recentUnlinkedCodexThread(th codexThread, now time.Time) bool {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	cutoff := now.Add(-codexUnlinkedThreadGrace)
+	return th.CreatedAt.After(cutoff) || th.UpdatedAt.After(cutoff)
+}
+
+func loadRecentCodexRolloutThreads(dir string, cutoff time.Time) ([]codexThread, error) {
+	sessionsDir := filepath.Join(dir, "sessions")
+	var out []codexThread
+	err := filepath.WalkDir(sessionsDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if d.IsDir() || filepath.Ext(path) != ".jsonl" || !strings.HasPrefix(filepath.Base(path), "rollout-") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil || info.ModTime().Before(cutoff) {
+			return nil
+		}
+		th, ok := loadCodexRolloutThread(path, info.ModTime())
+		if ok {
+			out = append(out, th)
+		}
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return out, err
+}
+
+func loadCodexRolloutThread(path string, modTime time.Time) (codexThread, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return codexThread{}, false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 1<<24)
+	for scanner.Scan() {
+		var line codexTranscriptLine
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil || line.Type != "session_meta" {
+			continue
+		}
+		var payload codexSessionMeta
+		if err := json.Unmarshal(line.Payload, &payload); err != nil {
+			return codexThread{}, false
+		}
+		id := payload.ID
+		if id == "" {
+			id = codexThreadIDFromRolloutPath(path)
+		}
+		if id == "" {
+			return codexThread{}, false
+		}
+		createdAt := parseCodexTimestamp(payload.Timestamp)
+		if createdAt.IsZero() {
+			createdAt = modTime
+		}
+		return codexThread{
+			ID:          id,
+			RolloutPath: path,
+			CreatedAt:   createdAt,
+			UpdatedAt:   modTime,
+			Source:      payload.Source,
+			Cwd:         payload.Cwd,
+			Version:     payload.CLIVersion,
+			Model:       payload.Model,
+			GitBranch:   payload.Git.Branch,
+		}, true
+	}
+	return codexThread{}, false
+}
+
+func codexThreadIDFromRolloutPath(path string) string {
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if len(base) < 36 {
+		return ""
+	}
+	id := base[len(base)-36:]
+	if strings.Count(id, "-") != 4 {
+		return ""
+	}
+	return id
+}
+
+func parseCodexTimestamp(s string) time.Time {
+	if strings.TrimSpace(s) == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 func codexDir() (string, error) {
@@ -217,17 +387,10 @@ func loadCodexProcesses(path string) (map[string]codexProcess, error) {
 	defer db.Close()
 
 	rows, err := db.Query(`
-		select l.thread_id, l.process_uuid, l.ts, l.ts_nanos
-		from logs l
-		join (
-			select thread_id, max(ts * 1000000000 + ts_nanos) as latest
-			from logs
-			where thread_id is not null and process_uuid like 'pid:%'
-			group by thread_id
-		) latest
-		  on latest.thread_id = l.thread_id
-		 and latest.latest = (l.ts * 1000000000 + l.ts_nanos)
-		where l.process_uuid like 'pid:%'`)
+		select thread_id, process_uuid, ts, ts_nanos, feedback_log_body
+		from logs
+		where process_uuid like 'pid:%'
+		  and (thread_id is not null or feedback_log_body like '%conversation.id=%')`)
 	if err != nil {
 		return nil, err
 	}
@@ -235,18 +398,48 @@ func loadCodexProcesses(path string) (map[string]codexProcess, error) {
 
 	out := map[string]codexProcess{}
 	for rows.Next() {
-		var threadID, processUUID string
+		var threadID sql.NullString
+		var processUUID string
 		var ts, tsNanos int64
-		if err := rows.Scan(&threadID, &processUUID, &ts, &tsNanos); err != nil {
+		var body sql.NullString
+		if err := rows.Scan(&threadID, &processUUID, &ts, &tsNanos, &body); err != nil {
 			return nil, err
+		}
+		id := strings.TrimSpace(threadID.String)
+		if id == "" {
+			id = parseCodexConversationID(body.String)
+		}
+		if id == "" {
+			continue
 		}
 		pid := parseCodexPID(processUUID)
 		if pid <= 0 {
 			continue
 		}
-		out[threadID] = codexProcess{PID: pid, LatestAt: time.Unix(ts, tsNanos)}
+		latestAt := time.Unix(ts, tsNanos)
+		if existing, ok := out[id]; ok && !latestAt.After(existing.LatestAt) {
+			continue
+		}
+		out[id] = codexProcess{PID: pid, LatestAt: latestAt}
 	}
 	return out, rows.Err()
+}
+
+func parseCodexConversationID(body string) string {
+	const key = "conversation.id="
+	i := strings.Index(body, key)
+	if i < 0 {
+		return ""
+	}
+	id := body[i+len(key):]
+	if len(id) < 36 {
+		return ""
+	}
+	id = id[:36]
+	if strings.Count(id, "-") != 4 {
+		return ""
+	}
+	return id
 }
 
 func codexTime(sec int64, ms sql.NullInt64) time.Time {

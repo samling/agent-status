@@ -257,7 +257,12 @@ type codexTranscriptLine struct {
 }
 
 type codexSessionMeta struct {
+	ID         string `json:"id"`
+	Timestamp  string `json:"timestamp"`
+	Cwd        string `json:"cwd"`
+	Source     string `json:"source"`
 	CLIVersion string `json:"cli_version"`
+	Model      string `json:"model"`
 	Git        struct {
 		Branch string `json:"branch"`
 	} `json:"git"`

@@ -28,11 +28,52 @@ func Handler(s *state.Store) http.Handler {
 }
 
 type envelope struct {
-	Agent          string `json:"agent"`
-	SessionID      string `json:"session_id"`
-	HookEventName  string `json:"hook_event_name"`
-	TranscriptPath string `json:"transcript_path"`
-	TurnID         string `json:"turn_id"`
+	Agent               string `json:"agent"`
+	SessionID           string `json:"session_id"`
+	SessionIDCamel      string `json:"sessionId"`
+	HookEventName       string `json:"hook_event_name"`
+	HookEventNameCamel  string `json:"hookEventName"`
+	TranscriptPath      string `json:"transcript_path"`
+	TranscriptPathCamel string `json:"transcriptPath"`
+	TurnID              string `json:"turn_id"`
+	TurnIDCamel         string `json:"turnId"`
+	ToolName            string `json:"tool_name"`
+	ToolNameCamel       string `json:"toolName"`
+}
+
+func (e envelope) sessionID() string {
+	if e.SessionID != "" {
+		return e.SessionID
+	}
+	return e.SessionIDCamel
+}
+
+func (e envelope) hookEventName() string {
+	if e.HookEventName != "" {
+		return e.HookEventName
+	}
+	return e.HookEventNameCamel
+}
+
+func (e envelope) transcriptPath() string {
+	if e.TranscriptPath != "" {
+		return e.TranscriptPath
+	}
+	return e.TranscriptPathCamel
+}
+
+func (e envelope) turnID() string {
+	if e.TurnID != "" {
+		return e.TurnID
+	}
+	return e.TurnIDCamel
+}
+
+func (e envelope) toolName() string {
+	if e.ToolName != "" {
+		return e.ToolName
+	}
+	return e.ToolNameCamel
 }
 
 func makeHookHandler(s *state.Store) http.HandlerFunc {
@@ -54,16 +95,26 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 		}
 
 		agent := inferAgent(env, r.URL.Query().Get("agent"))
+		sessionID := env.sessionID()
+		event := state.NormalizeHookEvent(agent, env.hookEventName())
 		receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
-		if err := s.RecordEvent(agent, env.SessionID, env.HookEventName, env.TurnID, receivedAt); err != nil {
-			log.Printf("hook: record error session=%s event=%s: %v", state.ShortID(env.SessionID), env.HookEventName, err)
+		if err := s.RecordEvent(agent, sessionID, event, env.turnID(), receivedAt); err != nil {
+			log.Printf("hook: record error session=%s event=%s: %v", state.ShortID(sessionID), event, err)
 			http.Error(w, "record failed", http.StatusInternalServerError)
 			return
 		}
-		log.Printf("hook: agent=%s event=%s session=%s", agent, env.HookEventName, state.ShortID(env.SessionID))
+		log.Printf("hook: agent=%s event=%s session=%s%s", agent, event, state.ShortID(sessionID), hookLogDetail(env))
 
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func hookLogDetail(env envelope) string {
+	toolName := env.toolName()
+	if toolName == "" {
+		return ""
+	}
+	return " tool=" + toolName
 }
 
 func inferAgent(env envelope, agentHint string) string {
@@ -73,7 +124,7 @@ func inferAgent(env envelope, agentHint string) string {
 	if agent := strings.TrimSpace(agentHint); agent != "" {
 		return state.NormalizeAgent(agent)
 	}
-	if isCodexTranscriptPath(env.TranscriptPath) {
+	if isCodexTranscriptPath(env.transcriptPath()) {
 		return state.AgentCodex
 	}
 	return state.AgentClaudeCode

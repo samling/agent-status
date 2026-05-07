@@ -111,6 +111,7 @@ func (s *Store) RecordEvent(agent, sessionID, event, turnID, receivedAt string) 
 		return nil
 	}
 	agent = NormalizeAgent(agent)
+	event = NormalizeHookEvent(agent, event)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if isTerminal(event) {
@@ -144,6 +145,13 @@ func (s *Store) RecordEvent(agent, sessionID, event, turnID, receivedAt string) 
 	}
 	s.sessions[sessionID] = r
 	return s.persist()
+}
+
+func NormalizeHookEvent(agent, event string) string {
+	if NormalizeAgent(agent) == AgentCodex && event == "Stop" {
+		return "TurnComplete"
+	}
+	return event
 }
 
 // SetJSONLStatus records the latest "status" field read from a session's
@@ -422,7 +430,7 @@ func deriveStatus(r Session) string {
 		return "active"
 	}
 	switch r.LastEvent {
-	case "SessionStart", "Stop", "StopFailure", "Discovered":
+	case "SessionStart", "Stop", "StopFailure", "TurnComplete", "Discovered":
 		return "idle"
 	default:
 		return "active"
@@ -448,7 +456,7 @@ func shouldIgnoreHookEvent(r Session, event, turnID string) bool {
 }
 
 func isTurnIdleEvent(event string) bool {
-	return event == "Stop" || event == "StopFailure"
+	return event == "Stop" || event == "StopFailure" || event == "TurnComplete"
 }
 
 // ShortID returns a display-friendly truncation of a session id (first 8

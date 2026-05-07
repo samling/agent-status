@@ -26,8 +26,8 @@ func TestRecordEventSameTurnStopWins(t *testing.T) {
 	if len(sessions) != 1 {
 		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
 	}
-	if sessions[0].LastEvent != "Stop" {
-		t.Fatalf("LastEvent = %q, want Stop", sessions[0].LastEvent)
+	if sessions[0].LastEvent != "TurnComplete" {
+		t.Fatalf("LastEvent = %q, want TurnComplete", sessions[0].LastEvent)
 	}
 	if sessions[0].Status != "idle" {
 		t.Fatalf("Status = %q, want idle", sessions[0].Status)
@@ -66,8 +66,8 @@ func TestReconcileDiscoveredDoesNotClobberHookStatus(t *testing.T) {
 	if len(sessions) != 1 {
 		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
 	}
-	if sessions[0].LastEvent != "Stop" {
-		t.Fatalf("LastEvent = %q, want Stop", sessions[0].LastEvent)
+	if sessions[0].LastEvent != "TurnComplete" {
+		t.Fatalf("LastEvent = %q, want TurnComplete", sessions[0].LastEvent)
 	}
 	if sessions[0].Status != "idle" {
 		t.Fatalf("Status = %q, want idle", sessions[0].Status)

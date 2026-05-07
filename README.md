@@ -55,7 +55,7 @@ make bootstrap
 
 1. Copy `scripts/post-agent-status.sh` to each agent config dir.
 2. Render `hooks.json` and `codex-hooks.json` with the absolute path to the forwarder.
-3. Merge the rendered Claude Code hooks into `~/.claude/settings.json` and Codex hooks into `~/.codex/hooks/hooks.json`. If a file already exists, the merge leaves a `.bak` next to the original.
+3. Merge the rendered Claude Code hooks into `~/.claude/settings.json` and Codex hooks into `~/.codex/hooks.json`. If a file already exists, the merge leaves a `.bak` next to the original.
 
 Set `CLAUDE_CONFIG_DIR` to point bootstrap at a different config directory.
 Set `CODEX_HOME` if your Codex config directory lives somewhere other than `~/.codex`.
@@ -75,9 +75,9 @@ Copy/merge the contents of `hooks.json` into `~/.claude/settings.json`
 For Codex:
 
 ```sh
-mkdir -p ~/.codex/scripts ~/.codex/hooks
+mkdir -p ~/.codex/scripts
 cp scripts/post-agent-status.sh ~/.codex/scripts/
-sed "s|path-to-post-agent-status|$HOME/.codex/scripts/post-agent-status.sh|g" codex-hooks.json > ~/.codex/hooks/hooks.json
+sed "s|path-to-post-agent-status|$HOME/.codex/scripts/post-agent-status.sh|g" codex-hooks.json > ~/.codex/hooks.json
 ```
 
 ## Run

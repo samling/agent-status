@@ -16,7 +16,7 @@ CLAUDE_SETTINGS="$CLAUDE_DIR/settings.json"
 
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 CODEX_SCRIPT_DEST="$CODEX_DIR/scripts/post-agent-status.sh"
-CODEX_HOOKS="$CODEX_DIR/hooks/hooks.json"
+CODEX_HOOKS="$CODEX_DIR/hooks.json"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_SCRIPT="$REPO_ROOT/scripts/post-agent-status.sh"
