@@ -13,17 +13,25 @@ import (
 	"time"
 )
 
-// Session is stored by session id; SessionID and Status are derived on read.
+// Session is stored by session id. SessionID and the parsed time fields are
+// filled in on read. The displayed status is computed via DeriveStatus and
+// never stored on the type.
 type Session struct {
 	SessionID    string `json:"session_id,omitempty"`
 	Agent        string `json:"agent,omitempty"`
-	Status       string `json:"status,omitempty"`
 	FirstSeenAt  string `json:"first_seen_at"`
 	LastEvent    string `json:"last_event"`
 	LastEventAt  string `json:"last_event_at"`
 	TurnID       string `json:"turn_id,omitempty"`
 	EngineStatus string `json:"engine_status"` // most recent self-reported engine status ("idle"|"busy") when the agent exposes one
 	StatusAt     string `json:"status_at"`     // when derived status last transitioned
+
+	// TraceID/RootSpanID anchor a long-lived OTel trace per session. They are
+	// allocated lazily on first sight (hook or discovery), persisted, and
+	// reused as the parent context for every subsequent span concerning this
+	// session. Stored as W3C-format hex strings (32 / 16 chars).
+	TraceID    string `json:"trace_id,omitempty"`
+	RootSpanID string `json:"root_span_id,omitempty"`
 
 	// Parsed timestamps for renderers; omitted from JSON.
 	FirstSeenTime time.Time `json:"-"`
@@ -134,24 +142,42 @@ func (s *Store) RecordEvent(ctx context.Context, e HookEvent) (applied bool, err
 			"prev_event", sess.LastEvent, "turn", e.TurnID)
 		return false, nil
 	}
-	prevStatus := deriveStatus(sess)
-	if !existed {
-		sess.Agent = e.Agent
+	prevStatus := DeriveStatus(sess)
+	prevAgent := sess.Agent
+	// First sight, OR upgrading the bare trace placeholder created by
+	// EnsureTrace (which sets only SessionID / TraceID / RootSpanID / Agent
+	// and leaves FirstSeenAt empty).
+	if !existed || sess.FirstSeenAt == "" {
 		sess.FirstSeenAt = e.ReceivedAt
+	}
+	if !existed || sess.StatusAt == "" {
 		sess.StatusAt = e.ReceivedAt
+	}
+	// More-specific agent labels win. AgentUnidentified is a placeholder used
+	// when the hook script doesn't supply an X-Agent header; never let it
+	// overwrite a concrete value that another source (discovery, or an earlier
+	// hook with a real header) already stamped.
+	if e.Agent != AgentUnidentified || sess.Agent == "" {
+		sess.Agent = e.Agent
 	}
 	sess.LastEvent = e.Event
 	sess.LastEventAt = e.ReceivedAt
 	if e.TurnID != "" {
 		sess.TurnID = e.TurnID
 	}
-	newStatus := deriveStatus(sess)
+	newStatus := DeriveStatus(sess)
 	if existed && newStatus != prevStatus {
 		sess.StatusAt = e.ReceivedAt
 	}
 	s.sessions[e.SessionID] = sess
 	if err := s.persist(ctx); err != nil {
 		return false, err
+	}
+	if existed && prevAgent != sess.Agent {
+		slog.InfoContext(ctx, "RecordEvent: agent identified",
+			"session", ShortID(e.SessionID),
+			"from", prevAgent, "to", sess.Agent,
+			"event", e.Event)
 	}
 	if existed {
 		slog.DebugContext(ctx, "RecordEvent: applied",
@@ -165,209 +191,67 @@ func (s *Store) RecordEvent(ctx context.Context, e HookEvent) (applied bool, err
 	return true, nil
 }
 
-// ApplyDiscovered upserts discovery status in one locked write.
-func (s *Store) ApplyDiscovered(ctx context.Context, agent, sessionID, engineStatus string, createdAt time.Time) (inserted, engineChanged, transitioned bool, err error) {
-	if sessionID == "" {
-		return false, false, false, nil
+// InsertSession inserts sess under sess.SessionID on first sight. A row
+// holding only the trace placeholder fields (no LastEvent yet) counts as
+// "not yet inserted" and gets promoted with the input data; any persisted
+// TraceID/RootSpanID are preserved so the session's long-lived trace is
+// unbroken.
+//
+// Returns (true, nil) when the row went from absent/placeholder to populated,
+// (false, nil) if a fully-populated row already existed (no-op), or an error
+// if persist failed.
+func (s *Store) InsertSession(ctx context.Context, sess Session) (bool, error) {
+	if sess.SessionID == "" {
+		return false, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	sess, existed := s.sessions[sessionID]
-	if !existed {
-		if createdAt.IsZero() {
-			createdAt = time.Now()
-		}
-		ts := createdAt.UTC().Format(time.RFC3339Nano)
-		sess = Session{
-			Agent:       agent,
-			FirstSeenAt: ts,
-			LastEvent:   "Discovered",
-			LastEventAt: ts,
-			StatusAt:    ts,
-		}
-		inserted = true
+	existing, exists := s.sessions[sess.SessionID]
+	if exists && existing.LastEvent != "" {
+		return false, nil
 	}
-
-	prevStatus := deriveStatus(sess)
-	if sess.EngineStatus != engineStatus || sess.Agent != agent {
-		sess.Agent = agent
-		sess.EngineStatus = engineStatus
-		engineChanged = true
+	if existing.TraceID != "" {
+		sess.TraceID = existing.TraceID
 	}
-	newStatus := deriveStatus(sess)
-	transitioned = !inserted && engineChanged && newStatus != prevStatus
-	if transitioned {
-		sess.StatusAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if existing.RootSpanID != "" {
+		sess.RootSpanID = existing.RootSpanID
 	}
-
-	if !inserted && !engineChanged {
-		return false, false, false, nil
+	s.sessions[sess.SessionID] = sess
+	if err := s.persist(ctx); err != nil {
+		return false, err
 	}
-
-	s.sessions[sessionID] = sess
-	if perr := s.persist(ctx); perr != nil {
-		return inserted, engineChanged, transitioned, perr
-	}
-	if inserted {
-		slog.DebugContext(ctx, "ApplyDiscovered: inserted",
-			"agent", agent, "session", ShortID(sessionID),
-			"created_at", sess.FirstSeenAt, "engine_status", engineStatus)
-	} else {
-		slog.DebugContext(ctx, "ApplyDiscovered: engine status applied",
-			"agent", agent, "session", ShortID(sessionID),
-			"engine_status", engineStatus,
-			"prev_status", prevStatus, "new_status", newStatus,
-			"transitioned", transitioned)
-	}
-	return inserted, engineChanged, transitioned, nil
+	slog.DebugContext(ctx, "InsertSession: inserted",
+		"agent", sess.Agent, "session", ShortID(sess.SessionID),
+		"event", sess.LastEvent)
+	return true, nil
 }
 
-// ReconcileDiscovered updates durable metadata without clobbering hook state.
-func (s *Store) ReconcileDiscovered(ctx context.Context, agent, sessionID string, createdAt time.Time, insertEvent string) (bool, error) {
+// UpdateSession applies mutate to the session under sessionID, atomically
+// under the store lock. mutate may modify the passed *Session in place;
+// it returns true to commit the changes, false to discard them.
+//
+// Returns (true, nil) if a write happened, (false, nil) if the session
+// doesn't exist or mutate returned false.
+func (s *Store) UpdateSession(ctx context.Context, sessionID string, mutate func(sess *Session) bool) (bool, error) {
 	if sessionID == "" {
 		return false, nil
 	}
-	if createdAt.IsZero() {
-		createdAt = time.Now()
-	}
-	if insertEvent == "" {
-		insertEvent = "Discovered"
-	}
-	ts := createdAt.UTC().Format(time.RFC3339Nano)
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	sess, ok := s.sessions[sessionID]
-	if !ok {
-		s.sessions[sessionID] = Session{
-			Agent:       agent,
-			FirstSeenAt: ts,
-			LastEvent:   insertEvent,
-			LastEventAt: ts,
-			StatusAt:    ts,
-		}
-		if err := s.persist(ctx); err != nil {
-			return false, err
-		}
-		slog.DebugContext(ctx, "ReconcileDiscovered: inserted",
-			"agent", agent, "session", ShortID(sessionID),
-			"created_at", ts, "event", insertEvent)
-		return true, nil
+	sess, exists := s.sessions[sessionID]
+	if !exists {
+		return false, nil
 	}
-
-	changed := false
-	if sess.Agent != agent {
-		sess.Agent = agent
-		changed = true
-	}
-	if sess.FirstSeenAt == "" || ts < sess.FirstSeenAt {
-		sess.FirstSeenAt = ts
-		changed = true
-	}
-	if sess.StatusAt == "" {
-		sess.StatusAt = sess.LastEventAt
-		if sess.StatusAt == "" {
-			sess.StatusAt = ts
-		}
-		changed = true
-	}
-	if !changed {
+	if !mutate(&sess) {
 		return false, nil
 	}
 	s.sessions[sessionID] = sess
 	if err := s.persist(ctx); err != nil {
 		return false, err
 	}
-	slog.DebugContext(ctx, "ReconcileDiscovered: updated",
-		"agent", agent, "session", ShortID(sessionID))
+	slog.DebugContext(ctx, "UpdateSession: applied",
+		"agent", sess.Agent, "session", ShortID(sessionID))
 	return true, nil
-}
-
-// RecordObserved upserts a session from a read-only agent source.
-func (s *Store) RecordObserved(ctx context.Context, agent, sessionID string, createdAt time.Time, event string, eventAt time.Time, engineStatus string) (bool, error) {
-	if sessionID == "" {
-		return false, nil
-	}
-	now := time.Now().UTC()
-	if createdAt.IsZero() {
-		createdAt = now
-	}
-	if eventAt.IsZero() {
-		eventAt = now
-	}
-	createdTS := createdAt.UTC().Format(time.RFC3339Nano)
-	eventTS := eventAt.UTC().Format(time.RFC3339Nano)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	sess, existed := s.sessions[sessionID]
-	prevStatus := deriveStatus(sess)
-	changed := false
-	if !existed {
-		sess.FirstSeenAt = createdTS
-		sess.StatusAt = eventTS
-		changed = true
-	}
-	if sess.Agent != agent {
-		sess.Agent = agent
-		changed = true
-	}
-	if sess.FirstSeenAt == "" || createdTS < sess.FirstSeenAt {
-		sess.FirstSeenAt = createdTS
-		changed = true
-	}
-	if event != "" && (sess.LastEvent != event || sess.LastEventAt == "" || eventTS > sess.LastEventAt) {
-		sess.LastEvent = event
-		sess.LastEventAt = eventTS
-		changed = true
-	}
-	if engineStatus != "" && sess.EngineStatus != engineStatus {
-		sess.EngineStatus = engineStatus
-		changed = true
-	}
-	if sess.StatusAt == "" {
-		sess.StatusAt = eventTS
-		changed = true
-	}
-	if existed && deriveStatus(sess) != prevStatus {
-		sess.StatusAt = eventTS
-		changed = true
-	}
-	if !changed {
-		return false, nil
-	}
-	s.sessions[sessionID] = sess
-	if err := s.persist(ctx); err != nil {
-		return false, err
-	}
-	slog.DebugContext(ctx, "RecordObserved: applied",
-		"agent", agent, "session", ShortID(sessionID),
-		"event", event, "engine_status", engineStatus,
-		"new", !existed, "prev_status", prevStatus,
-		"new_status", deriveStatus(sess))
-	return true, nil
-}
-
-// ReapAbsent drops sessions not present in alive.
-func (s *Store) ReapAbsent(ctx context.Context, alive map[string]bool) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n := 0
-	for id := range s.sessions {
-		if !alive[id] {
-			delete(s.sessions, id)
-			n++
-			slog.DebugContext(ctx, "ReapAbsent: dropping",
-				"session", ShortID(id))
-		}
-	}
-	if n == 0 {
-		return 0, nil
-	}
-	return n, s.persist(ctx)
 }
 
 // ReapAbsentForAgent scopes reaping to one discovery source.
@@ -392,11 +276,92 @@ func (s *Store) ReapAbsentForAgent(ctx context.Context, agent string, alive map[
 	return n, s.persist(ctx)
 }
 
+// TraceMinter returns a fresh (TraceID, RootSpanID) hex pair. Implementations
+// are expected to back the returned IDs with a real exported root span so
+// downstream parent references resolve in trace UIs (otherwise Jaeger / Tempo
+// warn about invalid parent span IDs).
+type TraceMinter func() (traceIDHex, rootSpanIDHex string)
+
+// EnsureTrace returns the persisted W3C trace IDs for sessionID, calling
+// mint on first sight to allocate them and persisting the result before any
+// concurrent caller can race in with its own mint. agent is stamped into a
+// brand-new row so the sparse pre-event placeholder is still reapable
+// per-agent.
+//
+// If mint is nil, or returns empty strings (e.g. NoOp tracer), the row is
+// re-checked on every call and never persists trace IDs. That keeps Jaeger
+// quiet when tracing is disabled and lets a later run with tracing enabled
+// mint a real root.
+//
+// On success returned hex strings are suitable for trace.TraceIDFromHex /
+// trace.SpanIDFromHex.
+func (s *Store) EnsureTrace(ctx context.Context, sessionID, agent string, mint TraceMinter) (traceID, rootSpanID string, err error) {
+	if sessionID == "" {
+		return "", "", nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, existed := s.sessions[sessionID]
+	if !existed {
+		sess.SessionID = sessionID
+	}
+	if sess.TraceID != "" && sess.RootSpanID != "" {
+		// Already minted on a previous EnsureTrace; just refine Agent if
+		// this is the placeholder row's first sighting.
+		var changed bool
+		if !existed && sess.Agent == "" && agent != "" {
+			sess.Agent = agent
+			changed = true
+		}
+		if changed {
+			s.sessions[sessionID] = sess
+			if err := s.persist(ctx); err != nil {
+				return "", "", err
+			}
+		}
+		return sess.TraceID, sess.RootSpanID, nil
+	}
+
+	var newTrace, newSpan string
+	if mint != nil {
+		newTrace, newSpan = mint()
+	}
+	if newTrace == "" || newSpan == "" {
+		// Tracing disabled (NoOp tracer) or mint refused. Don't persist
+		// placeholder IDs; the row will be re-checked next call and a real
+		// root will be minted as soon as tracing is configured. Still stamp
+		// the agent so the sparse row is reapable.
+		var changed bool
+		if !existed && sess.Agent == "" && agent != "" {
+			sess.Agent = agent
+			changed = true
+		}
+		if changed {
+			s.sessions[sessionID] = sess
+			if err := s.persist(ctx); err != nil {
+				return "", "", err
+			}
+		}
+		return "", "", nil
+	}
+
+	sess.TraceID = newTrace
+	sess.RootSpanID = newSpan
+	if !existed && sess.Agent == "" && agent != "" {
+		sess.Agent = agent
+	}
+	s.sessions[sessionID] = sess
+	if err := s.persist(ctx); err != nil {
+		return "", "", err
+	}
+	return sess.TraceID, sess.RootSpanID, nil
+}
+
 // Sessions returns the current state, newest event first.
 func (s *Store) Sessions() []Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return materialize(s.sessions)
+	return sortedSessions(s.sessions)
 }
 
 // Load reads state for separate read-only processes.
@@ -415,15 +380,14 @@ func Load(path string) ([]Session, error) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
 	}
-	return materialize(m), nil
+	return sortedSessions(m), nil
 }
 
-// materialize fills derived fields and returns newest status changes first.
-func materialize(m map[string]Session) []Session {
+// sortedSessions fills derived fields and returns newest status changes first.
+func sortedSessions(m map[string]Session) []Session {
 	out := make([]Session, 0, len(m))
 	for id, s := range m {
 		s.SessionID = id
-		s.Status = deriveStatus(s)
 		s.FirstSeenTime, _ = time.Parse(time.RFC3339Nano, s.FirstSeenAt)
 		s.StatusTime, _ = time.Parse(time.RFC3339Nano, s.StatusAt)
 		out = append(out, s)
@@ -437,13 +401,13 @@ func materialize(m map[string]Session) []Session {
 	return out
 }
 
-// deriveStatus reduces various states to one of {active, waiting, idle}:
+// DeriveStatus reduces various states to one of {active, waiting, idle}:
 //   - LastEvent: the most recent hook event we saw for this session
 //   - EngineStatus: the agent's self-reported engine status ("idle"/"busy"), when available
 //
 // Here we account for some asymmetry in what we want to show versus
 // what the agent engine (codex, claude-code, etc.) itself reports for its current state.
-func deriveStatus(sess Session) string {
+func DeriveStatus(sess Session) string {
 	// 1. User is blocked on a permission prompt, regardless of engine state.
 	if sess.LastEvent == "PermissionRequest" {
 		return "waiting"

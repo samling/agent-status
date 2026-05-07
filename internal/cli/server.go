@@ -20,7 +20,7 @@ func focusFirstWaiting(s *state.Store) func(context.Context) {
 	return func(ctx context.Context) {
 		var sessionID string
 		for _, sess := range s.Sessions() {
-			if sess.Status == "waiting" {
+			if state.DeriveStatus(sess) == "waiting" {
 				sessionID = sess.SessionID
 				break
 			}

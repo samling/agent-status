@@ -26,7 +26,7 @@ make install
 
 ## How It Works
 
-Claude Code and Codex fire hooks on session events (start, prompt submit, tool use, stop, etc.). The collector (`agent-status server`) receives those events over local HTTP and writes a per-session state file. Agent state files are also scanned locally to discover live sessions and reconcile durable metadata. The TUI (`agent-status ui`) reads the aggregated state file and renders a live, navigable status board.
+Claude Code and Codex fire hooks on session events (start, prompt submit, tool use, stop, etc.). The collector (`agent-status server`) receives those events over local HTTP and writes a per-session state file. Agent state files and databases are also scanned locally to discover live sessions and reap stale ones. The TUI (`agent-status ui`) reads the aggregated state file and renders a live, navigable status board.
 
 The data read by `agent-status` is **local** and **only data provided by the supported agents**. The data comes from:
 
@@ -54,7 +54,7 @@ make bootstrap
 `scripts/bootstrap.sh` configures Claude Code and Codex and will:
 
 1. Copy `scripts/post-agent-status.sh` to each agent config dir.
-2. Render `hooks.json` and `codex-hooks.json` with the absolute path to the forwarder.
+2. Render `hooks/claude-code.json` and `hooks/codex.json` with the absolute path to the forwarder.
 3. Merge the rendered Claude Code hooks into `~/.claude/settings.json` and Codex hooks into `~/.codex/hooks.json`. If a file already exists, the merge leaves a `.bak` next to the original.
 
 Set `CLAUDE_CONFIG_DIR` to point bootstrap at a different config directory.
@@ -67,18 +67,24 @@ If you don't want to run the script, do it by hand:
 ```sh
 mkdir -p ~/.claude/scripts
 cp scripts/post-agent-status.sh ~/.claude/scripts/
-sed -i "s|path-to-post-agent-status|$HOME/.claude/scripts/post-agent-status.sh|g" hooks.json
+sed -i "s|path-to-post-agent-status|$HOME/.claude/scripts/post-agent-status.sh|g" hooks/claude-code.json
 ```
 
-Copy/merge the contents of `hooks.json` into `~/.claude/settings.json`
+Copy/merge the contents of `hooks/claude-code.json` into `~/.claude/settings.json`
 
 For Codex:
 
 ```sh
 mkdir -p ~/.codex/scripts
 cp scripts/post-agent-status.sh ~/.codex/scripts/
-sed "s|path-to-post-agent-status|$HOME/.codex/scripts/post-agent-status.sh|g" codex-hooks.json > ~/.codex/hooks.json
+sed "s|path-to-post-agent-status|$HOME/.codex/scripts/post-agent-status.sh|g" hooks/codex.json > ~/.codex/hooks.json
 ```
+
+## Configure
+
+Configuration is stored in `$XDG_CONFIG_HOME/agent-status/config.yaml`. On most systems `XDG_CONFIG_HOME=$HOME/.config`.
+
+The state file is stored in `$XDG_STATE_HOME/agent-status/state.json`. On most systems `XDG_STATE_HOME=$HOME/.local/state`.
 
 ## Run
 
@@ -118,10 +124,14 @@ The unit assumes `agent-status` is on `PATH` at `/usr/bin/agent-status`. Edit `E
 
 ### Launch from a tmux popup
 
-Bind the UI to a tmux popup so it overlays the current pane and dismisses itself once you focus a session:
+Bind the UI to a tmux popup so it overlays the current pane and dismisses itself once you focus a session (requires `tmux >= 3.2` for popup support):
 
 ```tmux
-bind o display-popup -E "agent-status ui --quit-after-focus"
+bind o if-shell -F "#{==:#{session_name},agent-status}" {
+  detach-client
+} {
+  display-popup -E "tmux new-session -A -s agent-status 'agent-status ui --quit-after-focus'"
+}
 ```
 
 The `--quit-after-focus` flag exits the TUI after `enter` focuses a session, which lets `display-popup -E` close the popup automatically. Omit the flag if you'd rather the popup stay open until you press `q`.
@@ -143,7 +153,7 @@ OpenTelemetry tracing is opt-in via `LOG_TRACES`:
 | `otlp`      | OTLP/HTTP (default port 4318)                                   |
 | `otlp-grpc` | OTLP/gRPC (default port 4317)                                   |
 
-OTLP modes honour the standard `OTEL_EXPORTER_OTLP_*` environment
+OTLP modes honor the standard `OTEL_EXPORTER_OTLP_*` environment
 variables (`ENDPOINT`, `HEADERS`, `INSECURE`, ...) and `OTEL_SERVICE_NAME`
 / `OTEL_RESOURCE_ATTRIBUTES`. To kick the tires against a local Jaeger:
 
@@ -154,8 +164,7 @@ LOG_TRACES=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 # Jaeger UI: http://localhost:16686  (service = agent-status)
 ```
 
-Point at any OTLP-capable backend (Tempo, Honeycomb, an OTel Collector,
-...) by setting `OTEL_EXPORTER_OTLP_ENDPOINT` accordingly.
+Point at any OTLP-capable backend (Tempo, Honeycomb, an OTel Collector, ...) by setting `OTEL_EXPORTER_OTLP_ENDPOINT` accordingly.
 
 ## Develop
 

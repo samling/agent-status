@@ -48,27 +48,59 @@ const defaultConfigYAML = `# agent-status config
 # logs: "config: loaded /path/to/config.yaml". The default search
 # location is $XDG_CONFIG_HOME/agent-status/config.yaml.
 
-# Path to the persistent state file. The collector is the sole writer;
-# readers (TUI, statusline, state subcommand) load it directly.
-# state: ~/.config/agent-status/state.json
+# Path to the persistent state file. Defaults to
+# $XDG_STATE_HOME/agent-status/state.json (or ~/.local/state/agent-status/
+# state.json when XDG_STATE_HOME is unset, per the XDG Base Directory
+# Specification). The collector is the sole writer; readers (TUI,
+# statusline, state subcommand) load it directly.
+# state: ~/.local/state/agent-status/state.json
 
 # Logging and tracing for the collector and CLI clients. Each key has
-# a matching env var (LOG_LEVEL, LOG_FORMAT, LOG_TRACES) and CLI flag
-# (--log-level, --log-format, --log-traces) that takes precedence.
+# a matching CLI flag (--log-level, --log-format, --log-traces-*) and
+# env var (LOG_LEVEL / LOG_FORMAT for the bare ones; AGENT_STATUS_LOG_*
+# for everything else) that takes precedence over this file.
 log:
   # Minimum log level: debug | info | warn | error.
   level: info
   # Output format: text (human-friendly key=value) or json.
   format: text
-  # OpenTelemetry traces exporter:
-  #   off       traces disabled (default).
-  #   stdout    pretty-print spans to stderr; useful for local debugging.
-  #   otlp      send via OTLP/HTTP. Configure with the standard env vars,
-  #             e.g. OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318.
-  #   otlp-grpc same as otlp but over gRPC (default port 4317).
-  # trace_id and span_id are stamped on every log record while a span
-  # is in scope, regardless of whether an exporter is configured.
-  traces: off
+  # OTel service.name attribute. Defaults to "agent-status".
+  # service: agent-status
+
+  # OpenTelemetry tracing. trace_id and span_id are stamped on every log
+  # record while a span is in scope, regardless of whether export is
+  # enabled here.
+  traces:
+    # Toggle trace export. When false, the global TracerProvider stays
+    # NoOp and no spans leave the process.
+    enabled: false
+    # Exporter to use when enabled:
+    #   stdout    pretty-print spans to stderr; useful for local debugging.
+    #   otlp-http send via OTLP/HTTP (default port 4318).
+    #   otlp-grpc send via OTLP/gRPC (default port 4317).
+    exporter: stdout
+
+    # OTLP exporter knobs (used when exporter is otlp-*). Empty / unset
+    # values fall through to the SDK's OTEL_EXPORTER_OTLP_* env-var
+    # defaults, so existing OTel deployments keep working without
+    # touching this file.
+    otlp:
+      # host:port or full URL. URLs (https://...) are passed via the
+      # WithEndpointURL option; bare host:port goes through WithEndpoint.
+      # endpoint: localhost:4318
+      # Skip TLS (use http:// for HTTP, h2c for gRPC). Useful for local
+      # collectors like Jaeger / Tempo running unencrypted.
+      # insecure: false
+      # Per-export deadline. Leave 0 / unset for the SDK default (10s).
+      # timeout: 10s
+      # Compression: none | gzip.
+      # compression: none
+      # Headers sent on every export request. Common use: bearer tokens
+      # for hosted backends. Values are taken verbatim (no shell
+      # expansion); for secret-injection at process-start time, set
+      # AGENT_STATUS_LOG_TRACES_OTLP_HEADERS=key1=value1,key2=value2.
+      # headers:
+      #   authorization: "Bearer paste-token-here"
 
 server:
   # Listen address and port for the HTTP collector. The collector

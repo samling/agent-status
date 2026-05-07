@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/state"
 )
@@ -111,13 +111,13 @@ type uiModel struct {
 	configPath     string
 	interval       time.Duration
 	sessions       []state.Session
-	meta           map[string]discovery.SessionMeta
+	meta           map[string]source.SessionMeta
 	notes          map[string]string
 	selectedID     string
 	sort           sortMode
 	width          int
 	height         int
-	detail         discovery.TranscriptInfo
+	detail         source.TranscriptInfo
 	detailFor      string // session id that detail belongs to
 	inputMode      bool
 	inputBuf       string

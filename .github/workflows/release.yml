@@ -50,7 +50,9 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           name="agent-status_${version}_${{ matrix.target }}"
           go build -trimpath -ldflags="-s -w -X github.com/samling/agent-status/internal/version.Version=v${version}" -o "dist/${name}/agent-status" ./cmd/agent-status
-          cp README.md hooks.json scripts/post-agent-status.sh "dist/${name}/" 2>/dev/null || true
+          mkdir -p "dist/${name}/hooks"
+          cp README.md scripts/post-agent-status.sh "dist/${name}/" 2>/dev/null || true
+          cp hooks/claude-code.json hooks/codex.json "dist/${name}/hooks/" 2>/dev/null || true
           (cd dist && tar czf "${name}.tar.gz" "${name}")
 
       - name: Upload release asset

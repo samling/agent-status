@@ -1,7 +1,15 @@
-package discovery
+// Package codex is the Codex discovery backend: it reads Codex's SQLite
+// databases (state_*.sqlite, logs_*.sqlite) under ~/.codex/ plus recent rollout
+// JSONLs, and translates them into the shared source.LiveSession shape.
+//
+// Codex emits no SessionEnd hook, so end-of-life is detected here via PID
+// liveness on linked processes. There is no fsnotify Watch counterpart because
+// Codex's primary storage is SQLite.
+package codex
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -15,12 +23,15 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	_ "modernc.org/sqlite"
 
+	"github.com/samling/agent-status/internal/discovery/source"
+	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/state"
 )
 
-type codexThread struct {
+type thread struct {
 	ID          string
 	RolloutPath string
 	CreatedAt   time.Time
@@ -33,51 +44,55 @@ type codexThread struct {
 	Archived    bool
 }
 
-type codexProcess struct {
+type process struct {
 	PID      int
 	LatestAt time.Time
 }
 
-const codexUnlinkedThreadGrace = 30 * time.Minute
+const unlinkedThreadGrace = 30 * time.Minute
 
-// codexFreshSessionWindow labels very new threads as SessionStart.
-const codexFreshSessionWindow = 30 * time.Second
+// freshSessionWindow labels very new threads as SessionStart.
+const freshSessionWindow = 30 * time.Second
 
-func scanCodexLive() ([]liveAgentSession, int, error) {
-	dir, err := codexDir()
+// Scan returns the currently-live Codex sessions: threads from
+// state_*.sqlite (merged with recent rollout JSONLs as a fallback) whose
+// linked process is still alive, or which are recent enough to be treated as
+// "starting up" without a process link yet.
+func Scan() ([]source.LiveSession, int, error) {
+	dir, err := homeDir()
 	if err != nil {
 		return nil, 0, err
 	}
 	now := time.Now()
-	threads := []codexThread{}
+	threads := []thread{}
 	statePath, ok, err := newestSQLite(dir, "state_*.sqlite")
 	if err != nil {
 		return nil, 0, err
 	}
 	if ok {
-		threads, err = loadCodexThreads(statePath)
+		threads, err = loadThreads(statePath)
 		if err != nil {
 			return nil, 0, err
 		}
 	}
 
-	rolloutThreads, err := loadRecentCodexRolloutThreads(dir, now.Add(-codexUnlinkedThreadGrace))
+	rolloutThreads, err := loadRecentRolloutThreads(dir, now.Add(-unlinkedThreadGrace))
 	if err != nil {
 		return nil, len(threads), err
 	}
-	threads = mergeCodexThreads(threads, rolloutThreads)
+	threads = mergeThreads(threads, rolloutThreads)
 
-	processes := map[string]codexProcess{}
+	processes := map[string]process{}
 	if logsPath, ok, err := newestSQLite(dir, "logs_*.sqlite"); err != nil {
 		return nil, len(threads), err
 	} else if ok {
-		processes, err = loadCodexProcesses(logsPath)
+		processes, err = loadProcesses(logsPath)
 		if err != nil {
 			return nil, len(threads), err
 		}
 	}
 
-	out := make([]liveAgentSession, 0, len(threads))
+	out := make([]source.LiveSession, 0, len(threads))
 	for _, th := range threads {
 		if th.Archived {
 			slog.Debug("codex scan: skip archived",
@@ -85,7 +100,7 @@ func scanCodexLive() ([]liveAgentSession, int, error) {
 			continue
 		}
 		proc, hasProc := processes[th.ID]
-		if hasProc && (proc.PID <= 0 || !pidAlive(proc.PID)) {
+		if hasProc && (proc.PID <= 0 || !source.PIDAlive(proc.PID)) {
 			slog.Debug("codex scan: skip dead linked process",
 				"session", state.ShortID(th.ID),
 				"pid", proc.PID)
@@ -95,7 +110,7 @@ func scanCodexLive() ([]liveAgentSession, int, error) {
 		if proc.LatestAt.After(updatedAt) {
 			updatedAt = proc.LatestAt
 		}
-		if !hasProc && !recentUnlinkedCodexThread(th, now) {
+		if !hasProc && !recentUnlinkedThread(th, now) {
 			slog.Debug("codex scan: skip stale unlinked thread",
 				"session", state.ShortID(th.ID),
 				"created_at", th.CreatedAt,
@@ -106,18 +121,17 @@ func scanCodexLive() ([]liveAgentSession, int, error) {
 		event := "Discovered"
 		eventAt := updatedAt
 		// ReconcileDiscovered only honors SessionStart on first insert.
-		if !th.CreatedAt.IsZero() && now.Sub(th.CreatedAt) < codexFreshSessionWindow {
+		if !th.CreatedAt.IsZero() && now.Sub(th.CreatedAt) < freshSessionWindow {
 			event = "SessionStart"
 			eventAt = th.CreatedAt
 		}
-		out = append(out, liveAgentSession{
+		out = append(out, source.LiveSession{
 			Agent:     state.AgentCodex,
 			SessionID: th.ID,
 			StartedAt: th.CreatedAt,
 			Event:     event,
 			EventAt:   eventAt,
-			Meta: SessionMeta{
-				Agent:      state.AgentCodex,
+			Meta: source.SessionMeta{
 				PID:        proc.PID,
 				Entrypoint: th.Source,
 				Cwd:        th.Cwd,
@@ -131,7 +145,128 @@ func scanCodexLive() ([]liveAgentSession, int, error) {
 	return out, len(threads), nil
 }
 
-func mergeCodexThreads(primary, fallback []codexThread) []codexThread {
+// Apply upserts a scanned codex session into the store.
+//
+// Codex emits no SessionEnd hook and only fires SessionStart on the first
+// turn (not at CLI launch), so periodic discovery is the only reliable signal
+// for "this session exists" before any hooks have fired. Apply expresses that
+// policy:
+//
+//   - On first sight, insert a row stamped with sess.Event ("SessionStart"
+//     for fresh threads, "Discovered" otherwise).
+//   - On already-known rows, refine durable metadata only: agent identity,
+//     an earlier FirstSeenAt if discovery learned a more accurate creation
+//     timestamp, and an initial StatusAt if it was never stamped.
+//
+// Apply deliberately never touches LastEvent / LastEventAt / EngineStatus /
+// TurnID on existing rows so hook-driven progress isn't clobbered by a later
+// discovery tick.
+func Apply(ctx context.Context, s *state.Store, sess source.LiveSession) bool {
+	traceHex, spanHex, traceErr := s.EnsureTrace(ctx, sess.SessionID, sess.Agent, func() (string, string) {
+		return logging.NewSessionRoot(ctx, sess.SessionID, sess.Agent)
+	})
+	if traceErr != nil {
+		slog.WarnContext(ctx, "discovery: ensure trace failed",
+			"agent", sess.Agent, "session", state.ShortID(sess.SessionID), "err", traceErr)
+	}
+	ctx = logging.ContextWithSessionTrace(ctx, traceHex, spanHex)
+
+	// We avoid opening a span up front because periodic polling re-applies
+	// every alive session every tick, and the steady-state outcome is "no
+	// change". Do the work first; emit the span only when something actually
+	// happened, backdated to when work started.
+	start := time.Now()
+
+	createdAt := sess.StartedAt
+	if createdAt.IsZero() {
+		createdAt = start
+	}
+	ts := createdAt.UTC().Format(time.RFC3339Nano)
+	insertEvent := sess.Event
+	if insertEvent == "" {
+		insertEvent = "Discovered"
+	}
+
+	inserted, err := s.InsertSession(ctx, state.Session{
+		SessionID:   sess.SessionID,
+		Agent:       sess.Agent,
+		FirstSeenAt: ts,
+		LastEvent:   insertEvent,
+		LastEventAt: ts,
+		StatusAt:    ts,
+	})
+	if err != nil {
+		slog.WarnContext(ctx, "discovery: codex insert failed",
+			"session", state.ShortID(sess.SessionID), "err", err)
+		return false
+	}
+	if inserted {
+		_, span := logging.StartAt(ctx, "discovery.apply", start,
+			attribute.String("agent", sess.Agent),
+			attribute.String("session.id", sess.SessionID),
+			attribute.String("event", insertEvent),
+			attribute.Bool("inserted", true),
+		)
+		span.End()
+		slog.InfoContext(ctx, "discovery: codex session discovered",
+			"session", state.ShortID(sess.SessionID), "event", insertEvent)
+		return true
+	}
+
+	var (
+		identified bool
+		priorAgent string
+	)
+	changed, err := s.UpdateSession(ctx, sess.SessionID, func(stored *state.Session) bool {
+		var changed bool
+		// Identify (or re-identify) Agent if a hook stamped it before us with
+		// the placeholder. We never downgrade a concrete label.
+		if stored.Agent == "" || stored.Agent == state.AgentUnidentified {
+			priorAgent = stored.Agent
+			stored.Agent = sess.Agent
+			identified = true
+			changed = true
+		}
+		if stored.FirstSeenAt == "" || ts < stored.FirstSeenAt {
+			stored.FirstSeenAt = ts
+			changed = true
+		}
+		if stored.StatusAt == "" {
+			stored.StatusAt = stored.LastEventAt
+			if stored.StatusAt == "" {
+				stored.StatusAt = ts
+			}
+			changed = true
+		}
+		return changed
+	})
+	if err != nil {
+		slog.WarnContext(ctx, "discovery: codex refine failed",
+			"session", state.ShortID(sess.SessionID), "err", err)
+		return false
+	}
+	if changed {
+		_, span := logging.StartAt(ctx, "discovery.apply", start,
+			attribute.String("agent", sess.Agent),
+			attribute.String("session.id", sess.SessionID),
+			attribute.Bool("refined", true),
+			attribute.Bool("identified", identified),
+		)
+		span.End()
+	}
+	if identified {
+		slog.InfoContext(ctx, "discovery: agent identified",
+			"session", state.ShortID(sess.SessionID),
+			"from", priorAgent, "to", sess.Agent)
+	}
+	if changed {
+		slog.DebugContext(ctx, "discovery: codex session refined",
+			"session", state.ShortID(sess.SessionID))
+	}
+	return changed
+}
+
+func mergeThreads(primary, fallback []thread) []thread {
 	index := make(map[string]int, len(primary))
 	for i, th := range primary {
 		if th.ID != "" {
@@ -148,12 +283,12 @@ func mergeCodexThreads(primary, fallback []codexThread) []codexThread {
 			primary = append(primary, th)
 			continue
 		}
-		primary[i] = mergeCodexThread(primary[i], th)
+		primary[i] = mergeThread(primary[i], th)
 	}
 	return primary
 }
 
-func mergeCodexThread(a, b codexThread) codexThread {
+func mergeThread(a, b thread) thread {
 	if a.RolloutPath == "" {
 		a.RolloutPath = b.RolloutPath
 	}
@@ -181,17 +316,17 @@ func mergeCodexThread(a, b codexThread) codexThread {
 	return a
 }
 
-func recentUnlinkedCodexThread(th codexThread, now time.Time) bool {
+func recentUnlinkedThread(th thread, now time.Time) bool {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	cutoff := now.Add(-codexUnlinkedThreadGrace)
+	cutoff := now.Add(-unlinkedThreadGrace)
 	return th.CreatedAt.After(cutoff) || th.UpdatedAt.After(cutoff)
 }
 
-func loadRecentCodexRolloutThreads(dir string, cutoff time.Time) ([]codexThread, error) {
+func loadRecentRolloutThreads(dir string, cutoff time.Time) ([]thread, error) {
 	sessionsDir := filepath.Join(dir, "sessions")
-	var out []codexThread
+	var out []thread
 	err := filepath.WalkDir(sessionsDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
@@ -203,7 +338,7 @@ func loadRecentCodexRolloutThreads(dir string, cutoff time.Time) ([]codexThread,
 		if err != nil || info.ModTime().Before(cutoff) {
 			return nil
 		}
-		th, ok := loadCodexRolloutThread(path, info.ModTime())
+		th, ok := loadRolloutThread(path, info.ModTime())
 		if ok {
 			out = append(out, th)
 		}
@@ -215,36 +350,36 @@ func loadRecentCodexRolloutThreads(dir string, cutoff time.Time) ([]codexThread,
 	return out, err
 }
 
-func loadCodexRolloutThread(path string, modTime time.Time) (codexThread, bool) {
+func loadRolloutThread(path string, modTime time.Time) (thread, bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return codexThread{}, false
+		return thread{}, false
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1<<20), 1<<24)
 	for scanner.Scan() {
-		var line codexTranscriptLine
+		var line transcriptLine
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil || line.Type != "session_meta" {
 			continue
 		}
-		var payload codexSessionMeta
+		var payload sessionMeta
 		if err := json.Unmarshal(line.Payload, &payload); err != nil {
-			return codexThread{}, false
+			return thread{}, false
 		}
 		id := payload.ID
 		if id == "" {
-			id = codexThreadIDFromRolloutPath(path)
+			id = threadIDFromRolloutPath(path)
 		}
 		if id == "" {
-			return codexThread{}, false
+			return thread{}, false
 		}
-		createdAt := parseCodexTimestamp(payload.Timestamp)
+		createdAt := parseTimestamp(payload.Timestamp)
 		if createdAt.IsZero() {
 			createdAt = modTime
 		}
-		return codexThread{
+		return thread{
 			ID:          id,
 			RolloutPath: path,
 			CreatedAt:   createdAt,
@@ -256,10 +391,10 @@ func loadCodexRolloutThread(path string, modTime time.Time) (codexThread, bool) 
 			GitBranch:   payload.Git.Branch,
 		}, true
 	}
-	return codexThread{}, false
+	return thread{}, false
 }
 
-func codexThreadIDFromRolloutPath(path string) string {
+func threadIDFromRolloutPath(path string) string {
 	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	if len(base) < 36 {
 		return ""
@@ -271,7 +406,7 @@ func codexThreadIDFromRolloutPath(path string) string {
 	return id
 }
 
-func parseCodexTimestamp(s string) time.Time {
+func parseTimestamp(s string) time.Time {
 	if strings.TrimSpace(s) == "" {
 		return time.Time{}
 	}
@@ -282,7 +417,7 @@ func parseCodexTimestamp(s string) time.Time {
 	return t
 }
 
-func codexDir() (string, error) {
+func homeDir() (string, error) {
 	if dir := strings.TrimSpace(os.Getenv("CODEX_HOME")); dir != "" {
 		return dir, nil
 	}
@@ -338,7 +473,7 @@ func openSQLiteReadOnly(path string) (*sql.DB, error) {
 	return sql.Open("sqlite", u.String())
 }
 
-func loadCodexThreads(path string) ([]codexThread, error) {
+func loadThreads(path string) ([]thread, error) {
 	db, err := openSQLiteReadOnly(path)
 	if err != nil {
 		return nil, err
@@ -366,9 +501,9 @@ func loadCodexThreads(path string) ([]codexThread, error) {
 	}
 	defer rows.Close()
 
-	var out []codexThread
+	var out []thread
 	for rows.Next() {
-		var th codexThread
+		var th thread
 		var createdSec, updatedSec int64
 		var createdMS, updatedMS sql.NullInt64
 		var version, model, gitBranch sql.NullString
@@ -389,8 +524,8 @@ func loadCodexThreads(path string) ([]codexThread, error) {
 		); err != nil {
 			return nil, err
 		}
-		th.CreatedAt = codexTime(createdSec, createdMS)
-		th.UpdatedAt = codexTime(updatedSec, updatedMS)
+		th.CreatedAt = sqliteTime(createdSec, createdMS)
+		th.UpdatedAt = sqliteTime(updatedSec, updatedMS)
 		th.Version = version.String
 		th.Model = model.String
 		th.GitBranch = gitBranch.String
@@ -400,7 +535,7 @@ func loadCodexThreads(path string) ([]codexThread, error) {
 	return out, rows.Err()
 }
 
-func loadCodexProcesses(path string) (map[string]codexProcess, error) {
+func loadProcesses(path string) (map[string]process, error) {
 	db, err := openSQLiteReadOnly(path)
 	if err != nil {
 		return nil, err
@@ -417,7 +552,7 @@ func loadCodexProcesses(path string) (map[string]codexProcess, error) {
 	}
 	defer rows.Close()
 
-	out := map[string]codexProcess{}
+	out := map[string]process{}
 	for rows.Next() {
 		var threadID sql.NullString
 		var processUUID string
@@ -428,12 +563,12 @@ func loadCodexProcesses(path string) (map[string]codexProcess, error) {
 		}
 		id := strings.TrimSpace(threadID.String)
 		if id == "" {
-			id = parseCodexConversationID(body.String)
+			id = parseConversationID(body.String)
 		}
 		if id == "" {
 			continue
 		}
-		pid := parseCodexPID(processUUID)
+		pid := parsePID(processUUID)
 		if pid <= 0 {
 			continue
 		}
@@ -441,12 +576,12 @@ func loadCodexProcesses(path string) (map[string]codexProcess, error) {
 		if existing, ok := out[id]; ok && !latestAt.After(existing.LatestAt) {
 			continue
 		}
-		out[id] = codexProcess{PID: pid, LatestAt: latestAt}
+		out[id] = process{PID: pid, LatestAt: latestAt}
 	}
 	return out, rows.Err()
 }
 
-func parseCodexConversationID(body string) string {
+func parseConversationID(body string) string {
 	const key = "conversation.id="
 	i := strings.Index(body, key)
 	if i < 0 {
@@ -463,7 +598,7 @@ func parseCodexConversationID(body string) string {
 	return id
 }
 
-func codexTime(sec int64, ms sql.NullInt64) time.Time {
+func sqliteTime(sec int64, ms sql.NullInt64) time.Time {
 	if ms.Valid && ms.Int64 > 0 {
 		return time.UnixMilli(ms.Int64)
 	}
@@ -473,7 +608,7 @@ func codexTime(sec int64, ms sql.NullInt64) time.Time {
 	return time.Time{}
 }
 
-func parseCodexPID(processUUID string) int {
+func parsePID(processUUID string) int {
 	rest, ok := strings.CutPrefix(processUUID, "pid:")
 	if !ok {
 		return 0
@@ -487,4 +622,23 @@ func parseCodexPID(processUUID string) int {
 		return 0
 	}
 	return pid
+}
+
+// Rollout-line shapes used by Scan to extract session metadata. The shared
+// transcript parsers in the parent discovery package use their own copies.
+type transcriptLine struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type sessionMeta struct {
+	ID         string `json:"id"`
+	Timestamp  string `json:"timestamp"`
+	Cwd        string `json:"cwd"`
+	Source     string `json:"source"`
+	CLIVersion string `json:"cli_version"`
+	Model      string `json:"model"`
+	Git        struct {
+		Branch string `json:"branch"`
+	} `json:"git"`
 }

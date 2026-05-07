@@ -82,7 +82,7 @@ func runStatusline(_ *cobra.Command, _ []string) error {
 		Sessions:  sessions,
 	}
 	for _, s := range sessions {
-		switch s.Status {
+		switch state.DeriveStatus(s) {
 		case "active":
 			view.Active++
 		case "waiting":

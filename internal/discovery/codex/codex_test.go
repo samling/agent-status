@@ -1,4 +1,4 @@
-package discovery
+package codex
 
 import (
 	"database/sql"
@@ -11,7 +11,7 @@ import (
 	"github.com/samling/agent-status/internal/state"
 )
 
-func TestScanCodexLive(t *testing.T) {
+func TestScan(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
 
@@ -54,7 +54,7 @@ func TestScanCodexLive(t *testing.T) {
 	stateDB.Close()
 
 	logsDB := openTestDB(t, filepath.Join(dir, "logs_2.sqlite"))
-	createCodexLogsTable(t, logsDB)
+	createLogsTable(t, logsDB)
 	execTestSQL(t, logsDB,
 		`insert into logs (thread_id, process_uuid, ts, ts_nanos, feedback_log_body) values (?, ?, ?, ?, ?)`,
 		"thread-1",
@@ -65,9 +65,9 @@ func TestScanCodexLive(t *testing.T) {
 	)
 	logsDB.Close()
 
-	sessions, scanned, err := scanCodexLive()
+	sessions, scanned, err := Scan()
 	if err != nil {
-		t.Fatalf("scanCodexLive() error = %v", err)
+		t.Fatalf("Scan() error = %v", err)
 	}
 	if scanned != 1 {
 		t.Fatalf("scanned = %d, want 1", scanned)
@@ -96,19 +96,19 @@ func TestScanCodexLive(t *testing.T) {
 	}
 }
 
-func TestScanCodexLiveIncludesRecentThreadBeforeProcessLink(t *testing.T) {
+func TestScanIncludesRecentThreadBeforeProcessLink(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
 
 	stateDB := openTestDB(t, filepath.Join(dir, "state_5.sqlite"))
-	createCodexThreadsTable(t, stateDB)
+	createThreadsTable(t, stateDB)
 	now := time.Now()
-	insertCodexThread(t, stateDB, "thread-1", filepath.Join(dir, "rollout.jsonl"), now, now, "/tmp/project")
+	insertThread(t, stateDB, "thread-1", filepath.Join(dir, "rollout.jsonl"), now, now, "/tmp/project")
 	stateDB.Close()
 
-	sessions, scanned, err := scanCodexLive()
+	sessions, scanned, err := Scan()
 	if err != nil {
-		t.Fatalf("scanCodexLive() error = %v", err)
+		t.Fatalf("Scan() error = %v", err)
 	}
 	if scanned != 1 {
 		t.Fatalf("scanned = %d, want 1", scanned)
@@ -125,20 +125,20 @@ func TestScanCodexLiveIncludesRecentThreadBeforeProcessLink(t *testing.T) {
 	}
 }
 
-func TestScanCodexLiveLabelsFreshThreadAsSessionStart(t *testing.T) {
+func TestScanLabelsFreshThreadAsSessionStart(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
 
 	stateDB := openTestDB(t, filepath.Join(dir, "state_5.sqlite"))
-	createCodexThreadsTable(t, stateDB)
+	createThreadsTable(t, stateDB)
 	now := time.Now()
-	insertCodexThread(t, stateDB, "thread-fresh", filepath.Join(dir, "fresh.jsonl"), now, now, "/tmp/project")
-	insertCodexThread(t, stateDB, "thread-stale", filepath.Join(dir, "stale.jsonl"), now.Add(-2*codexFreshSessionWindow), now, "/tmp/project")
+	insertThread(t, stateDB, "thread-fresh", filepath.Join(dir, "fresh.jsonl"), now, now, "/tmp/project")
+	insertThread(t, stateDB, "thread-stale", filepath.Join(dir, "stale.jsonl"), now.Add(-2*freshSessionWindow), now, "/tmp/project")
 	stateDB.Close()
 
-	sessions, _, err := scanCodexLive()
+	sessions, _, err := Scan()
 	if err != nil {
-		t.Fatalf("scanCodexLive() error = %v", err)
+		t.Fatalf("Scan() error = %v", err)
 	}
 	got := map[string]string{}
 	for _, sess := range sessions {
@@ -152,16 +152,16 @@ func TestScanCodexLiveLabelsFreshThreadAsSessionStart(t *testing.T) {
 	}
 }
 
-func TestScanCodexLiveIncludesRecentRolloutBeforeSQLiteState(t *testing.T) {
+func TestScanIncludesRecentRolloutBeforeSQLiteState(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
 
 	now := time.Now()
-	rolloutPath := writeCodexRollout(t, dir, "thread-1", now, "/tmp/project")
+	rolloutPath := writeRollout(t, dir, "thread-1", now, "/tmp/project")
 
-	sessions, scanned, err := scanCodexLive()
+	sessions, scanned, err := Scan()
 	if err != nil {
-		t.Fatalf("scanCodexLive() error = %v", err)
+		t.Fatalf("Scan() error = %v", err)
 	}
 	if scanned != 1 {
 		t.Fatalf("scanned = %d, want 1", scanned)
@@ -184,19 +184,19 @@ func TestScanCodexLiveIncludesRecentRolloutBeforeSQLiteState(t *testing.T) {
 	}
 }
 
-func TestScanCodexLiveSkipsOldThreadWithoutProcessLink(t *testing.T) {
+func TestScanSkipsOldThreadWithoutProcessLink(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
 
 	stateDB := openTestDB(t, filepath.Join(dir, "state_5.sqlite"))
-	createCodexThreadsTable(t, stateDB)
-	old := time.Now().Add(-2 * codexUnlinkedThreadGrace)
-	insertCodexThread(t, stateDB, "thread-1", filepath.Join(dir, "rollout.jsonl"), old, old, "/tmp/project")
+	createThreadsTable(t, stateDB)
+	old := time.Now().Add(-2 * unlinkedThreadGrace)
+	insertThread(t, stateDB, "thread-1", filepath.Join(dir, "rollout.jsonl"), old, old, "/tmp/project")
 	stateDB.Close()
 
-	sessions, scanned, err := scanCodexLive()
+	sessions, scanned, err := Scan()
 	if err != nil {
-		t.Fatalf("scanCodexLive() error = %v", err)
+		t.Fatalf("Scan() error = %v", err)
 	}
 	if scanned != 1 {
 		t.Fatalf("scanned = %d, want 1", scanned)
@@ -206,19 +206,19 @@ func TestScanCodexLiveSkipsOldThreadWithoutProcessLink(t *testing.T) {
 	}
 }
 
-func TestScanCodexLiveSkipsOldRolloutWithoutProcessLink(t *testing.T) {
+func TestScanSkipsOldRolloutWithoutProcessLink(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
 
-	old := time.Now().Add(-2 * codexUnlinkedThreadGrace)
-	rolloutPath := writeCodexRollout(t, dir, "thread-1", old, "/tmp/project")
+	old := time.Now().Add(-2 * unlinkedThreadGrace)
+	rolloutPath := writeRollout(t, dir, "thread-1", old, "/tmp/project")
 	if err := os.Chtimes(rolloutPath, old, old); err != nil {
 		t.Fatal(err)
 	}
 
-	sessions, scanned, err := scanCodexLive()
+	sessions, scanned, err := Scan()
 	if err != nil {
-		t.Fatalf("scanCodexLive() error = %v", err)
+		t.Fatalf("Scan() error = %v", err)
 	}
 	if scanned != 0 {
 		t.Fatalf("scanned = %d, want 0", scanned)
@@ -228,18 +228,18 @@ func TestScanCodexLiveSkipsOldRolloutWithoutProcessLink(t *testing.T) {
 	}
 }
 
-func TestScanCodexLiveSkipsDeadLinkedProcessEvenWhenRecent(t *testing.T) {
+func TestScanSkipsDeadLinkedProcessEvenWhenRecent(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
 
 	stateDB := openTestDB(t, filepath.Join(dir, "state_5.sqlite"))
-	createCodexThreadsTable(t, stateDB)
+	createThreadsTable(t, stateDB)
 	now := time.Now()
-	insertCodexThread(t, stateDB, "thread-1", filepath.Join(dir, "rollout.jsonl"), now, now, "/tmp/project")
+	insertThread(t, stateDB, "thread-1", filepath.Join(dir, "rollout.jsonl"), now, now, "/tmp/project")
 	stateDB.Close()
 
 	logsDB := openTestDB(t, filepath.Join(dir, "logs_2.sqlite"))
-	createCodexLogsTable(t, logsDB)
+	createLogsTable(t, logsDB)
 	execTestSQL(t, logsDB,
 		`insert into logs (thread_id, process_uuid, ts, ts_nanos, feedback_log_body) values (?, ?, ?, ?, ?)`,
 		"thread-1",
@@ -250,9 +250,9 @@ func TestScanCodexLiveSkipsDeadLinkedProcessEvenWhenRecent(t *testing.T) {
 	)
 	logsDB.Close()
 
-	sessions, scanned, err := scanCodexLive()
+	sessions, scanned, err := Scan()
 	if err != nil {
-		t.Fatalf("scanCodexLive() error = %v", err)
+		t.Fatalf("Scan() error = %v", err)
 	}
 	if scanned != 1 {
 		t.Fatalf("scanned = %d, want 1", scanned)
@@ -262,18 +262,18 @@ func TestScanCodexLiveSkipsDeadLinkedProcessEvenWhenRecent(t *testing.T) {
 	}
 }
 
-func TestScanCodexLiveLinksProcessFromConversationIDLog(t *testing.T) {
+func TestScanLinksProcessFromConversationIDLog(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
 
 	stateDB := openTestDB(t, filepath.Join(dir, "state_5.sqlite"))
-	createCodexThreadsTable(t, stateDB)
+	createThreadsTable(t, stateDB)
 	now := time.Now()
-	insertCodexThread(t, stateDB, "019dffaa-0c6f-7bc0-bda9-fc9a81537894", filepath.Join(dir, "rollout.jsonl"), now, now, "/tmp/project")
+	insertThread(t, stateDB, "019dffaa-0c6f-7bc0-bda9-fc9a81537894", filepath.Join(dir, "rollout.jsonl"), now, now, "/tmp/project")
 	stateDB.Close()
 
 	logsDB := openTestDB(t, filepath.Join(dir, "logs_2.sqlite"))
-	createCodexLogsTable(t, logsDB)
+	createLogsTable(t, logsDB)
 	execTestSQL(t, logsDB,
 		`insert into logs (thread_id, process_uuid, ts, ts_nanos, feedback_log_body) values (?, ?, ?, ?, ?)`,
 		nil,
@@ -284,9 +284,9 @@ func TestScanCodexLiveLinksProcessFromConversationIDLog(t *testing.T) {
 	)
 	logsDB.Close()
 
-	sessions, scanned, err := scanCodexLive()
+	sessions, scanned, err := Scan()
 	if err != nil {
-		t.Fatalf("scanCodexLive() error = %v", err)
+		t.Fatalf("Scan() error = %v", err)
 	}
 	if scanned != 1 {
 		t.Fatalf("scanned = %d, want 1", scanned)
@@ -299,42 +299,6 @@ func TestScanCodexLiveLinksProcessFromConversationIDLog(t *testing.T) {
 	}
 }
 
-func TestParseCodexTranscript(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "rollout.jsonl")
-	data := `{"type":"session_meta","payload":{"cli_version":"0.128.0","git":{"branch":"feature"}}}
-{"type":"turn_context","payload":{"model":"gpt-5.5"}}
-{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"build this"}]}}
-{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}
-{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":250}}}}
-`
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	info, err := parseCodexTranscript(path)
-	if err != nil {
-		t.Fatalf("parseCodexTranscript() error = %v", err)
-	}
-	if info.Version != "0.128.0" {
-		t.Fatalf("Version = %q, want 0.128.0", info.Version)
-	}
-	if info.GitBranch != "feature" {
-		t.Fatalf("GitBranch = %q, want feature", info.GitBranch)
-	}
-	if info.Model != "gpt-5.5" {
-		t.Fatalf("Model = %q, want gpt-5.5", info.Model)
-	}
-	if info.LastUserPrompt != "build this" {
-		t.Fatalf("LastUserPrompt = %q, want build this", info.LastUserPrompt)
-	}
-	if info.TurnCount != 1 {
-		t.Fatalf("TurnCount = %d, want 1", info.TurnCount)
-	}
-	if info.InputTokens != 1000 || info.CacheReadTokens != 400 || info.OutputTokens != 250 {
-		t.Fatalf("tokens = in:%d cache:%d out:%d, want 1000/400/250", info.InputTokens, info.CacheReadTokens, info.OutputTokens)
-	}
-}
-
 func openTestDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
@@ -344,7 +308,7 @@ func openTestDB(t *testing.T, path string) *sql.DB {
 	return db
 }
 
-func createCodexThreadsTable(t *testing.T, db *sql.DB) {
+func createThreadsTable(t *testing.T, db *sql.DB) {
 	t.Helper()
 	execTestSQL(t, db, `
 		create table threads (
@@ -363,7 +327,7 @@ func createCodexThreadsTable(t *testing.T, db *sql.DB) {
 		)`)
 }
 
-func createCodexLogsTable(t *testing.T, db *sql.DB) {
+func createLogsTable(t *testing.T, db *sql.DB) {
 	t.Helper()
 	execTestSQL(t, db, `
 		create table logs (
@@ -375,7 +339,7 @@ func createCodexLogsTable(t *testing.T, db *sql.DB) {
 		)`)
 }
 
-func insertCodexThread(t *testing.T, db *sql.DB, id, rolloutPath string, createdAt, updatedAt time.Time, cwd string) {
+func insertThread(t *testing.T, db *sql.DB, id, rolloutPath string, createdAt, updatedAt time.Time, cwd string) {
 	t.Helper()
 	execTestSQL(t, db, `
 		insert into threads (
@@ -397,7 +361,7 @@ func insertCodexThread(t *testing.T, db *sql.DB, id, rolloutPath string, created
 	)
 }
 
-func writeCodexRollout(t *testing.T, dir, id string, createdAt time.Time, cwd string) string {
+func writeRollout(t *testing.T, dir, id string, createdAt time.Time, cwd string) string {
 	t.Helper()
 	path := filepath.Join(dir, "sessions", "2026", "05", "06", "rollout-2026-05-06T16-40-27-"+id+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

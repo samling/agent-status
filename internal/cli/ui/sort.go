@@ -46,7 +46,7 @@ func sortSessions(ss []state.Session, mode sortMode) {
 				return a.FirstSeenAt > b.FirstSeenAt
 			}
 		case sortStatus:
-			ra, rb := statusRank(a.Status), statusRank(b.Status)
+			ra, rb := statusRank(state.DeriveStatus(a)), statusRank(state.DeriveStatus(b))
 			if ra != rb {
 				return ra < rb
 			}

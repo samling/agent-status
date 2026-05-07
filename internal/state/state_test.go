@@ -4,7 +4,6 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestRecordEventSameTurnStopWins(t *testing.T) {
@@ -30,8 +29,8 @@ func TestRecordEventSameTurnStopWins(t *testing.T) {
 	if sessions[0].LastEvent != "Stop" {
 		t.Fatalf("LastEvent = %q, want Stop", sessions[0].LastEvent)
 	}
-	if sessions[0].Status != "idle" {
-		t.Fatalf("Status = %q, want idle", sessions[0].Status)
+	if got := DeriveStatus(sessions[0]); got != "idle" {
+		t.Fatalf("DeriveStatus = %q, want idle", got)
 	}
 
 	if _, err := store.RecordEvent(context.Background(), HookEvent{Agent: AgentCodex, SessionID: "session-1", Event: "UserPromptSubmit", TurnID: "turn-2", ReceivedAt: "2026-05-06T22:00:03Z"}); err != nil {
@@ -41,101 +40,8 @@ func TestRecordEventSameTurnStopWins(t *testing.T) {
 	if sessions[0].LastEvent != "UserPromptSubmit" {
 		t.Fatalf("LastEvent = %q, want UserPromptSubmit", sessions[0].LastEvent)
 	}
-	if sessions[0].Status != "active" {
-		t.Fatalf("Status = %q, want active", sessions[0].Status)
+	if got := DeriveStatus(sessions[0]); got != "active" {
+		t.Fatalf("DeriveStatus = %q, want active", got)
 	}
 }
 
-func TestReconcileDiscoveredDoesNotClobberHookStatus(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := store.RecordEvent(context.Background(), HookEvent{Agent: AgentCodex, SessionID: "session-1", Event: "Stop", TurnID: "turn-1", ReceivedAt: "2026-05-06T22:00:10Z"}); err != nil {
-		t.Fatal(err)
-	}
-	changed, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-1", mustParseTime(t, "2026-05-06T22:00:00Z"), "Discovered")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed {
-		t.Fatal("ReconcileDiscovered changed = false, want true")
-	}
-
-	sessions := store.Sessions()
-	if len(sessions) != 1 {
-		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
-	}
-	if sessions[0].LastEvent != "Stop" {
-		t.Fatalf("LastEvent = %q, want Stop", sessions[0].LastEvent)
-	}
-	if sessions[0].Status != "idle" {
-		t.Fatalf("Status = %q, want idle", sessions[0].Status)
-	}
-	if sessions[0].FirstSeenAt != "2026-05-06T22:00:00Z" {
-		t.Fatalf("FirstSeenAt = %q, want database timestamp", sessions[0].FirstSeenAt)
-	}
-}
-
-func TestReconcileDiscoveredInsertEventSessionStart(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	created := mustParseTime(t, "2026-05-06T22:00:00Z")
-	changed, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-fresh", created, "SessionStart")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed {
-		t.Fatal("ReconcileDiscovered changed = false on insert")
-	}
-	sessions := store.Sessions()
-	if len(sessions) != 1 {
-		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
-	}
-	if sessions[0].LastEvent != "SessionStart" {
-		t.Fatalf("LastEvent = %q, want SessionStart", sessions[0].LastEvent)
-	}
-	if sessions[0].Status != "idle" {
-		t.Fatalf("Status = %q, want idle", sessions[0].Status)
-	}
-
-	// Re-polling SessionStart must not clobber hook state.
-	if _, err := store.RecordEvent(context.Background(), HookEvent{Agent: AgentCodex, SessionID: "session-fresh", Event: "UserPromptSubmit", TurnID: "turn-1", ReceivedAt: "2026-05-06T22:00:05Z"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-fresh", created, "SessionStart"); err != nil {
-		t.Fatal(err)
-	}
-	sessions = store.Sessions()
-	if sessions[0].LastEvent != "UserPromptSubmit" {
-		t.Fatalf("LastEvent = %q after re-poll, want UserPromptSubmit (no clobber)", sessions[0].LastEvent)
-	}
-}
-
-func TestReconcileDiscoveredInsertEventDefault(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-old", mustParseTime(t, "2026-05-06T20:00:00Z"), ""); err != nil {
-		t.Fatal(err)
-	}
-	sessions := store.Sessions()
-	if sessions[0].LastEvent != "Discovered" {
-		t.Fatalf("LastEvent = %q, want Discovered (default)", sessions[0].LastEvent)
-	}
-}
-
-func mustParseTime(t *testing.T, value string) time.Time {
-	t.Helper()
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return parsed
-}

@@ -156,7 +156,7 @@ func (w *Watcher) Run(ctx context.Context) {
 func (w *Watcher) countWaiting() int {
 	n := 0
 	for _, s := range w.store.Sessions() {
-		if s.Status == "waiting" {
+		if state.DeriveStatus(s) == "waiting" {
 			n++
 		}
 	}
@@ -175,7 +175,7 @@ func (w *Watcher) fire(ctx context.Context, reason string) error {
 	}
 	for i := range sessions {
 		s := sessions[i]
-		switch s.Status {
+		switch state.DeriveStatus(s) {
 		case "waiting":
 			data.Waiting++
 			data.WaitingSessions = append(data.WaitingSessions, s)

@@ -1,11 +1,12 @@
-package discovery
+package source
 
 import (
 	"os"
 	"syscall"
 )
 
-func pidAlive(pid int) bool {
+// PIDAlive reports whether a process is still running.
+func PIDAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return false

@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/state"
 	"github.com/samling/agent-status/internal/version"
 )
@@ -141,8 +141,9 @@ func (m uiModel) View() string {
 					cwd = shortPath(cwd, cwdWidth)
 				}
 				note := truncate(collapseWS(m.notes[s.SessionID]), colNote)
+				status := state.DeriveStatus(s)
 				rowText := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
-					colStatus, s.Status,
+					colStatus, status,
 					colAgent, s.Agent,
 					colVersion, ver,
 					cwdWidth, cwd,
@@ -152,14 +153,21 @@ func (m uiModel) View() string {
 					colNote, note,
 				)
 				selected := s.SessionID == selectedID
-				head.WriteString(rowStyle(s.Status, selected).Render(rowText))
+				head.WriteString(rowStyle(status, selected).Render(rowText))
 			}
 			if selectedID != "" && !m.showConfig {
-				var info discovery.TranscriptInfo
+				var info source.TranscriptInfo
 				if m.detailFor == selectedID {
 					info = m.detail
 				}
-				foot.WriteString(renderDetail(selectedID, m.notes[selectedID], info, m.meta[selectedID]))
+				var selectedAgent string
+				for _, sess := range m.sessions {
+					if sess.SessionID == selectedID {
+						selectedAgent = sess.Agent
+						break
+					}
+				}
+				foot.WriteString(renderDetail(selectedID, selectedAgent, m.notes[selectedID], info, m.meta[selectedID]))
 			}
 		}
 	}
@@ -232,7 +240,7 @@ func (m uiModel) renderConfig() string {
 	}, "\n")
 }
 
-func renderDetail(sessionID, note string, info discovery.TranscriptInfo, meta discovery.SessionMeta) string {
+func renderDetail(sessionID, agent, note string, info source.TranscriptInfo, meta source.SessionMeta) string {
 	num := func(n int64) string {
 		if n <= 0 {
 			return "-"
@@ -254,7 +262,7 @@ func renderDetail(sessionID, note string, info discovery.TranscriptInfo, meta di
 		pid = fmt.Sprintf("%d", meta.PID)
 	}
 	line1 := strings.Join([]string{
-		labeledField("agent", meta.Agent),
+		labeledField("agent", agent),
 		labeledField("session", state.ShortID(sessionID)),
 		labeledField("pid", pid),
 		labeledField("model", info.Model),

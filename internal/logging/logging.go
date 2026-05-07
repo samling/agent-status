@@ -8,15 +8,30 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 )
 
 // Config holds resolved logging settings.
 type Config struct {
 	Level   slog.Level // log level threshold
 	Format  string     // "text" or "json"
-	Traces  string     // "off" or "stdout"
 	Output  io.Writer  // defaults to os.Stderr
 	Service string     // OTel service.name; defaults to "agent-status"
+
+	// Tracing. When TracesEnabled is false the rest of the trace fields
+	// are ignored and the global TracerProvider stays NoOp.
+	TracesEnabled  bool
+	TracesExporter string // "stdout" | "otlp-http" | "otlp-grpc"
+
+	// OTLP-only knobs (used when TracesExporter is otlp-*). Empty fields
+	// fall through to the OTel SDK's environment-variable defaults
+	// (OTEL_EXPORTER_OTLP_*), so users can still drive everything from
+	// env if they prefer.
+	OTLPEndpoint    string            // "host:port" or full URL (https://otel.example.com/v1/traces)
+	OTLPInsecure    bool              // disable TLS / use h2c
+	OTLPHeaders     map[string]string // outgoing request headers
+	OTLPTimeout     time.Duration     // per-export deadline
+	OTLPCompression string            // "" | "gzip" | "none"
 }
 
 // ParseLevel converts user input to slog.Level.
@@ -71,10 +86,14 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 	if err != nil {
 		return nil, fmt.Errorf("logging: %w", err)
 	}
+	tracesDesc := "off"
+	if cfg.TracesEnabled {
+		tracesDesc = normExporter(cfg.TracesExporter)
+	}
 	slog.Debug("logging configured",
 		"min_level", cfg.Level.String(),
 		"format", normFormat(cfg.Format),
-		"traces", normTraces(cfg.Traces),
+		"traces", tracesDesc,
 	)
 	return shutdown, nil
 }
@@ -87,12 +106,12 @@ func normFormat(s string) string {
 	return "text"
 }
 
-// normTraces canonicalizes user-facing exporter aliases.
-func normTraces(s string) string {
+// normExporter canonicalizes the trace exporter name. Empty input falls back
+// to "stdout"; unknown values pass through unchanged so setupTracer can
+// surface a precise error.
+func normExporter(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "", "off", "false", "no", "none":
-		return "off"
-	case "stdout", "on", "true", "yes":
+	case "", "stdout":
 		return "stdout"
 	case "otlp", "otlp-http", "otlp_http", "http":
 		return "otlp-http"
