@@ -2,9 +2,13 @@
 // databases (state_*.sqlite, logs_*.sqlite) under ~/.codex/ plus recent rollout
 // JSONLs, and translates them into the shared source.LiveSession shape.
 //
-// Codex emits no SessionEnd hook, so end-of-life is detected here via PID
-// liveness on linked processes. There is no fsnotify Watch counterpart because
-// Codex's primary storage is SQLite.
+// Codex emits no SessionEnd hook, so end-of-life is detected via PID liveness
+// on linked processes. The push-side counterpart lives in watch.go: an
+// fsnotify watcher on ~/.codex/shell_snapshots/ catches the per-session
+// snapshot Codex drops at session open, so freshly-launched CLIs land in
+// the store immediately rather than waiting for the next periodic Scan tick.
+// (The rollout JSONL doesn't exist until first turn, so it's not a useful
+// session-open signal; Scan picks up its metadata once it appears.)
 package codex
 
 import (
@@ -81,6 +85,16 @@ func Scan() ([]source.LiveSession, int, error) {
 		return nil, len(threads), err
 	}
 	threads = mergeThreads(threads, rolloutThreads)
+
+	// shell_snapshots are the only on-disk evidence of a Codex CLI that's
+	// open but hasn't taken its first turn yet (Codex defers state_*.sqlite
+	// + rollout writes until then). Including them here keeps such sessions
+	// "alive" across Scan ticks so the reaper doesn't kill them.
+	snapshotThreads, err := loadRecentShellSnapshotThreads(dir, now.Add(-unlinkedThreadGrace))
+	if err != nil {
+		return nil, len(threads), err
+	}
+	threads = mergeThreads(threads, snapshotThreads)
 
 	processes := map[string]process{}
 	if logsPath, ok, err := newestSQLite(dir, "logs_*.sqlite"); err != nil {
@@ -324,6 +338,54 @@ func recentUnlinkedThread(th thread, now time.Time) bool {
 	return th.CreatedAt.After(cutoff) || th.UpdatedAt.After(cutoff)
 }
 
+// loadRecentShellSnapshotThreads synthesizes thread rows from the
+// <UUID>.<nanoTs>.sh files Codex writes at session open, scoped to the same
+// unlinkedThreadGrace window as recent rollouts. Returned threads carry
+// just ID + timestamps + Source="cli"; richer fields come in via mergeThreads
+// once state_*.sqlite or a rollout JSONL appears for the same session.
+func loadRecentShellSnapshotThreads(dir string, cutoff time.Time) ([]thread, error) {
+	snapshotDir := filepath.Join(dir, "shell_snapshots")
+	entries, err := os.ReadDir(snapshotDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []thread
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		path := filepath.Join(snapshotDir, e.Name())
+		if !isShellSnapshotPath(path) {
+			continue
+		}
+		id := threadIDFromShellSnapshotPath(path)
+		if id == "" {
+			continue
+		}
+		createdAt := shellSnapshotTimestamp(path)
+		if createdAt.IsZero() {
+			info, statErr := e.Info()
+			if statErr != nil {
+				continue
+			}
+			createdAt = info.ModTime()
+		}
+		if createdAt.Before(cutoff) {
+			continue
+		}
+		out = append(out, thread{
+			ID:        id,
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+			Source:    "cli",
+		})
+	}
+	return out, nil
+}
+
 func loadRecentRolloutThreads(dir string, cutoff time.Time) ([]thread, error) {
 	sessionsDir := filepath.Join(dir, "sessions")
 	var out []thread
@@ -391,7 +453,23 @@ func loadRolloutThread(path string, modTime time.Time) (thread, bool) {
 			GitBranch:   payload.Git.Branch,
 		}, true
 	}
-	return thread{}, false
+	// No session_meta line found. Codex creates the rollout JSONL at session
+	// open but only writes session_meta on the first turn, so a no-turn
+	// session has an empty file. Synthesize a minimal thread from the
+	// filename (which embeds the UUID) and file mtime; later turns will
+	// refine via Apply, and the state_*.sqlite path will overlay richer
+	// metadata once Codex flushes.
+	id := threadIDFromRolloutPath(path)
+	if id == "" {
+		return thread{}, false
+	}
+	return thread{
+		ID:          id,
+		RolloutPath: path,
+		CreatedAt:   modTime,
+		UpdatedAt:   modTime,
+		Source:      "cli",
+	}, true
 }
 
 func threadIDFromRolloutPath(path string) string {

@@ -33,6 +33,7 @@ func liveSources() []liveSource {
 		{
 			agent:      state.AgentCodex,
 			scan:       codex.Scan,
+			watch:      codex.Watch,
 			apply:      codex.Apply,
 			transcript: codex.Transcript,
 		},
