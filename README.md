@@ -127,6 +127,8 @@ The unit assumes `agent-status` is on `PATH` at `/usr/bin/agent-status`. Edit `E
 Bind the UI to a tmux popup so it overlays the current pane and dismisses itself once you focus a session (requires `tmux >= 3.2` for popup support):
 
 ```tmux
+set-hook -g session-created 'if -F "#{==:#{session_name},agent-status}" "set-option -t agent-status status off"'
+
 bind o if-shell -F "#{==:#{session_name},agent-status}" {
   detach-client
 } {

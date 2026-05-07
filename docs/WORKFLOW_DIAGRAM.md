@@ -1,96 +1,124 @@
 # Session Lifecycle: Per-Agent Workflow
 
-Two sequence diagrams, one per supported agent, in parallel layout so the
-differences pop out. Both flows converge on `state.Store`, which is the
-single source of truth consumed by the TUI, statusline, `state` CLI, and
-the notify watcher.
+Two top-down flowcharts, one per supported agent, with each lifecycle
+phase as its own subgraph so the differences pop out. Both flows
+converge on `state.Store`, which is the single source of truth consumed
+by the TUI, statusline, `state` CLI, and the notify watcher.
 
 ## Claude Code
 
+Blue nodes are actions taken by the `claude-code` process (or its files
+on disk); orange nodes are agent-status components (fsnotify watcher,
+hook server, `state.Store`, poller).
+
 ```mermaid
-sequenceDiagram
-  autonumber
-  participant CC as claude-code process
-  participant SF as ~/.claude/sessions/<pid>.json
-  participant HK as Hook script (POST /hook)
-  participant FS as watchClaudeFiles (fsnotify)
-  participant POLL as syncDiscovered (2s poll, backstop)
-  participant SRV as server.makeHookHandler
-  participant ST as state.Store
+flowchart TB
+    Start([claude-code starts])
 
-  Note over CC,ST: Session start
-  CC->>SF: create (pid, sessionId, status=idle)
-  SF-->>FS: fsnotify Create/Write
-  FS->>ST: ApplyDiscovered (insert row, jsonl_status=idle)
-  CC->>HK: SessionStart
-  HK->>SRV: POST /hook {SessionStart}
-  SRV->>ST: RecordEvent("SessionStart")
+    subgraph Phase1["1. Session start"]
+        direction TB
+        P1A[Create ~/.claude/sessions/pid.json] --> P1B[fsnotify Create/Write]
+        P1B --> P1C[ApplyDiscovered<br/>insert row, jsonl_status=idle]
+        P1D[Emit SessionStart hook] --> P1E[POST /hook]
+        P1E --> P1F[RecordEvent SessionStart]
+    end
 
-  Note over CC,ST: User prompt + tool calls
-  CC->>SF: status=busy
-  SF-->>FS: fsnotify Write
-  FS->>ST: ApplyDiscovered jsonl_status=busy (idle→active)
-  CC->>HK: UserPromptSubmit
-  HK->>SRV: POST /hook
-  SRV->>ST: RecordEvent (no transition; status pinned by JSONL)
-  Note over CC,HK: PreToolUse, PostToolUse, Notification, PermissionRequest, ...
+    subgraph Phase2["2. User prompt + tool calls"]
+        direction TB
+        P2A[JSONL status=busy] --> P2B[fsnotify Write]
+        P2B --> P2C[ApplyDiscovered<br/>idle &rarr; active]
+        P2D[UserPromptSubmit, PreToolUse,<br/>PostToolUse, Notification,<br/>PermissionRequest, ...] --> P2E[POST /hook]
+        P2E --> P2F[RecordEvent<br/>no transition, prefer JSONL status]
+    end
 
-  Note over CC,ST: Turn complete
-  CC->>HK: Stop
-  HK->>SRV: POST /hook
-  SRV->>ST: RecordEvent("Stop")
-  CC->>SF: status=idle
-  SF-->>FS: fsnotify Write
-  FS->>ST: ApplyDiscovered jsonl_status=idle (active→idle)
+    subgraph Phase3["3. Turn complete"]
+        direction TB
+        P3A[Emit Stop hook] --> P3B[POST /hook]
+        P3B --> P3C[RecordEvent Stop]
+        P3D[JSONL status=idle] --> P3E[fsnotify Write]
+        P3E --> P3F[ApplyDiscovered<br/>active &rarr; idle]
+    end
 
-  Note over CC,ST: Session end
-  CC->>SF: delete
-  SF-->>FS: fsnotify Remove
-  FS->>ST: scanClaudeLive + ReapAbsentForAgent(claude-code)
-  CC->>HK: SessionEnd (sometimes arrives AFTER the reap)
-  HK->>SRV: POST /hook {SessionEnd}
-  SRV->>ST: RecordEvent -> applied=false (no-op, logged DEBUG)
+    subgraph Phase4["4. Session end"]
+        direction TB
+        P4A[pid.json deleted] --> P4B[fsnotify Remove]
+        P4B --> P4C[scanClaudeLive +<br/>ReapAbsentForAgent claude-code]
+        P4D[SessionEnd hook<br/>sometimes AFTER the reap] --> P4E[POST /hook]
+        P4E --> P4F[RecordEvent<br/>applied=false, logged DEBUG]
+    end
 
-  Note over POLL,ST: Backstop (always running)
-  POLL->>ST: every 2s: ApplyDiscovered + inline ReapAbsentForAgent
+    Start --> Phase1
+    Phase1 --> Phase2
+    Phase2 --> Phase3
+    Phase3 -->|next turn| Phase2
+    Phase3 -->|exit| Phase4
+
+    Poll[(syncDiscovered: every 2s<br/>ApplyDiscovered + inline ReapAbsent)]
+    Poll -.poll.-> Phase1
+    Poll -.poll.-> Phase4
+
+    classDef agentAction fill:#e1f5ff,stroke:#0288d1,color:#000
+    classDef agentStatus fill:#fff4e1,stroke:#f57c00,color:#000
+
+    class Start,P1A,P1D,P2A,P2D,P3A,P3D,P4A,P4D agentAction
+    class P1B,P1C,P1E,P1F,P2B,P2C,P2E,P2F,P3B,P3C,P3E,P3F,P4B,P4C,P4E,P4F,Poll agentStatus
 ```
 
 ## Codex
 
+Blue nodes are actions taken by the `codex` process (or its SQLite
+files); orange nodes are agent-status components (hook server,
+`state.Store`, poller).
+
 ```mermaid
-sequenceDiagram
-  autonumber
-  participant CX as codex process
-  participant DB as ~/.codex/state_*.sqlite + logs_*.sqlite
-  participant HK as Hook script (POST /hook)
-  participant POLL as syncDiscovered (scanCodexLive, every 2s)
-  participant SRV as server.makeHookHandler
-  participant ST as state.Store
+flowchart TB
+    Start([codex starts])
 
-  Note over CX,ST: Session start
-  CX->>DB: insert thread row, log process_uuid=pid:N
-  CX->>HK: SessionStart
-  HK->>SRV: POST /hook {SessionStart, agent=codex}
-  SRV->>ST: RecordEvent("SessionStart") (new=true)
-  Note right of POLL: ~2s later
-  POLL->>DB: read threads JOIN logs (filter by pidAlive)
-  POLL->>ST: ReconcileDiscovered (durable metadata, no status clobber)
+    subgraph Phase1["1. Session start"]
+        direction TB
+        P1A[Insert thread row in<br/>~/.codex/state_*.sqlite] --> P1B[Log process_uuid=pid:N<br/>in logs_*.sqlite]
+        P1C[Emit SessionStart hook<br/>agent=codex] --> P1D[POST /hook]
+        P1D --> P1E[RecordEvent SessionStart<br/>new=true]
+        P1F[~2s later: scanCodexLive] --> P1G[Read threads JOIN logs<br/>filter by pidAlive]
+        P1G --> P1H[ReconcileDiscovered<br/>durable metadata, no status clobber]
+    end
 
-  Note over CX,ST: User prompt + tool calls
-  CX->>HK: UserPromptSubmit (with turn_id)
-  HK->>SRV: POST /hook
-  SRV->>ST: RecordEvent (idle→active)
-  Note over CX,HK: PreToolUse, PostToolUse, PermissionRequest, ...
+    subgraph Phase2["2. User prompt + tool calls"]
+        direction TB
+        P2A[UserPromptSubmit with turn_id] --> P2B[POST /hook]
+        P2B --> P2C[RecordEvent<br/>idle &rarr; active]
+        P2D[PreToolUse, PostToolUse,<br/>PermissionRequest, ...] --> P2E[POST /hook]
+    end
 
-  Note over CX,ST: Turn complete
-  CX->>HK: Stop
-  HK->>SRV: POST /hook {Stop, agent=codex}
-  SRV->>ST: NormalizeHookEvent rewrites Stop to TurnComplete, RecordEvent (active→idle)
+    subgraph Phase3["3. Turn complete"]
+        direction TB
+        P3A[Emit Stop hook<br/>agent=codex] --> P3B[POST /hook]
+        P3B --> P3C[NormalizeHookEvent<br/>rewrites Stop to TurnComplete]
+        P3C --> P3D[RecordEvent<br/>active &rarr; idle]
+    end
 
-  Note over CX,ST: Session end (ctrl-c, crash, no SessionEnd hook)
-  CX-->>DB: thread row remains, PID dies
-  POLL->>DB: scan finds thread but pidAlive(pid)=false
-  POLL->>ST: inline ReapAbsentForAgent within ~2s
+    subgraph Phase4["4. Session end (ctrl-c, crash, no SessionEnd hook)"]
+        direction TB
+        P4A[PID dies] --> P4B[Thread row remains in DB]
+        P4C[~2s poll: scanCodexLive] --> P4D[pidAlive=false]
+        P4D --> P4E[Inline ReapAbsentForAgent within ~2s]
+    end
+
+    Start --> Phase1
+    Phase1 --> Phase2
+    Phase2 --> Phase3
+    Phase3 -->|next turn| Phase2
+    Phase3 -->|exit| Phase4
+
+    Poll[(syncDiscovered: every 2s<br/>only path that learns codex exit)]
+    Poll -.poll.-> Phase1
+    Poll -.poll.-> Phase4
+
+    classDef agentAction fill:#e1f5ff,stroke:#0288d1,color:#000
+    classDef agentStatus fill:#fff4e1,stroke:#f57c00,color:#000
+
+    class Start,P1A,P1B,P1C,P2A,P2D,P3A,P4A,P4B agentAction
+    class P1D,P1E,P1F,P1G,P1H,P2B,P2C,P2E,P3B,P3C,P3D,P4C,P4D,P4E,Poll agentStatus
 ```
 
 ## Key contrasts
