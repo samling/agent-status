@@ -55,7 +55,7 @@ func TestReconcileDiscoveredDoesNotClobberHookStatus(t *testing.T) {
 	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-1", "Stop", "turn-1", "2026-05-06T22:00:10Z"); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-1", mustParseTime(t, "2026-05-06T22:00:00Z"))
+	changed, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-1", mustParseTime(t, "2026-05-06T22:00:00Z"), "Discovered")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +75,60 @@ func TestReconcileDiscoveredDoesNotClobberHookStatus(t *testing.T) {
 	}
 	if sessions[0].FirstSeenAt != "2026-05-06T22:00:00Z" {
 		t.Fatalf("FirstSeenAt = %q, want database timestamp", sessions[0].FirstSeenAt)
+	}
+}
+
+func TestReconcileDiscoveredInsertEventSessionStart(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := mustParseTime(t, "2026-05-06T22:00:00Z")
+	changed, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-fresh", created, "SessionStart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("ReconcileDiscovered changed = false on insert")
+	}
+	sessions := store.Sessions()
+	if len(sessions) != 1 {
+		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
+	}
+	if sessions[0].LastEvent != "SessionStart" {
+		t.Fatalf("LastEvent = %q, want SessionStart", sessions[0].LastEvent)
+	}
+	if sessions[0].Status != "idle" {
+		t.Fatalf("Status = %q, want idle", sessions[0].Status)
+	}
+
+	// A second poll for the same session must not clobber a hook-driven
+	// LastEvent (e.g. UserPromptSubmit) by re-emitting SessionStart.
+	if _, err := store.RecordEvent(context.Background(), AgentCodex, "session-fresh", "UserPromptSubmit", "turn-1", "2026-05-06T22:00:05Z"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-fresh", created, "SessionStart"); err != nil {
+		t.Fatal(err)
+	}
+	sessions = store.Sessions()
+	if sessions[0].LastEvent != "UserPromptSubmit" {
+		t.Fatalf("LastEvent = %q after re-poll, want UserPromptSubmit (no clobber)", sessions[0].LastEvent)
+	}
+}
+
+func TestReconcileDiscoveredInsertEventDefault(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.ReconcileDiscovered(context.Background(), AgentCodex, "session-old", mustParseTime(t, "2026-05-06T20:00:00Z"), ""); err != nil {
+		t.Fatal(err)
+	}
+	sessions := store.Sessions()
+	if sessions[0].LastEvent != "Discovered" {
+		t.Fatalf("LastEvent = %q, want Discovered (default)", sessions[0].LastEvent)
 	}
 }
 

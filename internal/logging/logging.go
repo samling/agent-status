@@ -49,6 +49,25 @@ func ParseLevel(s string) slog.Level {
 	}
 }
 
+// Redirect swaps the default slog handler to write to w, preserving
+// the configured level/format/trace attribution. Intended for
+// commands that take over the terminal (the TUI) and must not leak
+// log output onto the screen. Returns a function that restores the
+// previous handler.
+func Redirect(w io.Writer, cfg Config) func() {
+	prev := slog.Default()
+	opts := &slog.HandlerOptions{Level: cfg.Level}
+	var inner slog.Handler
+	switch strings.ToLower(strings.TrimSpace(cfg.Format)) {
+	case "json":
+		inner = slog.NewJSONHandler(w, opts)
+	default:
+		inner = slog.NewTextHandler(w, opts)
+	}
+	slog.SetDefault(slog.New(&traceHandler{Handler: inner}))
+	return func() { slog.SetDefault(prev) }
+}
+
 // Setup installs slog as the default logger and starts the OTel
 // tracer if configured. The returned shutdown function flushes any
 // pending spans; call it from main on exit.

@@ -264,15 +264,22 @@ func (s *Store) ApplyDiscovered(ctx context.Context, agent, sessionID, jsonlStat
 
 // ReconcileDiscovered registers a session when absent and reconciles
 // durable identity metadata when present. It intentionally does not
-// update LastEvent or JSONLStatus, so database polling cannot clobber
-// hook-derived active/idle state.
-func (s *Store) ReconcileDiscovered(ctx context.Context, agent, sessionID string, createdAt time.Time) (bool, error) {
+// update LastEvent or JSONLStatus on existing sessions, so database
+// polling cannot clobber hook-derived active/idle state. insertEvent
+// is the LastEvent value to record on first insert ("" defaults to
+// "Discovered"); pass "SessionStart" when the discovery layer can
+// distinguish a freshly-started session from one that was merely
+// noticed late.
+func (s *Store) ReconcileDiscovered(ctx context.Context, agent, sessionID string, createdAt time.Time, insertEvent string) (bool, error) {
 	if sessionID == "" {
 		return false, nil
 	}
 	agent = NormalizeAgent(agent)
 	if createdAt.IsZero() {
 		createdAt = time.Now()
+	}
+	if insertEvent == "" {
+		insertEvent = "Discovered"
 	}
 	ts := createdAt.UTC().Format(time.RFC3339Nano)
 
@@ -284,12 +291,13 @@ func (s *Store) ReconcileDiscovered(ctx context.Context, agent, sessionID string
 		s.sessions[sessionID] = Session{
 			Agent:       agent,
 			FirstSeenAt: ts,
-			LastEvent:   "Discovered",
+			LastEvent:   insertEvent,
 			LastEventAt: ts,
 			StatusAt:    ts,
 		}
 		slog.DebugContext(ctx, "ReconcileDiscovered: inserted",
-			"agent", agent, "session", ShortID(sessionID), "created_at", ts)
+			"agent", agent, "session", ShortID(sessionID),
+			"created_at", ts, "event", insertEvent)
 		return true, s.persist(ctx)
 	}
 

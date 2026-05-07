@@ -126,6 +126,33 @@ func TestScanCodexLiveIncludesRecentThreadBeforeProcessLink(t *testing.T) {
 	}
 }
 
+func TestScanCodexLiveLabelsFreshThreadAsSessionStart(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	stateDB := openTestDB(t, filepath.Join(dir, "state_5.sqlite"))
+	createCodexThreadsTable(t, stateDB)
+	now := time.Now()
+	insertCodexThread(t, stateDB, "thread-fresh", filepath.Join(dir, "fresh.jsonl"), now, now, "/tmp/project")
+	insertCodexThread(t, stateDB, "thread-stale", filepath.Join(dir, "stale.jsonl"), now.Add(-2*codexFreshSessionWindow), now, "/tmp/project")
+	stateDB.Close()
+
+	sessions, _, err := scanCodexLive()
+	if err != nil {
+		t.Fatalf("scanCodexLive() error = %v", err)
+	}
+	got := map[string]string{}
+	for _, sess := range sessions {
+		got[sess.SessionID] = sess.Event
+	}
+	if got["thread-fresh"] != "SessionStart" {
+		t.Fatalf("thread-fresh Event = %q, want SessionStart", got["thread-fresh"])
+	}
+	if got["thread-stale"] != "Discovered" {
+		t.Fatalf("thread-stale Event = %q, want Discovered", got["thread-stale"])
+	}
+}
+
 func TestScanCodexLiveIncludesRecentRolloutBeforeSQLiteState(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -38,6 +39,14 @@ type codexProcess struct {
 }
 
 const codexUnlinkedThreadGrace = 30 * time.Minute
+
+// codexFreshSessionWindow is the grace period during which a newly
+// observed thread is treated as a brand-new session: the discovery
+// loop labels it "SessionStart" so the UI can distinguish "just
+// started" from "already running, just noticed". Wider than one poll
+// interval so a session created right before the watcher boots is
+// still labelled correctly on the initial sweep.
+const codexFreshSessionWindow = 30 * time.Second
 
 func scanCodexLive() ([]liveAgentSession, int, error) {
 	dir, err := codexDir()
@@ -76,10 +85,15 @@ func scanCodexLive() ([]liveAgentSession, int, error) {
 	out := make([]liveAgentSession, 0, len(threads))
 	for _, th := range threads {
 		if th.Archived {
+			slog.Debug("codex scan: skip archived",
+				"session", state.ShortID(th.ID))
 			continue
 		}
 		proc, hasProc := processes[th.ID]
 		if hasProc && (proc.PID <= 0 || !pidAlive(proc.PID)) {
+			slog.Debug("codex scan: skip dead linked process",
+				"session", state.ShortID(th.ID),
+				"pid", proc.PID)
 			continue
 		}
 		updatedAt := th.UpdatedAt
@@ -87,14 +101,30 @@ func scanCodexLive() ([]liveAgentSession, int, error) {
 			updatedAt = proc.LatestAt
 		}
 		if !hasProc && !recentUnlinkedCodexThread(th, now) {
+			slog.Debug("codex scan: skip stale unlinked thread",
+				"session", state.ShortID(th.ID),
+				"created_at", th.CreatedAt,
+				"updated_at", th.UpdatedAt,
+				"age", now.Sub(th.UpdatedAt).Round(time.Second))
 			continue
+		}
+		event := "Discovered"
+		eventAt := updatedAt
+		// Fresh thread → emit SessionStart so first-time insertion in
+		// state records the actual lifecycle event instead of a
+		// generic "Discovered". The state store's ReconcileDiscovered
+		// only honors this on insert, so a re-poll of the same fresh
+		// session won't clobber later hook-driven events.
+		if !th.CreatedAt.IsZero() && now.Sub(th.CreatedAt) < codexFreshSessionWindow {
+			event = "SessionStart"
+			eventAt = th.CreatedAt
 		}
 		out = append(out, liveAgentSession{
 			Agent:     state.AgentCodex,
 			SessionID: th.ID,
 			StartedAt: th.CreatedAt,
-			Event:     "Discovered",
-			EventAt:   updatedAt,
+			Event:     event,
+			EventAt:   eventAt,
 			Meta: SessionMeta{
 				Agent:      state.AgentCodex,
 				PID:        proc.PID,

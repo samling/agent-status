@@ -180,10 +180,14 @@ Codex has no per-session files; everything is in shared SQLite
       `process_uuid` starts with `pid:` to map `thread_id -> pid`.
    3. For each thread, checks `pidAlive(pid)`; drops dead ones.
 8. `applyLiveSession` calls
-   `store.ReconcileDiscovered(ctx, "codex", sessionID, createdAt)`,
+   `store.ReconcileDiscovered(ctx, "codex", sessionID, createdAt, event)`,
    which corrects `FirstSeenAt` to the SQLite-derived creation
-   time. It deliberately does NOT touch `LastEvent` or
-   `JSONLStatus`, so the hook-driven status survives.
+   time. The `event` argument is `"SessionStart"` when the thread's
+   `created_at` is within `codexFreshSessionWindow` (30 s), else
+   `"Discovered"`; it is recorded on first insert only. The
+   reconcile path deliberately does NOT touch `LastEvent` or
+   `JSONLStatus` on existing rows, so the hook-driven status
+   survives subsequent polls.
 
 ## 5. Codex: turn
 

@@ -161,13 +161,14 @@ func applyLiveSession(ctx context.Context, s *state.Store, sess liveAgentSession
 			StartedAt:  unixMilli(sess.StartedAt),
 		})
 	case state.AgentCodex:
-		changed, err := s.ReconcileDiscovered(ctx, sess.Agent, sess.SessionID, sess.StartedAt)
+		changed, err := s.ReconcileDiscovered(ctx, sess.Agent, sess.SessionID, sess.StartedAt, sess.Event)
 		if err != nil {
 			slog.WarnContext(ctx, "discovery: reconcile failed",
 				"agent", sess.Agent, "session", state.ShortID(sess.SessionID), "err", err)
 		} else if changed {
 			slog.InfoContext(ctx, "discovery: session reconciled",
-				"agent", sess.Agent, "session", state.ShortID(sess.SessionID))
+				"agent", sess.Agent, "session", state.ShortID(sess.SessionID),
+				"event", sess.Event)
 		}
 		return changed
 	default:

@@ -13,6 +13,10 @@
 package ui
 
 import (
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,6 +24,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -59,10 +64,64 @@ func Command() *cobra.Command {
 	return cmd
 }
 
+// openTUILog routes slog to a per-user log file so debug output does
+// not bleed into the alt-screen TUI. Returns the active writer and a
+// restore func; both are nil if no usable destination could be opened
+// (in which case the caller should fall back to discarding logs).
+func openTUILog() (io.Writer, func()) {
+	path := tuiLogPath()
+	if path == "" {
+		// No state dir resolvable: fully silence rather than risk
+		// writing to stderr and corrupting the screen.
+		restore := logging.Redirect(io.Discard, logging.Resolve())
+		return io.Discard, restore
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		restore := logging.Redirect(io.Discard, logging.Resolve())
+		slog.Warn("ui: log dir create failed, discarding logs", "path", path, "err", err)
+		return io.Discard, restore
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		restore := logging.Redirect(io.Discard, logging.Resolve())
+		slog.Warn("ui: log open failed, discarding logs", "path", path, "err", err)
+		return io.Discard, restore
+	}
+	restore := logging.Redirect(f, logging.Resolve())
+	return f, func() {
+		restore()
+		_ = f.Close()
+	}
+}
+
+// tuiLogPath returns $XDG_STATE_HOME/agent-status/ui.log, falling
+// back to ~/.local/state/agent-status/ui.log. Empty when neither is
+// resolvable (the caller will silence logs instead).
+func tuiLogPath() string {
+	if base := os.Getenv("XDG_STATE_HOME"); base != "" {
+		return filepath.Join(base, "agent-status", "ui.log")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".local", "state", "agent-status", "ui.log")
+}
+
 func runUI(_ *cobra.Command, _ []string) error {
 	statePath := viper.GetString("state")
 	notesPath := state.NotesPath(statePath)
 	notes, _ := state.LoadNotes(notesPath)
+
+	// Bubble Tea takes over the alt screen, so any slog write to
+	// stderr (e.g. focus.PID's debug lines) corrupts the display.
+	// Divert slog to a per-user log file for the lifetime of the TUI
+	// so debug output is still recoverable post-mortem.
+	_, restoreLogs := openTUILog()
+	if restoreLogs != nil {
+		defer restoreLogs()
+	}
+
 	p := tea.NewProgram(uiModel{
 		statePath:      statePath,
 		notesPath:      notesPath,
