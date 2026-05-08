@@ -48,8 +48,8 @@ func (m uiModel) cwdWidth() int {
 		return 30
 	}
 	w := m.width - fixedCols
-	if w < 10 {
-		return 10
+	if w < 20 {
+		return 20
 	}
 	if w > 80 {
 		return 80

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -33,14 +34,39 @@ func humanTokens(n int64) string {
 	return fmt.Sprintf("%.1fB", float64(n)/1_000_000_000)
 }
 
+// shortPath shrinks a filesystem path to fit in max columns by (in order):
+// substituting $HOME with "~", dropping leading segments and prefixing with
+// ".../", or falling back to a truncated basename. The goal is to keep the
+// trailing segment (typically the project name) readable rather than smearing
+// the middle of an irrelevant prefix into view.
 func shortPath(p string, max int) string {
+	if p == "" || max <= 0 {
+		return p
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(p, home) {
+		rest := p[len(home):]
+		if rest == "" || rest[0] == '/' {
+			p = "~" + rest
+		}
+	}
 	if len(p) <= max {
 		return p
 	}
-	if max <= 3 {
-		return p[len(p)-max:]
+	parts := strings.Split(p, "/")
+	for i := 1; i < len(parts); i++ {
+		candidate := ".../" + strings.Join(parts[i:], "/")
+		if len(candidate) <= max {
+			return candidate
+		}
 	}
-	return "..." + p[len(p)-max+3:]
+	base := parts[len(parts)-1]
+	if len(base) <= max {
+		return base
+	}
+	if max <= 3 {
+		return base[len(base)-max:]
+	}
+	return base[:max-3] + "..."
 }
 
 func absTime(t time.Time) string {
