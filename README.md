@@ -26,20 +26,35 @@ make install
 
 ## How It Works
 
-Claude Code and Codex fire hooks on session events (start, prompt submit, tool use, stop, etc.). The collector (`agent-status server`) receives those events over local HTTP and writes a per-session state file. Agent state files and databases are also scanned locally to discover live sessions and reap stale ones. The TUI (`agent-status ui`) reads the aggregated state file and renders a live, navigable status board.
+AI agents like Claude Code and Codex support [hooks](https://code.claude.com/docs/en/hooks) that enable users to execute actions at various points in the agent's lifecycle (new session, prompt submitted, tool used, etc.). We configure the agent hooks to execute a [script](./scripts/post-agent-status.sh) to POST the event to the collector (`agent-status server`). The collector receives those events over local HTTP and writes to a state file for the given session. Agent state files and databases are also checked for locally to discover live sessions and reap stale ones. The TUI (`agent-status ui`) reads the aggregated state file and renders a live, navigable status board.
 
-The data read by `agent-status` is **local** and **only data provided by the supported agents**. The data comes from:
+The data read by `agent-status` is **local** and **only data provided by the supported agents**. **Nothing ever leaves your machine.** `agent-status` uses the _presence_ of certain files (e.g. `~/.claude/sessions/*.jsonl`) to infer the existence of sessions; it uses the _contents_ to provide information on that session (model name, agent version, a preview of the last submitted prompt). This data already exists unencrypted on your machine; poke around `~/.claude`, `~/.codex` etc. if you're curious. Absolutely no data is collected by me from service nor will it ever be. A non-exhaustive list of data and locations checked includes:
 
-- Claude Code hook payloads
-- Claude Code data in `~/.claude`, specifically `sessions` and `projects`
-- Codex hook payloads
-- Codex data in `~/.codex`, specifically `state_*.sqlite`, `logs_*.sqlite`, and `sessions`
+- Claude Code hook payloads (event-specific data - prompt submitted, tool used, session started/ended, awaiting input, etc.)
+- Claude Code data in `~/.claude`, specifically `sessions` and `projects` (session-specific data - model used, creation date, current session status, etc.)
+- Codex hook payloads (event-specific data - prompt submitted, tool used, session started/ended, awaiting input, etc.)
+- Codex data in `~/.codex`, specifically `state_*.sqlite`, `logs_*.sqlite`, and `sessions` (session-specific data - model used, creation date, current session status, etc.)
+  - `shell_snapshots/` is checked for the presence of a session file as it's currently the only way I've found to determine when a new Codex session is started _before_ sending the first message
 
 This tool aggregates that data, tracks state by agent and session id, and presents it in a terminal UI.
 
 ## Compatability
 
-I made this tool for me initially, which means currently it supports **Niri** on **Linux x86_64**. It builds for ARM and so I presume it will work there too; it does not (yet) work on other compositors.
+I made this tool for me initially, which means I've prioritized my own use cases first. It builds for ARM and so I presume it will work there too.
+
+The mechanism to bring focus to active sessions (called "activating a window") varies greatly across OSes, desktop environments and sometimes applications. I primarily work in tmux and using the VSCode extension in CLI mode, so those were my initial targets. It has limited or (more likely) no support (yet) for other DEs/compositors.
+
+| OS            | Shell/DE/Compositor | Supported  | Notes |
+| ---           | ---                 | ---        | ---   |
+| Windows (WSL) | Windows Shell       | ✅        | Can focus VSCode and VSCode-variant host applications from WSL terminal |
+| Linux         | tmux                | ✅        | Can focus tmux panes directly |
+|               | niri                | ✅        | Can focus other windows running claude-code |
+|               | hyprland            | ⛔        |   |
+|               | gnome               | ⛔        |   |
+|               | kde                 | ⛔        |   |
+|               | others              | ⛔        |   |
+| MacOS         | MacOS               | ⛔        |   |
+
 
 ## Setup
 
