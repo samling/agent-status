@@ -10,10 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-
-	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -22,7 +18,7 @@ func Handler(s *state.Store) http.Handler {
 	mux.HandleFunc("/hook", makeHookHandler(s))
 	mux.HandleFunc("GET /state", makeStateListHandler(s))
 	mux.HandleFunc("GET /state/{session_id}", makeStateOneHandler(s))
-	return traceMiddleware(mux)
+	return logMiddleware(mux)
 }
 
 func makeStateListHandler(s *state.Store) http.HandlerFunc {
@@ -55,10 +51,8 @@ func writeJSON(ctx context.Context, w http.ResponseWriter, status int, v any) {
 	}
 }
 
-func traceMiddleware(next http.Handler) http.Handler {
+func logMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, _ := logging.ExtractHTTP(r)
-		r = r.WithContext(ctx)
 		rw := &statusRecorder{ResponseWriter: w, status: 200}
 		start := time.Now()
 		next.ServeHTTP(rw, r)
@@ -69,7 +63,7 @@ func traceMiddleware(next http.Handler) http.Handler {
 		} else if rw.status >= 400 {
 			level = slog.LevelWarn
 		}
-		slog.LogAttrs(ctx, level, "http",
+		slog.LogAttrs(r.Context(), level, "http",
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 			slog.Int("status", rw.status),
@@ -131,32 +125,6 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 		}
 		receivedAt := time.Now().UTC().Format(time.RFC3339Nano)
 
-		// Anchor this hook to the session's persisted trace so successive
-		// hooks for the same session land in one trace tree. EnsureTrace
-		// allocates IDs lazily on first sight (minting a real exported
-		// session.start root via OTel) and is a no-op once stamped.
-		traceHex, spanHex, traceErr := s.EnsureTrace(ctx, env.SessionID, agent, func() (string, string) {
-			return logging.NewSessionRoot(ctx, env.SessionID, agent)
-		})
-		if traceErr != nil {
-			slog.WarnContext(ctx, "hook: ensure trace failed",
-				"session", state.ShortID(env.SessionID), "err", traceErr)
-		}
-		ctx = logging.ContextWithSessionTrace(ctx, traceHex, spanHex)
-		ctx, span := logging.Start(ctx, "server.hook",
-			attribute.String("agent", agent),
-			attribute.String("session.id", env.SessionID),
-			attribute.String("hook.event", env.HookEventName),
-			attribute.String("turn.id", env.TurnID),
-			attribute.String("tool.name", env.ToolName),
-			attribute.String("tool.use_id", env.ToolUseID),
-			attribute.String("model", env.Model),
-			attribute.String("permission_mode", env.PermissionMode),
-			attribute.String("hook.agent_id", env.AgentID),
-			attribute.String("hook.agent_type", env.AgentType),
-		)
-		defer span.End()
-
 		parsedAttrs := []slog.Attr{
 			slog.String("agent", agent),
 			slog.String("session", state.ShortID(env.SessionID)),
@@ -194,12 +162,9 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 				"event", env.HookEventName,
 				"err", err,
 			)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "record event")
 			http.Error(w, "record failed", http.StatusInternalServerError)
 			return
 		}
-		span.SetAttributes(attribute.Bool("applied", applied))
 		if applied {
 			recordedAttrs := []slog.Attr{
 				slog.String("agent", agent),

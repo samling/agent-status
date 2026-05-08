@@ -153,35 +153,11 @@ bind o if-shell -F "#{==:#{session_name},agent-status}" {
 
 The `--quit-after-focus` flag exits the TUI after `enter` focuses a session, which lets `display-popup -E` close the popup automatically. Omit the flag if you'd rather the popup stay open until you press `q`.
 
-## Logging and tracing
+## Logging
 
 Logging is `log/slog`-based and gated by `LOG_LEVEL` (or `log.level`
 in config / `--log-level`). Set `LOG_FORMAT=json` for machine-friendly
-output. Every log record carries `trace_id` / `span_id` whenever a
-span is in scope, so you can correlate a hook write with the request
-that drove it.
-
-OpenTelemetry tracing is opt-in via `LOG_TRACES`:
-
-| value       | exporter                                                        |
-| ----------- | --------------------------------------------------------------- |
-| `off`       | no exporter (default; spans still create trace/span IDs in logs) |
-| `stdout`    | pretty-prints spans to stderr                                   |
-| `otlp`      | OTLP/HTTP (default port 4318)                                   |
-| `otlp-grpc` | OTLP/gRPC (default port 4317)                                   |
-
-OTLP modes honor the standard `OTEL_EXPORTER_OTLP_*` environment
-variables (`ENDPOINT`, `HEADERS`, `INSECURE`, ...) and `OTEL_SERVICE_NAME`
-/ `OTEL_RESOURCE_ATTRIBUTES`. To kick the tires against a local Jaeger:
-
-```sh
-docker compose -f contrib/jaeger/docker-compose.yml up -d
-LOG_TRACES=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-  agent-status server
-# Jaeger UI: http://localhost:16686  (service = agent-status)
-```
-
-Point at any OTLP-capable backend (Tempo, Honeycomb, an OTel Collector, ...) by setting `OTEL_EXPORTER_OTLP_ENDPOINT` accordingly.
+output.
 
 ## Develop
 

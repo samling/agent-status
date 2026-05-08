@@ -62,10 +62,6 @@ func Watch(ctx context.Context, s *state.Store) error {
 // syncDiscovered fans out scans across every source concurrently, applies each
 // returned session through that source's apply func, and reaps any store rows
 // not present in the alive set.
-//
-// No span is opened for the tick itself: each apply that touches a session
-// emits its own span parented to that session's persisted trace, which is the
-// granularity we want for the trace UI. The tick is logged via slog only.
 func syncDiscovered(ctx context.Context, s *state.Store, sources []liveSource) (scanned, alive, updated int, err error) {
 	type result struct {
 		src      liveSource

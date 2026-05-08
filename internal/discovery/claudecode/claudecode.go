@@ -13,10 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-
 	"github.com/samling/agent-status/internal/discovery/source"
-	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -132,22 +129,7 @@ func Apply(ctx context.Context, s *state.Store, sess source.LiveSession) bool {
 // Hook-driven LastEvent / LastEventAt / TurnID are deliberately untouched so
 // they aren't clobbered by a later poll.
 func applySessionFile(ctx context.Context, s *state.Store, sf sessionFile) bool {
-	traceHex, spanHex, traceErr := s.EnsureTrace(ctx, sf.SessionID, state.AgentClaudeCode, func() (string, string) {
-		return logging.NewSessionRoot(ctx, sf.SessionID, state.AgentClaudeCode)
-	})
-	if traceErr != nil {
-		slog.WarnContext(ctx, "discovery: ensure trace failed",
-			"agent", state.AgentClaudeCode, "session", state.ShortID(sf.SessionID), "err", traceErr)
-	}
-	ctx = logging.ContextWithSessionTrace(ctx, traceHex, spanHex)
-
-	// Avoid opening a span up front: every Watch fsnotify Write and every
-	// 2s sweep re-applies each alive session, and steady state is "no
-	// change". Do the work, then emit a span only when state actually
-	// shifted, backdated to when the work began.
-	start := time.Now()
-
-	createdAt := start
+	createdAt := time.Now()
 	if sf.StartedAt > 0 {
 		createdAt = time.UnixMilli(sf.StartedAt)
 	}
@@ -169,13 +151,6 @@ func applySessionFile(ctx context.Context, s *state.Store, sf sessionFile) bool 
 		return false
 	}
 	if inserted {
-		_, span := logging.StartAt(ctx, "discovery.apply", start,
-			attribute.String("agent", state.AgentClaudeCode),
-			attribute.String("session.id", sf.SessionID),
-			attribute.String("engine_status", sf.Status),
-			attribute.Bool("inserted", true),
-		)
-		span.End()
 		slog.InfoContext(ctx, "discovery: new claude-code session",
 			"session", state.ShortID(sf.SessionID),
 			"pid", sf.PID, "entrypoint", sf.Entrypoint, "version", sf.Version,
@@ -219,17 +194,6 @@ func applySessionFile(ctx context.Context, s *state.Store, sf sessionFile) bool 
 		slog.WarnContext(ctx, "discovery: claude-code refine failed",
 			"session", state.ShortID(sf.SessionID), "err", err)
 		return false
-	}
-	if engineChanged {
-		_, span := logging.StartAt(ctx, "discovery.apply", start,
-			attribute.String("agent", state.AgentClaudeCode),
-			attribute.String("session.id", sf.SessionID),
-			attribute.String("engine_status", sf.Status),
-			attribute.Bool("refined", true),
-			attribute.Bool("identified", identified),
-			attribute.Bool("transitioned", transitioned),
-		)
-		span.End()
 	}
 	if identified {
 		slog.InfoContext(ctx, "discovery: agent identified",

@@ -27,11 +27,9 @@ import (
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	_ "modernc.org/sqlite"
 
 	"github.com/samling/agent-status/internal/discovery/source"
-	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -176,24 +174,9 @@ func Scan() ([]source.LiveSession, int, error) {
 // TurnID on existing rows so hook-driven progress isn't clobbered by a later
 // discovery tick.
 func Apply(ctx context.Context, s *state.Store, sess source.LiveSession) bool {
-	traceHex, spanHex, traceErr := s.EnsureTrace(ctx, sess.SessionID, sess.Agent, func() (string, string) {
-		return logging.NewSessionRoot(ctx, sess.SessionID, sess.Agent)
-	})
-	if traceErr != nil {
-		slog.WarnContext(ctx, "discovery: ensure trace failed",
-			"agent", sess.Agent, "session", state.ShortID(sess.SessionID), "err", traceErr)
-	}
-	ctx = logging.ContextWithSessionTrace(ctx, traceHex, spanHex)
-
-	// We avoid opening a span up front because periodic polling re-applies
-	// every alive session every tick, and the steady-state outcome is "no
-	// change". Do the work first; emit the span only when something actually
-	// happened, backdated to when work started.
-	start := time.Now()
-
 	createdAt := sess.StartedAt
 	if createdAt.IsZero() {
-		createdAt = start
+		createdAt = time.Now()
 	}
 	ts := createdAt.UTC().Format(time.RFC3339Nano)
 	insertEvent := sess.Event
@@ -216,13 +199,6 @@ func Apply(ctx context.Context, s *state.Store, sess source.LiveSession) bool {
 		return false
 	}
 	if inserted {
-		_, span := logging.StartAt(ctx, "discovery.apply", start,
-			attribute.String("agent", sess.Agent),
-			attribute.String("session.id", sess.SessionID),
-			attribute.String("event", insertEvent),
-			attribute.Bool("inserted", true),
-		)
-		span.End()
 		slog.InfoContext(ctx, "discovery: codex session discovered",
 			"session", state.ShortID(sess.SessionID), "event", insertEvent)
 		return true
@@ -266,15 +242,6 @@ func Apply(ctx context.Context, s *state.Store, sess source.LiveSession) bool {
 		slog.WarnContext(ctx, "discovery: codex refine failed",
 			"session", state.ShortID(sess.SessionID), "err", err)
 		return false
-	}
-	if changed {
-		_, span := logging.StartAt(ctx, "discovery.apply", start,
-			attribute.String("agent", sess.Agent),
-			attribute.String("session.id", sess.SessionID),
-			attribute.Bool("refined", true),
-			attribute.Bool("identified", identified),
-		)
-		span.End()
 	}
 	if identified {
 		slog.InfoContext(ctx, "discovery: agent identified",
