@@ -63,7 +63,7 @@ func renderHeader(active sortMode, cwd int) string {
 	}{
 		{"STATUS", colStatus, sortStatus},
 		{"AGENT", colAgent, -1},
-		{"VERSION", colVersion, -1},
+		{"  VERSION", colVersion, -1},
 		{"CWD", cwd, -1},
 		{"LAST EVENT", colLastEvent, -1},
 		{"LAST TRANSITION", colTransition, sortActivity},
@@ -127,10 +127,17 @@ func (m uiModel) View() string {
 			head.WriteString(dimStyle.Render("(no live sessions)"))
 		} else {
 			head.WriteString(renderHeader(m.sort, cwdWidth))
+			maxVer := maxVersionByAgent(m.sessions, m.meta)
 			for _, s := range m.sessions {
 				head.WriteString("\n")
 				meta := m.meta[s.SessionID]
 				ver := meta.Version
+				var behind bool
+				if ver != "" {
+					if mv, ok := maxVer[s.Agent]; ok && compareVersions(ver, mv) < 0 {
+						behind = true
+					}
+				}
 				if ver == "" {
 					ver = "-"
 				}
@@ -142,10 +149,15 @@ func (m uiModel) View() string {
 				}
 				note := truncate(collapseWS(m.notes[s.SessionID]), colNote)
 				status := state.DeriveStatus(s)
-				rowText := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+				marker := "  "
+				if behind {
+					marker = "! "
+				}
+				rowText := fmt.Sprintf("%-*s  %-*s  %s%-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
 					colStatus, status,
 					colAgent, s.Agent,
-					colVersion, ver,
+					marker,
+					colVersion-2, ver,
 					cwdWidth, cwd,
 					colLastEvent, s.LastEvent,
 					colTransition, relTime(s.StatusTime),
@@ -189,6 +201,9 @@ func (m uiModel) View() string {
 	box := borderStyle
 	if m.width > 0 {
 		box = box.Width(m.width - 2)
+		// Clip per-line so rows wider than the box content area don't wrap
+		// onto a second visual line and push the header off the top.
+		inner = lipgloss.NewStyle().MaxWidth(m.width - 4).Render(inner)
 	}
 	if m.height > 0 {
 		box = box.Height(max(m.height-4, 1))
