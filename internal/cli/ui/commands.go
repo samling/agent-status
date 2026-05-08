@@ -1,13 +1,14 @@
 package ui
 
 import (
+	"context"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/samling/agent-status/internal/client"
 	"github.com/samling/agent-status/internal/discovery"
 	"github.com/samling/agent-status/internal/discovery/source"
-	"github.com/samling/agent-status/internal/server"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -22,9 +23,12 @@ type snapshotMsg struct {
 }
 type errMsg struct{ err error }
 
-func loadSnapshot(statePath, serverAddr, selectedID string, mode sortMode) tea.Cmd {
+func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
 	return func() tea.Msg {
-		sessions, err := state.Load(statePath)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		sessions, err := client.New(serverAddr).Sessions(ctx)
+		serverUp := err == nil
 		if err != nil {
 			sessions = nil
 		}
@@ -53,7 +57,7 @@ func loadSnapshot(statePath, serverAddr, selectedID string, mode sortMode) tea.C
 			detail:    detail,
 			detailFor: focus,
 			sortedBy:  mode,
-			serverUp:  server.Reachable(serverAddr),
+			serverUp:  serverUp,
 		}
 	}
 }

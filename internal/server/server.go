@@ -1,7 +1,8 @@
-// Package server hosts the POST /hook collector.
+// Package server hosts the HTTP collector and state read API.
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -19,7 +20,39 @@ import (
 func Handler(s *state.Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hook", makeHookHandler(s))
+	mux.HandleFunc("GET /state", makeStateListHandler(s))
+	mux.HandleFunc("GET /state/{session_id}", makeStateOneHandler(s))
 	return traceMiddleware(mux)
+}
+
+func makeStateListHandler(s *state.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(r.Context(), w, http.StatusOK, s.Sessions())
+	}
+}
+
+func makeStateOneHandler(s *state.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("session_id")
+		if id == "" {
+			http.Error(w, "missing session_id", http.StatusBadRequest)
+			return
+		}
+		sess, ok := s.GetSession(id)
+		if !ok {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(r.Context(), w, http.StatusOK, sess)
+	}
+}
+
+func writeJSON(ctx context.Context, w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.WarnContext(ctx, "http: encode response failed", "err", err)
+	}
 }
 
 func traceMiddleware(next http.Handler) http.Handler {

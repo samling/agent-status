@@ -156,6 +156,7 @@ func applySessionFile(ctx context.Context, s *state.Store, sf sessionFile) bool 
 	inserted, err := s.InsertSession(ctx, state.Session{
 		SessionID:    sf.SessionID,
 		Agent:        state.AgentClaudeCode,
+		PID:          sf.PID,
 		FirstSeenAt:  ts,
 		LastEvent:    "Discovered",
 		LastEventAt:  ts,
@@ -195,6 +196,12 @@ func applySessionFile(ctx context.Context, s *state.Store, sf sessionFile) bool 
 			priorAgent = stored.Agent
 			stored.Agent = state.AgentClaudeCode
 			identified = true
+			changed = true
+		}
+		// Refresh PID when the freshly-scanned value differs and is non-zero;
+		// never overwrite a known PID with zero.
+		if sf.PID > 0 && stored.PID != sf.PID {
+			stored.PID = sf.PID
 			changed = true
 		}
 		if stored.EngineStatus != sf.Status {

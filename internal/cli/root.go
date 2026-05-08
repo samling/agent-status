@@ -150,5 +150,5 @@ func init() {
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	viper.AutomaticEnv()
 
-	rootCmd.AddCommand(serverCmd, stateCmd, statuslineCmd, genConfigCmd, ui.Command())
+	rootCmd.AddCommand(serverCmd, statuslineCmd, focusCmd, genConfigCmd, ui.Command())
 }
