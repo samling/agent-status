@@ -4,57 +4,19 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
 	"github.com/samling/agent-status/internal/discovery"
-	"github.com/samling/agent-status/internal/focus"
 	"github.com/samling/agent-status/internal/notify"
 	"github.com/samling/agent-status/internal/server"
 	"github.com/samling/agent-status/internal/state"
 )
-
-func focusFirstWaiting(s *state.Store) func(context.Context) {
-	return func(ctx context.Context) {
-		var sessionID string
-		for _, sess := range s.Sessions() {
-			if state.DeriveStatus(sess) == "waiting" {
-				sessionID = sess.SessionID
-				break
-			}
-		}
-		if sessionID == "" {
-			slog.DebugContext(ctx, "notify: no waiting session at click time")
-			return
-		}
-		meta, err := discovery.LiveSessionMeta()
-		if err != nil {
-			slog.WarnContext(ctx, "notify: live meta lookup failed", "err", err)
-			return
-		}
-		sm, ok := meta[sessionID]
-		if !ok {
-			slog.WarnContext(ctx, "notify: session not in live meta",
-				"session", state.ShortID(sessionID))
-			return
-		}
-		if sm.PID <= 0 {
-			slog.WarnContext(ctx, "notify: session has no live PID",
-				"session", state.ShortID(sessionID))
-			return
-		}
-		msg, err := focus.PID(sm.PID)
-		if err != nil {
-			slog.WarnContext(ctx, "notify: focus failed",
-				"session", state.ShortID(sessionID), "pid", sm.PID, "err", err)
-			return
-		}
-		slog.InfoContext(ctx, "notify: activation handled",
-			"session", state.ShortID(sessionID), "pid", sm.PID, "msg", msg)
-	}
-}
 
 var serverCmd = &cobra.Command{
 	Use:   "server",
@@ -62,28 +24,49 @@ var serverCmd = &cobra.Command{
 	RunE:  runServer,
 }
 
+// focusOnActivate handles a notification action click by exec'ing the focus
+// subcommand against this same binary. Going through the subcommand keeps
+// internal/focus out of the daemon's import graph.
+func focusOnActivate(ctx context.Context, sessionID string) {
+	exe, err := os.Executable()
+	if err != nil {
+		slog.WarnContext(ctx, "notify activation: os.Executable failed",
+			"session", state.ShortID(sessionID), "err", err)
+		return
+	}
+	out, err := exec.CommandContext(ctx, exe, "focus", sessionID).CombinedOutput()
+	if err != nil {
+		slog.WarnContext(ctx, "notify activation: focus subcommand failed",
+			"session", state.ShortID(sessionID),
+			"err", err,
+			"out", strings.TrimSpace(string(out)))
+		return
+	}
+	slog.InfoContext(ctx, "notify activation: focus dispatched",
+		"session", state.ShortID(sessionID),
+		"msg", strings.TrimSpace(string(out)))
+}
+
 func init() {
 	serverCmd.Flags().String("addr", "127.0.0.1", "listen address")
 	serverCmd.Flags().String("port", "7878", "listen port")
 
-	serverCmd.Flags().Bool("notify", false, "send a desktop notification when sessions enter the waiting state")
-	serverCmd.Flags().Duration("notify-initial-delay", 5*time.Second, "delay between the first 0->1 waiting transition and the first notification")
-	serverCmd.Flags().Duration("notify-repeat", 5*time.Minute, "interval between subsequent notifications while sessions remain waiting (0 disables repeats)")
+	serverCmd.Flags().Bool("notify", false, "send a desktop notification when a session enters the waiting state")
+	serverCmd.Flags().Duration("notify-initial-delay", 5*time.Second, "delay between a session entering waiting and its first notification")
+	serverCmd.Flags().Duration("notify-repeat", 5*time.Minute, "repeat notification interval in seconds for waiting sessions (0 to disable)")
 	serverCmd.Flags().String("notify-title", "agent-status", "Go template for the notification title")
-	serverCmd.Flags().String("notify-body", "{{.Waiting}} session(s) waiting for input", "Go template for the notification body; see internal/notify TemplateData for available fields")
-	serverCmd.Flags().Bool("notify-activation", false, "attach a focus action button; clicking it focuses the first waiting session")
-	serverCmd.Flags().String("notify-activation-label", "Focus", "label for the activation button when --notify-activation is set")
+	serverCmd.Flags().String("notify-body", "{{.Session.Agent}} session waiting for input", "Go template for the notification body")
+	serverCmd.Flags().String("notify-action-label", "Focus", "label for the focus action button on each notification")
 
 	bindings := map[string]string{
-		"server.addr":                      "addr",
-		"server.port":                      "port",
-		"server.notify.enabled":            "notify",
-		"server.notify.initial-delay":      "notify-initial-delay",
-		"server.notify.repeat":             "notify-repeat",
-		"server.notify.title":              "notify-title",
-		"server.notify.body":               "notify-body",
-		"server.notify.activation.enabled": "notify-activation",
-		"server.notify.activation.label":   "notify-activation-label",
+		"server.addr":                 "addr",
+		"server.port":                 "port",
+		"server.notify.enabled":       "notify",
+		"server.notify.initial-delay": "notify-initial-delay",
+		"server.notify.repeat":        "notify-repeat",
+		"server.notify.title":         "notify-title",
+		"server.notify.body":          "notify-body",
+		"server.notify.action-label":  "notify-action-label",
 	}
 	for key, flag := range bindings {
 		_ = viper.BindPFlag(key, serverCmd.Flags().Lookup(flag))
@@ -112,27 +95,20 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			RepeatInterval: viper.GetDuration("server.notify.repeat"),
 			TitleTemplate:  viper.GetString("server.notify.title"),
 			BodyTemplate:   viper.GetString("server.notify.body"),
-		}
-		if viper.GetBool("server.notify.activation.enabled") {
-			label := viper.GetString("server.notify.activation.label")
-			cfg.Activation = &notify.Activation{
-				Label:      label,
-				OnActivate: focusFirstWaiting(s),
-			}
+			Activation: &notify.Activation{
+				Label:      viper.GetString("server.notify.action-label"),
+				OnActivate: focusOnActivate,
+			},
 		}
 		w, err := notify.NewWatcher(cfg, s)
 		if err != nil {
 			slog.WarnContext(ctx, "notify: disabled", "err", err)
 		} else {
-			activation := "off"
-			if cfg.Activation != nil {
-				activation = "on (" + cfg.Activation.Label + ")"
-			}
 			slog.InfoContext(ctx, "notify: enabled",
 				"backend", w.Backend().Name(),
 				"initial_delay", cfg.InitialDelay,
 				"repeat", cfg.RepeatInterval,
-				"activation", activation)
+				"action_label", cfg.Activation.Label)
 			go w.Run(ctx)
 		}
 	}

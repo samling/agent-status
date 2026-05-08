@@ -51,8 +51,8 @@ const defaultConfigYAML = `# agent-status config
 # Path to the persistent state file. Defaults to
 # $XDG_STATE_HOME/agent-status/state.json (or ~/.local/state/agent-status/
 # state.json when XDG_STATE_HOME is unset, per the XDG Base Directory
-# Specification). The collector is the sole writer; readers (TUI,
-# statusline, state subcommand) load it directly.
+# Specification). The collector is the sole writer; clients (TUI, focus
+# subcommand, statusline) read live state via the HTTP API instead.
 # state: ~/.local/state/agent-status/state.json
 
 # Logging and tracing for the collector and CLI clients. Each key has
@@ -104,31 +104,36 @@ log:
 
 server:
   # Listen address and port for the HTTP collector. The collector
-  # exposes only POST /hook for agent processes; the TUI and
-  # statusline use this address purely as a TCP-dial liveness probe.
+  # exposes POST /hook for agent processes plus GET /state and
+  # GET /state/{session_id} for clients (TUI, focus subcommand,
+  # statusline). Bound to localhost; do not expose to the network.
   addr: 127.0.0.1
   port: "7878"
 
-  # Desktop notifications when sessions enter the waiting state.
+  # Desktop notifications when sessions enter the waiting state. One
+  # toast fires per waiting session; each toast carries a "Focus"
+  # action that brings that session's window to the foreground via
+  # the focus subcommand. Requires libnotify (notify-send) on Linux.
   notify:
     enabled: false
-    # Delay between the first 0->1 waiting transition and the first
-    # notification. Re-entering 0->1 restarts the timer; sessions
-    # joining an already-waiting bucket do not.
+    # Delay between a session entering waiting and its first
+    # notification. Each session has its own initial timer; re-entering
+    # waiting later starts a fresh delay.
     initial-delay: 5s
-    # Interval between subsequent notifications while sessions remain
-    # waiting. Set to 0 to fire only once per waiting episode.
+    # Cadence of repeat notifications while a session stays waiting.
+    # Set to 0 to fire only once per waiting episode.
     repeat: 5m
-    # Go text/template strings. Available fields: .Total, .Active,
-    # .Waiting, .Idle, .Sessions, .WaitingSessions, .First.
+    # Go text/template strings. Each notification renders against a
+    # single waiting session. Available fields:
+    #   .Session.SessionID  the session id
+    #   .Session.Agent      "claude-code", "codex", ...
+    #   .Session.PID        the agent process pid
+    #   .Session.LastEvent  the most recent hook event name
+    #   .Status             derived status: active | waiting | idle
     title: agent-status
-    body: "{{.Waiting}} session(s) waiting for input"
-    # Optional action button on the notification. When enabled, clicks
-    # focus the first waiting session's window. Requires libnotify
-    # (notify-send) on Linux.
-    activation:
-      enabled: false
-      label: Focus
+    body: "{{.Session.Agent}} session waiting for input"
+    # Label for the focus action button shown on each notification.
+    action-label: Focus
 
 ui:
   # TUI refresh interval.

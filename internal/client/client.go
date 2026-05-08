@@ -1,8 +1,9 @@
-// Package client is the small HTTP client every standalone process uses to
-// read live state from the running collector. It exists so the daemon's
-// /state surface is the single source of truth for clients (focus
-// subcommand, statusline, TUI) and they don't each grow their own
-// state.json file readers.
+// Package client is the local-process API every standalone process uses to
+// interact with the agent-status system: HTTP reads against the running
+// collector (Sessions, Session) plus locally-orchestrated actions that
+// compose those reads with side effects (Focus). The daemon does not import
+// this package; the CLI focus subcommand is the boundary so the daemon's
+// dependency graph stays free of internal/focus.
 package client
 
 import (
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/samling/agent-status/internal/focus"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -53,6 +55,25 @@ func (c *Client) Session(ctx context.Context, id string) (state.Session, error) 
 		return state.Session{}, err
 	}
 	return out, nil
+}
+
+// Focus resolves id via Session and brings the session's window and tmux
+// pane to the foreground. Returns the human-readable result message from
+// the focus backend (e.g. "Focused via niri") on success, or an error.
+//
+// This is the single focus pathway used by every in-process caller (focus
+// subcommand, TUI, future tooling). Out-of-process callers (notification
+// activation in the daemon) exec the focus subcommand instead, which is a
+// thin wrapper around this method.
+func (c *Client) Focus(ctx context.Context, id string) (string, error) {
+	sess, err := c.Session(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if sess.PID <= 0 {
+		return "", fmt.Errorf("focus: session %s has no live PID", id)
+	}
+	return focus.PID(sess.PID)
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, dst any) error {

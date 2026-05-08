@@ -1,12 +1,13 @@
 package ui
 
 import (
+	"context"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/samling/agent-status/internal/discovery"
-	"github.com/samling/agent-status/internal/focus"
+	"github.com/samling/agent-status/internal/client"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -95,24 +96,9 @@ func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 	}
 	m.selectedID = id
 
-	sm, ok := m.meta[id]
-	if !ok {
-		fresh, err := discovery.LiveSessionMeta()
-		if err != nil {
-			m.status = "focus error: " + err.Error()
-			return m, nil
-		}
-		sm, ok = fresh[id]
-	}
-	if !ok {
-		m.status = "session not found in live meta"
-		return m, nil
-	}
-	if sm.PID <= 0 {
-		m.status = "session has no live PID"
-		return m, nil
-	}
-	msg, err := focus.PID(sm.PID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	msg, err := client.New(m.serverAddr).Focus(ctx, id)
 	if err != nil {
 		m.status = "focus error: " + err.Error()
 		return m, nil
