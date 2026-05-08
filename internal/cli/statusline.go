@@ -1,18 +1,20 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"github.com/samling/agent-status/internal/client"
 	"github.com/samling/agent-status/internal/logging"
-	"github.com/samling/agent-status/internal/server"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -86,15 +88,20 @@ type statuslineView struct {
 	Sessions  []state.Session
 }
 
-func runStatusline(_ *cobra.Command, _ []string) error {
+func runStatusline(cmd *cobra.Command, _ []string) error {
 	format := viper.GetString("statusline.format")
 	asJSON := viper.GetBool("statusline.json")
 
-	sessions, err := state.Load(viper.GetString("state"))
+	// 2s budget: statusline is a fast-path render. If the daemon isn't
+	// reachable in that window, show empty state with Connected=false so
+	// widgets can render a "down" indicator.
+	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+	defer cancel()
+	sessions, err := client.New(ServerEndpoint()).Sessions(ctx)
+	connected := err == nil
 	if err != nil {
 		sessions = nil
 	}
-	connected := server.Reachable(ServerEndpoint())
 
 	view := statuslineView{
 		Total:     len(sessions),

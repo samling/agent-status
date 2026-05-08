@@ -365,23 +365,20 @@ func (s *Store) Sessions() []Session {
 	return sortedSessions(s.sessions)
 }
 
-// Load reads state for separate read-only processes.
-func Load(path string) ([]Session, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
+// GetSession returns the session for id and whether it was found. The returned
+// Session has SessionID and parsed time fields filled in, matching what
+// Sessions() yields.
+func (s *Store) GetSession(id string) (Session, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return Session{}, false
 	}
-	if len(b) == 0 {
-		return nil, nil
-	}
-	var m map[string]Session
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, err
-	}
-	return sortedSessions(m), nil
+	sess.SessionID = id
+	sess.FirstSeenTime, _ = time.Parse(time.RFC3339Nano, sess.FirstSeenAt)
+	sess.StatusTime, _ = time.Parse(time.RFC3339Nano, sess.StatusAt)
+	return sess, true
 }
 
 // sortedSessions fills derived fields and returns newest status changes first.

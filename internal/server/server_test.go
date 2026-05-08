@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -132,5 +134,93 @@ func TestHookAcceptsClaudeAgentFields(t *testing.T) {
 	}
 	if sessions[0].LastEvent != "PreToolUse" {
 		t.Fatalf("LastEvent = %q, want PreToolUse", sessions[0].LastEvent)
+	}
+}
+
+func TestStateListReturnsAllSessions(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for i, id := range []string{"session-a", "session-b"} {
+		if _, err := store.InsertSession(ctx, state.Session{
+			SessionID:   id,
+			Agent:       state.AgentClaudeCode,
+			PID:         1000 + i,
+			FirstSeenAt: "2026-05-08T00:00:00Z",
+			LastEvent:   "Discovered",
+			LastEventAt: "2026-05-08T00:00:00Z",
+			StatusAt:    "2026-05-08T00:00:00Z",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/state", nil)
+	rr := httptest.NewRecorder()
+	Handler(store).ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+
+	var got []state.Session
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rr.Body.String())
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(sessions) = %d, want 2", len(got))
+	}
+}
+
+func TestStateOneReturnsSessionWithPID(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertSession(context.Background(), state.Session{
+		SessionID:   "session-1",
+		Agent:       state.AgentClaudeCode,
+		PID:         4242,
+		FirstSeenAt: "2026-05-08T00:00:00Z",
+		LastEvent:   "Discovered",
+		LastEventAt: "2026-05-08T00:00:00Z",
+		StatusAt:    "2026-05-08T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/state/session-1", nil)
+	rr := httptest.NewRecorder()
+	Handler(store).ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var got state.Session
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rr.Body.String())
+	}
+	if got.SessionID != "session-1" {
+		t.Fatalf("SessionID = %q, want session-1", got.SessionID)
+	}
+	if got.PID != 4242 {
+		t.Fatalf("PID = %d, want 4242", got.PID)
+	}
+}
+
+func TestStateOneReturns404ForUnknownSession(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/state/does-not-exist", nil)
+	rr := httptest.NewRecorder()
+	Handler(store).ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
 	}
 }
