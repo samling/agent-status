@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/template"
@@ -10,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/server"
 	"github.com/samling/agent-status/internal/state"
 )
@@ -40,7 +42,25 @@ The template has access to:
 
   # waybar-style with click handling
   agent-status statusline --json`,
-	RunE: runStatusline,
+	// statusline output is consumed by status-bar widgets, so its stderr
+	// must stay clean. Override the root bootstrap with a quiet variant
+	// that loads config but discards all log output.
+	PersistentPreRunE: bootstrapQuiet,
+	RunE:              runStatusline,
+}
+
+func bootstrapQuiet(cmd *cobra.Command, _ []string) error {
+	if err := loadConfig(); err != nil {
+		return err
+	}
+	cfg := logging.Resolve()
+	cfg.Output = io.Discard
+	sd, err := logging.Setup(cmd.Context(), cfg)
+	if err != nil {
+		return err
+	}
+	shutdownFn = sd
+	return nil
 }
 
 func init() {
