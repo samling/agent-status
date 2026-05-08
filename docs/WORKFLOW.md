@@ -227,21 +227,28 @@ Codex does not emit a `SessionEnd` hook. Exit looks like this:
 3. The inline `ReapAbsentForAgent(ctx, "codex", aliveSet)` inside
    `syncDiscovered` drops the row.
 
-## 7. Read paths (no HTTP)
+## 7. Read paths
 
-There are no read-side HTTP endpoints. The collector is the single
-writer of `state.json` (via tmpfile + atomic rename in
-`internal/state/state.go`), so any reader can `os.ReadFile` the
-file and get a consistent snapshot. Clients use this directly.
+All external readers go through the HTTP client library at
+`internal/client`. The server is the single source of truth: it owns
+the on-disk `state.json` (tmpfile + atomic rename in
+`internal/state/state.go`) and serves consistent snapshots over HTTP.
 
-### Session list (TUI, `agent-status state`, `agent-status statusline`)
+The on-disk format and path are an internal implementation detail.
+External readers MUST NOT `os.ReadFile` the state file directly. Doing
+so couples clients to the persistence backend, the path convention,
+and the read-side concurrency semantics, all of which the server is
+free to change. The single in-tree exception is the server itself
+loading its own state at startup (`internal/state/state.go`).
 
-1. `state.Load(path)` reads `state.json` and parses derived fields
-   (`FirstSeenTime`, `StatusTime`).
-2. `discovery.LiveSessionMeta()` (`internal/discovery/discovery.go`)
-   fans the per-agent `Scan` calls out in parallel and returns a
-   fresh `id -> SessionMeta` map (PID, entrypoint, cwd, model,
-   version, transcript path) read from the agents' own home dirs.
+### Session list (TUI, `agent-status statusline`)
+
+1. Caller invokes `client.New(endpoint).Sessions(ctx)`
+   (`internal/client/client.go`), which issues `GET /state` and
+   decodes a `[]state.Session`.
+2. The server handler (`internal/server/server.go`,
+   `makeStateListHandler`) returns the live in-memory session map,
+   sorted by status change recency.
 3. The TUI additionally calls
    `discovery.LoadTranscript(sessionID, agent, meta)` for the
    focused row to render the detail panel; the per-agent loaders
@@ -251,20 +258,22 @@ file and get a consistent snapshot. Clients use this directly.
 
 ### Connectivity indicator
 
-`server.Reachable(addr)` (`internal/server/probe.go`) does a 100 ms
-TCP dial against the listen address. It proves the listener is up;
-it deliberately does not exercise any handler, so the cost is a
-fraction of an HTTP round trip. Used by both the TUI tick and the
-`statusline` template's `Connected` field.
+The TUI tick and the `statusline` template's `Connected` field both
+derive reachability from whether the corresponding `client.Sessions`
+call succeeded within its context deadline (2 s for statusline). A
+failed call yields `Connected = false` and an empty session view, so
+status-bar widgets can render a "down" indicator without a separate
+probe round-trip.
 
 ### Focus
 
 The TUI's `enter` handler
 (`internal/cli/ui/actions.go::focusSelected`) picks the active
-session, looks up its PID via `discovery.LiveSessionMeta()`, and
-invokes `focus.PID(pid)`. No server involvement: compositor IPC
-must run on the host that owns the window, which is always the
-client.
+session and calls `client.New(serverAddr).Focus(ctx, id)`. The client
+resolves the session via `GET /state/{session_id}` to get its PID,
+then invokes `focus.PID(pid)` in-process. The server is consulted
+only for the lookup: compositor IPC must run on the host that owns
+the window, which is always the client.
 
 `focus.PID(pid)` (`internal/focus/focus.go`):
 
