@@ -8,9 +8,6 @@ import (
 	"text/template"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-
-	"github.com/samling/agent-status/internal/logging"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -176,12 +173,6 @@ func (w *Watcher) waitingSessions() map[string]state.Session {
 // When Activation is configured, the click handler runs OnActivate with
 // the session's id so the daemon can exec the focus subcommand.
 func (w *Watcher) fire(ctx context.Context, reason string, sess state.Session) error {
-	ctx, span := logging.Start(ctx, "notify.fire",
-		attribute.String("reason", reason),
-		attribute.String("session.id", sess.SessionID),
-		attribute.String("agent", sess.Agent))
-	defer span.End()
-
 	data := TemplateData{Session: sess, Status: state.DeriveStatus(sess)}
 
 	var titleBuf, bodyBuf bytes.Buffer

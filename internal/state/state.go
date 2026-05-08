@@ -27,13 +27,6 @@ type Session struct {
 	EngineStatus string `json:"engine_status"` // most recent self-reported engine status ("idle"|"busy") when the agent exposes one
 	StatusAt     string `json:"status_at"`     // when derived status last transitioned
 
-	// TraceID/RootSpanID anchor a long-lived OTel trace per session. They are
-	// allocated lazily on first sight (hook or discovery), persisted, and
-	// reused as the parent context for every subsequent span concerning this
-	// session. Stored as W3C-format hex strings (32 / 16 chars).
-	TraceID    string `json:"trace_id,omitempty"`
-	RootSpanID string `json:"root_span_id,omitempty"`
-
 	// Parsed timestamps for renderers; omitted from JSON.
 	FirstSeenTime time.Time `json:"-"`
 	StatusTime    time.Time `json:"-"`
@@ -145,13 +138,8 @@ func (s *Store) RecordEvent(ctx context.Context, e HookEvent) (applied bool, err
 	}
 	prevStatus := DeriveStatus(sess)
 	prevAgent := sess.Agent
-	// First sight, OR upgrading the bare trace placeholder created by
-	// EnsureTrace (which sets only SessionID / TraceID / RootSpanID / Agent
-	// and leaves FirstSeenAt empty).
-	if !existed || sess.FirstSeenAt == "" {
+	if !existed {
 		sess.FirstSeenAt = e.ReceivedAt
-	}
-	if !existed || sess.StatusAt == "" {
 		sess.StatusAt = e.ReceivedAt
 	}
 	// More-specific agent labels win. AgentUnidentified is a placeholder used
@@ -192,30 +180,18 @@ func (s *Store) RecordEvent(ctx context.Context, e HookEvent) (applied bool, err
 	return true, nil
 }
 
-// InsertSession inserts sess under sess.SessionID on first sight. A row
-// holding only the trace placeholder fields (no LastEvent yet) counts as
-// "not yet inserted" and gets promoted with the input data; any persisted
-// TraceID/RootSpanID are preserved so the session's long-lived trace is
-// unbroken.
+// InsertSession inserts sess under sess.SessionID on first sight.
 //
-// Returns (true, nil) when the row went from absent/placeholder to populated,
-// (false, nil) if a fully-populated row already existed (no-op), or an error
-// if persist failed.
+// Returns (true, nil) when a new row was written, (false, nil) if a row
+// already existed (no-op), or an error if persist failed.
 func (s *Store) InsertSession(ctx context.Context, sess Session) (bool, error) {
 	if sess.SessionID == "" {
 		return false, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	existing, exists := s.sessions[sess.SessionID]
-	if exists && existing.LastEvent != "" {
+	if _, exists := s.sessions[sess.SessionID]; exists {
 		return false, nil
-	}
-	if existing.TraceID != "" {
-		sess.TraceID = existing.TraceID
-	}
-	if existing.RootSpanID != "" {
-		sess.RootSpanID = existing.RootSpanID
 	}
 	s.sessions[sess.SessionID] = sess
 	if err := s.persist(ctx); err != nil {
@@ -275,87 +251,6 @@ func (s *Store) ReapAbsentForAgent(ctx context.Context, agent string, alive map[
 		return 0, nil
 	}
 	return n, s.persist(ctx)
-}
-
-// TraceMinter returns a fresh (TraceID, RootSpanID) hex pair. Implementations
-// are expected to back the returned IDs with a real exported root span so
-// downstream parent references resolve in trace UIs (otherwise Jaeger / Tempo
-// warn about invalid parent span IDs).
-type TraceMinter func() (traceIDHex, rootSpanIDHex string)
-
-// EnsureTrace returns the persisted W3C trace IDs for sessionID, calling
-// mint on first sight to allocate them and persisting the result before any
-// concurrent caller can race in with its own mint. agent is stamped into a
-// brand-new row so the sparse pre-event placeholder is still reapable
-// per-agent.
-//
-// If mint is nil, or returns empty strings (e.g. NoOp tracer), the row is
-// re-checked on every call and never persists trace IDs. That keeps Jaeger
-// quiet when tracing is disabled and lets a later run with tracing enabled
-// mint a real root.
-//
-// On success returned hex strings are suitable for trace.TraceIDFromHex /
-// trace.SpanIDFromHex.
-func (s *Store) EnsureTrace(ctx context.Context, sessionID, agent string, mint TraceMinter) (traceID, rootSpanID string, err error) {
-	if sessionID == "" {
-		return "", "", nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, existed := s.sessions[sessionID]
-	if !existed {
-		sess.SessionID = sessionID
-	}
-	if sess.TraceID != "" && sess.RootSpanID != "" {
-		// Already minted on a previous EnsureTrace; just refine Agent if
-		// this is the placeholder row's first sighting.
-		var changed bool
-		if !existed && sess.Agent == "" && agent != "" {
-			sess.Agent = agent
-			changed = true
-		}
-		if changed {
-			s.sessions[sessionID] = sess
-			if err := s.persist(ctx); err != nil {
-				return "", "", err
-			}
-		}
-		return sess.TraceID, sess.RootSpanID, nil
-	}
-
-	var newTrace, newSpan string
-	if mint != nil {
-		newTrace, newSpan = mint()
-	}
-	if newTrace == "" || newSpan == "" {
-		// Tracing disabled (NoOp tracer) or mint refused. Don't persist
-		// placeholder IDs; the row will be re-checked next call and a real
-		// root will be minted as soon as tracing is configured. Still stamp
-		// the agent so the sparse row is reapable.
-		var changed bool
-		if !existed && sess.Agent == "" && agent != "" {
-			sess.Agent = agent
-			changed = true
-		}
-		if changed {
-			s.sessions[sessionID] = sess
-			if err := s.persist(ctx); err != nil {
-				return "", "", err
-			}
-		}
-		return "", "", nil
-	}
-
-	sess.TraceID = newTrace
-	sess.RootSpanID = newSpan
-	if !existed && sess.Agent == "" && agent != "" {
-		sess.Agent = agent
-	}
-	s.sessions[sessionID] = sess
-	if err := s.persist(ctx); err != nil {
-		return "", "", err
-	}
-	return sess.TraceID, sess.RootSpanID, nil
 }
 
 // Sessions returns the current state, newest event first.

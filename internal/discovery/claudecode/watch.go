@@ -19,11 +19,6 @@ import (
 
 // Watch reacts to fsnotify events on the Claude sessions directory. Push-side
 // of discovery; the periodic Scan is the backstop.
-//
-// No wrapper span is opened per fs event: applySessionFile parents its own
-// span on the affected session's persisted trace, which is the granularity
-// we want. Removes / renames are not session-scoped (we only know the
-// filename, not the dying session id), so reap is logged via slog only.
 func Watch(ctx context.Context, s *state.Store) error {
 	dir, err := sessionsDir()
 	if err != nil {

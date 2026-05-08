@@ -14,12 +14,8 @@ For the higher-level picture, see [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md).
       into viper. Precedence is CLI flags, then `AGENT_STATUS_*`
       env vars, then the config file, then defaults.
    2. `logging.Setup` (`internal/logging/logging.go`) installs
-      `log/slog` as the default logger and wraps it with
-      `traceHandler` (`internal/logging/handler.go`) so every record
-      auto-attaches `trace_id`/`span_id` whenever a span is in scope.
-      When `log.traces.enabled` is true it builds an OTel
-      `TracerProvider` with the configured exporter (`stdout`,
-      `otlp-http`, or `otlp-grpc`) and returns a shutdown func.
+      `log/slog` as the default logger using the resolved
+      `log.level` and `log.format`.
 3. The `server` subcommand's `runServer` (`internal/cli/server.go`):
    1. `state.Open(statePath)` reads the JSON state file into memory
       (creating an empty store if the file doesn't exist).
@@ -87,40 +83,25 @@ When the user launches `claude` (or another claude-code entrypoint):
 2. fsnotify Create fires inside `claudecode.Watch`
    (`internal/discovery/claudecode/watch.go`).
 3. `processFile` reads and unmarshals the JSON.
-4. `applySessionFile` calls `claudecode.Apply`, which:
-   1. Calls `store.EnsureTrace(ctx, sessionID, "claude-code", mint)`
-      to allocate the session's persisted `(TraceID, RootSpanID)` on
-      first sight; `mint` runs `logging.NewSessionRoot`, which emits
-      a real exported `session.start` root span. Subsequent calls
-      are no-ops because the IDs are already on the row.
-   2. Inserts a new `Session` row with `LastEvent="Discovered"`,
-      `EngineStatus="idle"`, `Agent="claude-code"`, and persists.
-   3. Opens a backdated span via `logging.StartAt(...)` parented to
-      the session root, only when state actually changed.
+4. `applySessionFile` calls `claudecode.Apply`, which inserts a
+   new `Session` row with `LastEvent="Discovered"`,
+   `EngineStatus="idle"`, `Agent="claude-code"`, and persists.
 5. Logs `INFO discovery: claude-code session inserted`.
 6. Claude's `SessionStart` hook forwarder POSTs `/hook` with header
-   `X-Agent: claude-code` and a W3C `traceparent` (when tracing is
-   on at the agent side).
-7. `traceMiddleware` (`internal/server/server.go`) extracts the
-   `traceparent` via `logging.ExtractHTTP(r)` and runs the inner
-   handler with that context.
+   `X-Agent: claude-code`.
+7. `logMiddleware` (`internal/server/server.go`) records method,
+   path, status, and duration for the request.
 8. `makeHookHandler`:
    1. Reads the body and decodes the JSON envelope (`session_id`,
       `hook_event_name`, `turn_id`, `tool_name`, `tool_use_id`,
       `model`, `permission_mode`, `agent_id`, `agent_type`, ...).
    2. Resolves the agent from the `X-Agent` header (defaults to
       `unidentified` if absent).
-   3. Calls `store.EnsureTrace` (no-op here because step 4.1 already
-      stamped the IDs) and wraps the request context with
-      `logging.ContextWithSessionTrace` so child spans inherit the
-      session trace.
-   4. Opens a `server.hook` span carrying the parsed envelope as
-      attributes.
-   5. `store.RecordEvent(ctx, HookEvent{...})` finds the existing
+   3. `store.RecordEvent(ctx, HookEvent{...})` finds the existing
       row, updates `LastEvent="SessionStart"`, persists.
       `DeriveStatus` is unchanged because `EngineStatus="idle"`
       takes precedence over the hook event.
-   6. Logs `INFO hook recorded` (or `DEBUG hook ignored` when
+   4. Logs `INFO hook recorded` (or `DEBUG hook ignored` when
       `RecordEvent` reports `applied=false`).
 
 ## 2. Claude Code: turn
@@ -193,14 +174,10 @@ file at session open, well before any turns:
    the session UUID and start timestamp (falling back to mtime),
    synthesizes a minimal `LiveSession` with `Event="SessionStart"`
    and `Entrypoint="cli"`, and dispatches it through `codex.Apply`.
-4. `codex.Apply`:
-   1. Calls `store.EnsureTrace` (allocating IDs and a `session.start`
-      root span on first sight).
-   2. Inserts a new row with `LastEvent="SessionStart"`,
-      `Agent="codex"`, `EngineStatus=""` (codex has no
-      engine-status signal). `DeriveStatus` returns `idle` because
-      `SessionStart` is in the idle event list.
-   3. Opens a backdated span on the session trace.
+4. `codex.Apply` inserts a new row with `LastEvent="SessionStart"`,
+   `Agent="codex"`, `EngineStatus=""` (codex has no engine-status
+   signal). `DeriveStatus` returns `idle` because `SessionStart` is
+   in the idle event list.
 5. Codex's `SessionStart` hook POSTs `/hook` with header
    `X-Agent: codex`. `makeHookHandler` runs the same path as
    Claude's; `RecordEvent` finds the existing row and either
@@ -309,10 +286,9 @@ Runs in its own goroutine alongside `discovery.Watch`
 2. On a `0 -> 1+` transition, arms an `initial` timer
    (`notify.initial-delay`).
 3. When the initial timer fires, the watcher calls `fire("initial")`,
-   which opens a `notify.fire` span, builds `TemplateData`, renders
-   the `title` and `body` Go templates, calls the platform
-   `Notifier` (libnotify on Linux, ...), and arms a repeat timer if
-   `notify.repeat > 0`.
+   which builds `TemplateData`, renders the `title` and `body` Go
+   templates, calls the platform `Notifier` (libnotify on Linux, ...),
+   and arms a repeat timer if `notify.repeat > 0`.
 4. If `notify.activation.enabled`, attaches an action button whose
    click runs `focusFirstWaiting(store)`: it picks the freshest
    waiting session straight from the in-process store, resolves
@@ -321,32 +297,12 @@ Runs in its own goroutine alongside `discovery.Watch`
    machine).
 5. On `1+ -> 0`, stops both timers.
 
-## 9. Cross-cutting: tracing and logging
+## 9. Cross-cutting: logging
 
-- Each session gets a persisted `(TraceID, RootSpanID)` pair on
-  first sight. `state.Store.EnsureTrace` allocates them lazily by
-  calling a `TraceMinter` (today: `logging.NewSessionRoot`, which
-  emits a real exported `session.start` OTel root span). Both
-  discovery's per-agent `Apply` and the hook handler call
-  `EnsureTrace`, so whichever sees the session first wins and
-  every later caller reuses the same IDs.
-- All session-scoped spans (claudecode/codex `Apply`,
-  `server.hook`, `notify.fire`) are parented to that session root,
-  producing one long-lived trace tree per session. Discovery's
-  `Apply` opens its span only when state actually changed, so
-  no-op polls don't pollute the trace.
-- `traceHandler` (`internal/logging/handler.go`) decorates the
-  default slog handler so every log record auto-attaches
-  `trace_id` and `span_id` whenever a span is in scope on the
-  context.
-- Cross-process trace propagation lives only on the hook path:
-  agents that include a W3C `traceparent` header on their POST
-  become parents of the server-side `server.hook` span. There is
-  no CLI -> server HTTP read path, so reads don't show up in the
-  trace stream.
-- When `log.traces.enabled` is true, all spans are exported via
-  the standard OTel SDK; `log.traces.exporter` selects between
-  `stdout`, `otlp-http`, and `otlp-grpc`, configured through the
-  `log.traces.otlp.*` keys (endpoint, headers, insecure, timeout,
-  compression). When disabled the global `TracerProvider` stays
-  `NoOp`.
+- `logging.Setup` (`internal/logging/logging.go`) installs `log/slog`
+  as the default logger using the resolved `log.level` and
+  `log.format`.
+- Every code path uses `slog.*Context(ctx, ...)` so log records carry
+  the request context if there is one. There is no separate tracing
+  pipeline; correlate events across components via `session` (short
+  id) and `turn` fields.
