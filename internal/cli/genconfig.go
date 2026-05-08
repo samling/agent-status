@@ -103,6 +103,12 @@ ui:
   # Exit the TUI after focusing a session. Useful when launched in a
   # tmux popup so the popup auto-closes on focus.
   quit-after-focus: false
+  # Debug log written to $XDG_STATE_HOME/agent-status/ui.log
+  # (or ~/.local/state/agent-status/ui.log when XDG_STATE_HOME is
+  # unset). Disabled by default; the file fills quickly. Enable
+  # with --log on the ui subcommand or by setting enabled: true.
+  log:
+    enabled: false
 
 statusline:
   # Go template applied to the statusline view. Available fields:

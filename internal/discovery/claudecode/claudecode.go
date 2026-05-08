@@ -23,8 +23,9 @@ type sessionFile struct {
 	StartedAt  int64  `json:"startedAt"` // Unix milliseconds
 	Entrypoint string `json:"entrypoint"`
 	Cwd        string `json:"cwd"`
-	Status     string `json:"status"`  // "idle"|"busy"; absent for non-cli entrypoints
-	Version    string `json:"version"` // Claude Code version string, e.g. "2.1.128"
+	Status     string `json:"status"`               // "idle"|"busy"; absent for non-cli entrypoints
+	Version    string `json:"version"`              // Claude Code version string, e.g. "2.1.128"
+	WaitingFor string `json:"waitingFor,omitempty"` // populated while a permission prompt is open, e.g. "approve Bash"
 }
 
 func sessionsDir() (string, error) {
@@ -59,6 +60,7 @@ func Scan() ([]source.LiveSession, int, error) {
 				Entrypoint: sf.Entrypoint,
 				Cwd:        sf.Cwd,
 				Version:    sf.Version,
+				WaitingFor: sf.WaitingFor,
 			},
 		})
 	}

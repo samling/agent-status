@@ -27,4 +27,5 @@ type SessionMeta struct {
 	Model      string
 	Path       string
 	UpdatedAt  time.Time
+	WaitingFor string // free-form pending-permission label, e.g. "approve Bash"; empty when not waiting
 }

@@ -32,6 +32,15 @@ func ParseLevel(s string) slog.Level {
 	}
 }
 
+// Silence installs slog.DiscardHandler as the default until restore runs.
+// Unlike Redirect to io.Discard, the discard handler reports Enabled=false
+// so logger calls short-circuit before any formatting work.
+func Silence() func() {
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.DiscardHandler))
+	return func() { slog.SetDefault(prev) }
+}
+
 // Redirect sends default slog output to w until the returned restore runs.
 func Redirect(w io.Writer, cfg Config) func() {
 	prev := slog.Default()
