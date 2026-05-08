@@ -204,6 +204,7 @@ func Apply(ctx context.Context, s *state.Store, sess source.LiveSession) bool {
 	inserted, err := s.InsertSession(ctx, state.Session{
 		SessionID:   sess.SessionID,
 		Agent:       sess.Agent,
+		PID:         sess.Meta.PID,
 		FirstSeenAt: ts,
 		LastEvent:   insertEvent,
 		LastEventAt: ts,
@@ -239,6 +240,13 @@ func Apply(ctx context.Context, s *state.Store, sess source.LiveSession) bool {
 			priorAgent = stored.Agent
 			stored.Agent = sess.Agent
 			identified = true
+			changed = true
+		}
+		// Refresh PID when the freshly-scanned value differs and is non-zero;
+		// codex sessions can transition from unlinked (PID=0) to linked once
+		// the logs SQLite catches up. Never overwrite a known PID with zero.
+		if sess.Meta.PID > 0 && stored.PID != sess.Meta.PID {
+			stored.PID = sess.Meta.PID
 			changed = true
 		}
 		if stored.FirstSeenAt == "" || ts < stored.FirstSeenAt {

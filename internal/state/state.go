@@ -19,6 +19,7 @@ import (
 type Session struct {
 	SessionID    string `json:"session_id,omitempty"`
 	Agent        string `json:"agent,omitempty"`
+	PID          int    `json:"pid,omitempty"` // OS PID of the agent process, populated by discovery; 0 when unknown
 	FirstSeenAt  string `json:"first_seen_at"`
 	LastEvent    string `json:"last_event"`
 	LastEventAt  string `json:"last_event_at"`
