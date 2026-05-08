@@ -151,6 +151,7 @@ func Scan() ([]source.LiveSession, int, error) {
 				Model:      th.Model,
 				Path:       th.RolloutPath,
 				UpdatedAt:  updatedAt,
+				WaitingFor: detectWaitingFor(th.RolloutPath),
 			},
 		})
 	}

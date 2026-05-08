@@ -12,10 +12,11 @@ import (
 )
 
 var (
-	accentStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	headerStyle = lipgloss.NewStyle().Bold(true)
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	accentStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	headerStyle  = lipgloss.NewStyle().Bold(true)
+	dimStyle     = lipgloss.NewStyle().Faint(true)
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	waitingStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11"))
 	borderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 
 	connectedStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
@@ -34,12 +35,13 @@ const (
 	colAgent      = 11 // length of "claude-code"
 	colVersion    = 10
 	colLastEvent  = 20
+	colWaiting    = 16 // fits "approve WebFetch"; longer values are truncated
 	colTransition = 15
 	colCreated    = 19 // length of "2026-05-05 15:04:05"
 	colNote       = 30
 )
 
-const fixedCols = colStatus + colAgent + colVersion + colLastEvent + colTransition + colCreated + colNote + 14 + 4
+const fixedCols = colStatus + colAgent + colVersion + colLastEvent + colWaiting + colTransition + colCreated + colNote + 16 + 4
 
 func (m uiModel) cwdWidth() int {
 	if m.width <= 0 {
@@ -63,9 +65,10 @@ func renderHeader(active sortMode, cwd int) string {
 	}{
 		{"STATUS", colStatus, sortStatus},
 		{"AGENT", colAgent, -1},
-		{"VERSION", colVersion, -1},
+		{"  VERSION", colVersion, -1},
 		{"CWD", cwd, -1},
 		{"LAST EVENT", colLastEvent, -1},
+		{"WAITING", colWaiting, -1},
 		{"LAST TRANSITION", colTransition, sortActivity},
 		{"CREATED", colCreated, sortCreated},
 		{"NOTE", 0, -1},
@@ -127,10 +130,17 @@ func (m uiModel) View() string {
 			head.WriteString(dimStyle.Render("(no live sessions)"))
 		} else {
 			head.WriteString(renderHeader(m.sort, cwdWidth))
+			maxVer := maxVersionByAgent(m.sessions, m.meta)
 			for _, s := range m.sessions {
 				head.WriteString("\n")
 				meta := m.meta[s.SessionID]
 				ver := meta.Version
+				var behind bool
+				if ver != "" {
+					if mv, ok := maxVer[s.Agent]; ok && compareVersions(ver, mv) < 0 {
+						behind = true
+					}
+				}
 				if ver == "" {
 					ver = "-"
 				}
@@ -142,12 +152,19 @@ func (m uiModel) View() string {
 				}
 				note := truncate(collapseWS(m.notes[s.SessionID]), colNote)
 				status := state.DeriveStatus(s)
-				rowText := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+				marker := "  "
+				if behind {
+					marker = "! "
+				}
+				waiting := truncate(meta.WaitingFor, colWaiting)
+				rowText := fmt.Sprintf("%-*s  %-*s  %s%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
 					colStatus, status,
 					colAgent, s.Agent,
-					colVersion, ver,
+					marker,
+					colVersion-2, ver,
 					cwdWidth, cwd,
 					colLastEvent, s.LastEvent,
+					colWaiting, waiting,
 					colTransition, relTime(s.StatusTime),
 					colCreated, absTime(s.FirstSeenTime),
 					colNote, note,
@@ -189,6 +206,9 @@ func (m uiModel) View() string {
 	box := borderStyle
 	if m.width > 0 {
 		box = box.Width(m.width - 2)
+		// Clip per-line so rows wider than the box content area don't wrap
+		// onto a second visual line and push the header off the top.
+		inner = lipgloss.NewStyle().MaxWidth(m.width - 4).Render(inner)
 	}
 	if m.height > 0 {
 		box = box.Height(max(m.height-4, 1))
@@ -261,23 +281,29 @@ func renderDetail(sessionID, agent, note string, info source.TranscriptInfo, met
 	if meta.PID > 0 {
 		pid = fmt.Sprintf("%d", meta.PID)
 	}
-	line1 := strings.Join([]string{
+	identity := strings.Join([]string{
 		labeledField("agent", agent),
 		labeledField("session", state.ShortID(sessionID)),
 		labeledField("pid", pid),
 		labeledField("model", info.Model),
-		labeledField("branch", info.GitBranch),
-		labeledField("mode", info.PermissionMode),
 		labeledField("entrypoint", meta.Entrypoint),
 	}, "   ")
-	line2 := strings.Join([]string{
+	stateFields := []string{
+		labeledField("branch", info.GitBranch),
+		labeledField("mode", info.PermissionMode),
+	}
+	if meta.WaitingFor != "" {
+		stateFields = append(stateFields, dimStyle.Render("waiting: ")+waitingStyle.Render(meta.WaitingFor))
+	}
+	stateLine := strings.Join(stateFields, "   ")
+	usage := strings.Join([]string{
 		labeledField("turns", turns),
 		labeledField("in", num(info.InputTokens)),
 		labeledField("out", num(info.OutputTokens)),
 		labeledField("cache", cache),
 	}, "   ")
-	line3 := labeledField("cwd", meta.Cwd)
-	line4 := labeledField("note", note)
-	line5 := labeledField("last", prompt)
-	return strings.Join([]string{header, line1, line2, line3, line4, line5}, "\n")
+	cwd := labeledField("cwd", meta.Cwd)
+	noteLine := labeledField("note", note)
+	last := labeledField("last", prompt)
+	return strings.Join([]string{header, identity, stateLine, usage, cwd, noteLine, last}, "\n")
 }

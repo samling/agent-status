@@ -35,10 +35,12 @@ func Command() *cobra.Command {
 	}
 	cmd.Flags().Duration("interval", 500*time.Millisecond, "refresh interval")
 	cmd.Flags().Bool("quit-after-focus", false, "exit the TUI after focusing a session (useful when launched in a tmux popup)")
+	cmd.Flags().Bool("log", false, "write TUI debug logs to $XDG_STATE_HOME/agent-status/ui.log")
 
 	bindings := map[string]string{
 		"ui.interval":         "interval",
 		"ui.quit-after-focus": "quit-after-focus",
+		"ui.log.enabled":      "log",
 	}
 	for key, flag := range bindings {
 		_ = viper.BindPFlag(key, cmd.Flags().Lookup(flag))
@@ -46,8 +48,14 @@ func Command() *cobra.Command {
 	return cmd
 }
 
-// openTUILog keeps slog output off the alt screen.
+// openTUILog keeps slog output off the alt screen. When ui.log.enabled is
+// false (the default) the logger is swapped for slog.DiscardHandler so log
+// calls short-circuit before formatting; that also prevents stray writes
+// from bleeding into the TUI render buffer.
 func openTUILog() (io.Writer, func()) {
+	if !viper.GetBool("ui.log.enabled") {
+		return io.Discard, logging.Silence()
+	}
 	path := tuiLogPath()
 	if path == "" {
 		restore := logging.Redirect(io.Discard, logging.Resolve())
