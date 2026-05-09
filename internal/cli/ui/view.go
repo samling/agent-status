@@ -51,9 +51,8 @@ func (m uiModel) cwdWidth() int {
 	if w < 20 {
 		return 20
 	}
-	if w > 80 {
-		return 80
-	}
+	// No upper clamp: shortPath collapses long prefixes, and on wide
+	// terminals an extra-wide CWD column is more useful than padded blanks.
 	return w
 }
 

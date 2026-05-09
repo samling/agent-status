@@ -19,7 +19,7 @@ func TestApplyInsertSessionStart(t *testing.T) {
 		Agent:     state.AgentCodex,
 		SessionID: "session-fresh",
 		StartedAt: created,
-		Event:     "SessionStart",
+		Event:     state.EventSessionStart,
 	}) {
 		t.Fatal("Apply returned false on insert")
 	}
@@ -27,7 +27,7 @@ func TestApplyInsertSessionStart(t *testing.T) {
 	if len(sessions) != 1 {
 		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
 	}
-	if sessions[0].LastEvent != "SessionStart" {
+	if sessions[0].LastEvent != state.EventSessionStart {
 		t.Fatalf("LastEvent = %q, want SessionStart", sessions[0].LastEvent)
 	}
 	if got := state.DeriveStatus(sessions[0]); got != "idle" {
@@ -47,7 +47,7 @@ func TestApplyInsertEventDefault(t *testing.T) {
 		t.Fatal("Apply returned false on insert")
 	}
 	sessions := store.Sessions()
-	if sessions[0].LastEvent != "Discovered" {
+	if sessions[0].LastEvent != state.EventDiscovered {
 		t.Fatalf("LastEvent = %q, want Discovered (default)", sessions[0].LastEvent)
 	}
 }
@@ -59,7 +59,7 @@ func TestApplyRefineDoesNotClobberHookStatus(t *testing.T) {
 	if _, err := store.RecordEvent(context.Background(), state.HookEvent{
 		Agent:      state.AgentCodex,
 		SessionID:  "session-1",
-		Event:      "Stop",
+		Event:      state.EventStop,
 		TurnID:     "turn-1",
 		ReceivedAt: "2026-05-06T22:00:10Z",
 	}); err != nil {
@@ -70,7 +70,7 @@ func TestApplyRefineDoesNotClobberHookStatus(t *testing.T) {
 		Agent:     state.AgentCodex,
 		SessionID: "session-1",
 		StartedAt: mustParseTime(t, "2026-05-06T22:00:00Z"),
-		Event:     "Discovered",
+		Event:     state.EventDiscovered,
 	}) {
 		t.Fatal("Apply returned false on refine")
 	}
@@ -79,7 +79,7 @@ func TestApplyRefineDoesNotClobberHookStatus(t *testing.T) {
 	if len(sessions) != 1 {
 		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
 	}
-	if sessions[0].LastEvent != "Stop" {
+	if sessions[0].LastEvent != state.EventStop {
 		t.Fatalf("LastEvent = %q, want Stop (not clobbered)", sessions[0].LastEvent)
 	}
 	if got := state.DeriveStatus(sessions[0]); got != "idle" {
@@ -100,12 +100,12 @@ func TestApplyRefineNoClobberAfterHookProgress(t *testing.T) {
 		Agent:     state.AgentCodex,
 		SessionID: "session-fresh",
 		StartedAt: created,
-		Event:     "SessionStart",
+		Event:     state.EventSessionStart,
 	})
 	if _, err := store.RecordEvent(context.Background(), state.HookEvent{
 		Agent:      state.AgentCodex,
 		SessionID:  "session-fresh",
-		Event:      "UserPromptSubmit",
+		Event:      state.EventUserPromptSubmit,
 		TurnID:     "turn-1",
 		ReceivedAt: "2026-05-06T22:00:05Z",
 	}); err != nil {
@@ -116,11 +116,11 @@ func TestApplyRefineNoClobberAfterHookProgress(t *testing.T) {
 		Agent:     state.AgentCodex,
 		SessionID: "session-fresh",
 		StartedAt: created,
-		Event:     "SessionStart",
+		Event:     state.EventSessionStart,
 	})
 
 	sessions := store.Sessions()
-	if sessions[0].LastEvent != "UserPromptSubmit" {
+	if sessions[0].LastEvent != state.EventUserPromptSubmit {
 		t.Fatalf("LastEvent = %q after re-poll, want UserPromptSubmit (no clobber)", sessions[0].LastEvent)
 	}
 }
@@ -135,14 +135,14 @@ func TestHookUnidentifiedDoesNotDowngrade(t *testing.T) {
 		Agent:     state.AgentCodex,
 		SessionID: "session-1",
 		StartedAt: mustParseTime(t, "2026-05-06T22:00:00Z"),
-		Event:     "SessionStart",
+		Event:     state.EventSessionStart,
 	})
 
 	// Hook arrives later with no X-Agent header (server fills in unidentified).
 	if _, err := store.RecordEvent(context.Background(), state.HookEvent{
 		Agent:      state.AgentUnidentified,
 		SessionID:  "session-1",
-		Event:      "UserPromptSubmit",
+		Event:      state.EventUserPromptSubmit,
 		TurnID:     "turn-1",
 		ReceivedAt: "2026-05-06T22:00:05Z",
 	}); err != nil {
@@ -163,7 +163,7 @@ func TestApplyPromotesAgentFromUnidentified(t *testing.T) {
 	if _, err := store.RecordEvent(context.Background(), state.HookEvent{
 		Agent:      state.AgentUnidentified,
 		SessionID:  "session-1",
-		Event:      "UserPromptSubmit",
+		Event:      state.EventUserPromptSubmit,
 		TurnID:     "turn-1",
 		ReceivedAt: "2026-05-06T22:00:05Z",
 	}); err != nil {
@@ -174,7 +174,7 @@ func TestApplyPromotesAgentFromUnidentified(t *testing.T) {
 		Agent:     state.AgentCodex,
 		SessionID: "session-1",
 		StartedAt: mustParseTime(t, "2026-05-06T22:00:00Z"),
-		Event:     "Discovered",
+		Event:     state.EventDiscovered,
 	})
 
 	sessions := store.Sessions()

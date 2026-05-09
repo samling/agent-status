@@ -1,7 +1,6 @@
 package claudecode
 
 import (
-	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -45,14 +44,11 @@ func parseTranscript(path string) (source.TranscriptInfo, error) {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<20), 1<<24) // up to 16 MiB per line
-
 	var info source.TranscriptInfo
-	for scanner.Scan() {
+	if err := source.ScanJSONL(f, func(buf []byte) bool {
 		var line transcriptLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue
+		if err := json.Unmarshal(buf, &line); err != nil {
+			return true
 		}
 		switch line.Type {
 		case "assistant":
@@ -76,14 +72,14 @@ func parseTranscript(path string) (source.TranscriptInfo, error) {
 			}
 		case "user":
 			if line.IsMeta {
-				continue
+				return true
 			}
 			if prompt := source.ExtractUserPrompt(line.Message.Content); prompt != "" {
 				info.LastUserPrompt = prompt
 			}
 		}
-	}
-	if err := scanner.Err(); err != nil {
+		return true
+	}); err != nil {
 		return info, err
 	}
 	return info, nil

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,10 +14,25 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/notify"
 	"github.com/samling/agent-status/internal/server"
 	"github.com/samling/agent-status/internal/state"
 )
+
+// discoveryMeta adapts the discovery package's exported helpers to the
+// server's MetaProvider interface. Keeping this adapter in cli/server.go
+// (rather than in internal/server) avoids importing the discovery backends
+// from the bare HTTP layer.
+type discoveryMeta struct{}
+
+func (discoveryMeta) LatestMeta() map[string]source.SessionMeta {
+	return discovery.LatestMeta()
+}
+
+func (discoveryMeta) Transcript(sessionID, agent string, meta source.SessionMeta) (source.TranscriptInfo, error) {
+	return discovery.LoadTranscript(sessionID, agent, meta)
+}
 
 var serverCmd = &cobra.Command{
 	Use:   "server",
@@ -53,7 +69,7 @@ func init() {
 
 	serverCmd.Flags().Bool("notify", false, "send a desktop notification when a session enters the waiting state")
 	serverCmd.Flags().Duration("notify-initial-delay", 5*time.Second, "delay between a session entering waiting and its first notification")
-	serverCmd.Flags().Duration("notify-repeat", 5*time.Minute, "repeat notification interval in seconds for waiting sessions (0 to disable)")
+	serverCmd.Flags().Duration("notify-repeat", 5*time.Minute, "repeat notification interval for waiting sessions (0 to disable)")
 	serverCmd.Flags().String("notify-title", "agent-status", "Go template for the notification title")
 	serverCmd.Flags().String("notify-body", "{{.Session.Agent}} session waiting for input", "Go template for the notification body")
 	serverCmd.Flags().String("notify-action-label", "Focus", "label for the focus action button on each notification")
@@ -82,6 +98,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
+	go s.Run(ctx)
 
 	go func() {
 		if err := discovery.Watch(ctx, s); err != nil {
@@ -113,6 +131,34 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	slog.InfoContext(ctx, "collector listening", "addr", addr, "state", statePath)
-	return http.ListenAndServe(addr, server.Handler(s))
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           server.Handler(s, discoveryMeta{}),
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		slog.InfoContext(ctx, "collector listening", "addr", addr, "state", statePath)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		slog.InfoContext(ctx, "collector: shutting down", "reason", ctx.Err())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.WarnContext(ctx, "collector: shutdown error", "err", err)
+			return err
+		}
+		return <-errCh
+	case err := <-errCh:
+		return err
+	}
 }

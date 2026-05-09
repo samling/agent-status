@@ -1,7 +1,10 @@
 package source
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -62,6 +65,31 @@ var (
 	transcriptMu    sync.Mutex
 	transcriptCache = map[string]cachedTranscript{}
 )
+
+// ScanJSONL reads newline-delimited records from r and invokes fn on each
+// line (with the trailing newline stripped). fn returns false to stop early.
+// Unlike bufio.Scanner, there is no per-line size cap, so a single oversized
+// pasted prompt can't silently abort transcript parsing.
+func ScanJSONL(r io.Reader, fn func(line []byte) bool) error {
+	br := bufio.NewReader(r)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			if line[len(line)-1] == '\n' {
+				line = line[:len(line)-1]
+			}
+			if !fn(line) {
+				return nil
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
+}
 
 // ExtractUserPrompt returns typed text from a transcript user message,
 // ignoring tool results and other non-typed content.

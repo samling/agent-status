@@ -1,10 +1,11 @@
 package codex
 
 import (
-	"bufio"
 	"encoding/json"
 	"io"
 	"os"
+
+	"github.com/samling/agent-status/internal/discovery/source"
 )
 
 // detectWaitingFor returns a short label like "approve shell" when the rollout
@@ -38,9 +39,6 @@ func detectWaitingFor(path string) string {
 		return ""
 	}
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<20), 1<<24)
-
 	type callInfo struct {
 		name        string
 		sandboxPerm string
@@ -50,17 +48,17 @@ func detectWaitingFor(path string) string {
 	var lastUnpaired string
 
 	skipFirst := offset > 0
-	for scanner.Scan() {
+	_ = source.ScanJSONL(f, func(buf []byte) bool {
 		if skipFirst {
 			skipFirst = false
-			continue
+			return true
 		}
 		var line transcriptLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue
+		if err := json.Unmarshal(buf, &line); err != nil {
+			return true
 		}
 		if line.Type != "response_item" {
-			continue
+			return true
 		}
 		var p struct {
 			Type      string `json:"type"`
@@ -69,12 +67,12 @@ func detectWaitingFor(path string) string {
 			Arguments string `json:"arguments"`
 		}
 		if err := json.Unmarshal(line.Payload, &p); err != nil {
-			continue
+			return true
 		}
 		switch p.Type {
 		case "function_call":
 			if p.CallID == "" {
-				continue
+				return true
 			}
 			var args struct {
 				SandboxPermissions string `json:"sandbox_permissions"`
@@ -84,14 +82,15 @@ func detectWaitingFor(path string) string {
 			lastUnpaired = p.CallID
 		case "function_call_output":
 			if p.CallID == "" {
-				continue
+				return true
 			}
 			outputs[p.CallID] = struct{}{}
 			if lastUnpaired == p.CallID {
 				lastUnpaired = ""
 			}
 		}
-	}
+		return true
+	})
 
 	if lastUnpaired == "" {
 		return ""

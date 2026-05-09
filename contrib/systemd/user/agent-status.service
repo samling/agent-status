@@ -2,16 +2,30 @@
 Description=agent-status collector for local coding-agent sessions
 Documentation=https://github.com/samling/agent-status
 After=default.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
-# Creates ~/.config/agent-status/ (or $XDG_CONFIG_HOME/agent-status), which
-# is where the binary writes/reads state.json by default. No --state flag
-# needed: the default matches.
+# Creates the standard user config/state directories. The explicit --state
+# path keeps state writes inside StateDirectory when home is read-only.
 ConfigurationDirectory=agent-status
-ExecStart=/usr/bin/agent-status server
+StateDirectory=agent-status
+ExecStart=/usr/bin/agent-status --state %S/agent-status/state.json server
 Restart=on-failure
-RestartSec=2
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=default.target

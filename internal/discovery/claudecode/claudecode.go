@@ -53,7 +53,7 @@ func Scan() ([]source.LiveSession, int, error) {
 			Agent:        state.AgentClaudeCode,
 			SessionID:    sf.SessionID,
 			StartedAt:    startedAt,
-			Event:        "Discovered",
+			Event:        state.EventDiscovered,
 			EngineStatus: sf.Status,
 			Meta: source.SessionMeta{
 				PID:        sf.PID,
@@ -142,7 +142,7 @@ func applySessionFile(ctx context.Context, s *state.Store, sf sessionFile) bool 
 		Agent:        state.AgentClaudeCode,
 		PID:          sf.PID,
 		FirstSeenAt:  ts,
-		LastEvent:    "Discovered",
+		LastEvent:    state.EventDiscovered,
 		LastEventAt:  ts,
 		StatusAt:     ts,
 		EngineStatus: sf.Status,
@@ -165,7 +165,7 @@ func applySessionFile(ctx context.Context, s *state.Store, sf sessionFile) bool 
 		identified   bool
 		priorAgent   string
 	)
-	engineChanged, err := s.UpdateSession(ctx, sf.SessionID, func(stored *state.Session) bool {
+	changed, err := s.UpdateSession(ctx, sf.SessionID, func(stored *state.Session) bool {
 		var changed bool
 		// Identify (or re-identify) Agent if a hook stamped it before us with
 		// the placeholder. We never downgrade a concrete label.
@@ -206,11 +206,11 @@ func applySessionFile(ctx context.Context, s *state.Store, sf sessionFile) bool 
 	case transitioned:
 		slog.InfoContext(ctx, "discovery: claude-code status transitioned",
 			"session", state.ShortID(sf.SessionID), "engine_status", sf.Status)
-	case engineChanged:
+	case changed:
 		slog.DebugContext(ctx, "discovery: claude-code engine_status recorded",
 			"session", state.ShortID(sf.SessionID), "engine_status", sf.Status)
 	}
-	return false
+	return changed
 }
 
 type cachedSessionFile struct {

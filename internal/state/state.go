@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,9 +34,15 @@ type Session struct {
 }
 
 type Store struct {
-	path     string
+	path string
+	// mu protects sessions; writeMu serializes file writes so callers can
+	// release mu (and unblock readers) while a persist is in flight.
 	mu       sync.Mutex
+	writeMu  sync.Mutex
 	sessions map[string]Session
+	// dirty signals the debounced flusher in Run that there is unwritten
+	// state. Buffered cap 1; markDirty coalesces concurrent writes.
+	dirty chan struct{}
 }
 
 const (
@@ -44,18 +51,97 @@ const (
 	AgentUnidentified = "unidentified"
 )
 
+// Event names normalized into LastEvent. The first group is load-bearing —
+// DeriveStatus and RecordEvent treat these specifically. The second group is
+// passed through from hook payloads and surfaced unchanged.
+const (
+	EventSessionStart      = "SessionStart"
+	EventSessionEnd        = "SessionEnd"
+	EventStop              = "Stop"
+	EventStopFailure       = "StopFailure"
+	EventPermissionRequest = "PermissionRequest"
+	EventNotification      = "Notification"
+	EventDiscovered        = "Discovered"
+
+	EventUserPromptSubmit = "UserPromptSubmit"
+	EventPreToolUse       = "PreToolUse"
+	EventPostToolUse      = "PostToolUse"
+)
+
 func Open(path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
 	}
-	s := &Store{path: path, sessions: map[string]Session{}}
+	s := &Store{
+		path:     path,
+		sessions: map[string]Session{},
+		dirty:    make(chan struct{}, 1),
+	}
 	if err := s.load(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	slog.Debug("state opened", "path", path, "sessions", len(s.sessions))
 	return s, nil
+}
+
+// Run drives the debounced state-file flusher until ctx is cancelled. It
+// must be called once per store (typically by the daemon); without it, no
+// mutation is ever written to disk. On ctx.Done it performs a final flush so
+// in-memory updates aren't lost on shutdown.
+//
+// Tests that exercise in-memory state only do not need to call Run.
+func (s *Store) Run(ctx context.Context) {
+	const debounce = 250 * time.Millisecond
+
+	flush := func() {
+		s.mu.Lock()
+		snap := s.cloneSessionsLocked()
+		s.mu.Unlock()
+		if err := s.persist(ctx, snap); err != nil {
+			slog.WarnContext(ctx, "state: flush failed", "err", err)
+		}
+	}
+
+	var (
+		timer   *time.Timer
+		timerC  <-chan time.Time
+		pending bool
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
+			// Final flush captures any signal that arrived after the last
+			// timer fire, plus any in-memory mutation that hadn't yet been
+			// flushed.
+			flush()
+			return
+		case <-s.dirty:
+			if !pending {
+				pending = true
+				timer = time.NewTimer(debounce)
+				timerC = timer.C
+			}
+		case <-timerC:
+			timer = nil
+			timerC = nil
+			pending = false
+			flush()
+		}
+	}
+}
+
+// markDirty signals the flusher that state has changed. Non-blocking; if a
+// flush is already pending, the new signal coalesces with it.
+func (s *Store) markDirty() {
+	select {
+	case s.dirty <- struct{}{}:
+	default:
+	}
 }
 
 func (s *Store) load() error {
@@ -68,7 +154,15 @@ func (s *Store) load() error {
 	}
 	var m map[string]Session
 	if err := json.Unmarshal(b, &m); err != nil {
-		return err
+		corruptPath := s.path + ".corrupt-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+		if renameErr := os.Rename(s.path, corruptPath); renameErr != nil {
+			return renameErr
+		}
+		slog.Warn("state: corrupt file quarantined",
+			"path", s.path,
+			"corrupt_path", corruptPath,
+			"err", err)
+		return nil
 	}
 	if m != nil {
 		s.sessions = m
@@ -76,9 +170,23 @@ func (s *Store) load() error {
 	return nil
 }
 
-func (s *Store) persist(ctx context.Context) error {
+// cloneSessionsLocked returns a shallow copy of the sessions map. Caller must
+// hold s.mu.
+func (s *Store) cloneSessionsLocked() map[string]Session {
+	out := make(map[string]Session, len(s.sessions))
+	maps.Copy(out, s.sessions)
+	return out
+}
+
+// persist marshals snapshot and atomically replaces the state file. It does
+// not touch s.mu, so readers (Sessions, GetSession) aren't blocked on
+// filesystem I/O. writeMu serializes concurrent persists so they don't race
+// on the tmp-file rename.
+func (s *Store) persist(ctx context.Context, snapshot map[string]Session) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	start := time.Now()
-	b, err := json.MarshalIndent(s.sessions, "", "  ")
+	b, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -90,7 +198,7 @@ func (s *Store) persist(ctx context.Context) error {
 		return err
 	}
 	slog.LogAttrs(ctx, slog.LevelDebug, "state persisted",
-		slog.Int("sessions", len(s.sessions)),
+		slog.Int("sessions", len(snapshot)),
 		slog.Int("bytes", len(b)),
 		slog.Duration("dur", time.Since(start)),
 	)
@@ -113,15 +221,14 @@ func (s *Store) RecordEvent(ctx context.Context, e HookEvent) (applied bool, err
 		return false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if e.Event == "SessionEnd" {
+	if e.Event == EventSessionEnd {
 		if _, ok := s.sessions[e.SessionID]; !ok {
+			s.mu.Unlock()
 			return false, nil
 		}
 		delete(s.sessions, e.SessionID)
-		if err := s.persist(ctx); err != nil {
-			return false, err
-		}
+		s.mu.Unlock()
+		s.markDirty()
 		slog.InfoContext(ctx, "session terminated",
 			"agent", e.Agent, "session", ShortID(e.SessionID))
 		return true, nil
@@ -130,7 +237,8 @@ func (s *Store) RecordEvent(ctx context.Context, e HookEvent) (applied bool, err
 	// if an event comes in during the agent's turn after a stop event,
 	// ignore it so that we don't clobber our idle status
 	if existed && e.TurnID != "" && e.TurnID == sess.TurnID &&
-		(sess.LastEvent == "Stop" || sess.LastEvent == "StopFailure") {
+		(sess.LastEvent == EventStop || sess.LastEvent == EventStopFailure) {
+		s.mu.Unlock()
 		slog.DebugContext(ctx, "RecordEvent: ignoring late event for concluded turn",
 			"session", ShortID(e.SessionID), "event", e.Event,
 			"prev_event", sess.LastEvent, "turn", e.TurnID)
@@ -159,9 +267,8 @@ func (s *Store) RecordEvent(ctx context.Context, e HookEvent) (applied bool, err
 		sess.StatusAt = e.ReceivedAt
 	}
 	s.sessions[e.SessionID] = sess
-	if err := s.persist(ctx); err != nil {
-		return false, err
-	}
+	s.mu.Unlock()
+	s.markDirty()
 	if existed && prevAgent != sess.Agent {
 		slog.InfoContext(ctx, "RecordEvent: agent identified",
 			"session", ShortID(e.SessionID),
@@ -189,14 +296,13 @@ func (s *Store) InsertSession(ctx context.Context, sess Session) (bool, error) {
 		return false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, exists := s.sessions[sess.SessionID]; exists {
+		s.mu.Unlock()
 		return false, nil
 	}
 	s.sessions[sess.SessionID] = sess
-	if err := s.persist(ctx); err != nil {
-		return false, err
-	}
+	s.mu.Unlock()
+	s.markDirty()
 	slog.DebugContext(ctx, "InsertSession: inserted",
 		"agent", sess.Agent, "session", ShortID(sess.SessionID),
 		"event", sess.LastEvent)
@@ -214,18 +320,18 @@ func (s *Store) UpdateSession(ctx context.Context, sessionID string, mutate func
 		return false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess, exists := s.sessions[sessionID]
 	if !exists {
+		s.mu.Unlock()
 		return false, nil
 	}
 	if !mutate(&sess) {
+		s.mu.Unlock()
 		return false, nil
 	}
 	s.sessions[sessionID] = sess
-	if err := s.persist(ctx); err != nil {
-		return false, err
-	}
+	s.mu.Unlock()
+	s.markDirty()
 	slog.DebugContext(ctx, "UpdateSession: applied",
 		"agent", sess.Agent, "session", ShortID(sessionID))
 	return true, nil
@@ -234,7 +340,6 @@ func (s *Store) UpdateSession(ctx context.Context, sessionID string, mutate func
 // ReapAbsentForAgent scopes reaping to one discovery source.
 func (s *Store) ReapAbsentForAgent(ctx context.Context, agent string, alive map[string]bool) (int, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	n := 0
 	for id, sess := range s.sessions {
 		if sess.Agent != agent {
@@ -248,9 +353,12 @@ func (s *Store) ReapAbsentForAgent(ctx context.Context, agent string, alive map[
 		}
 	}
 	if n == 0 {
+		s.mu.Unlock()
 		return 0, nil
 	}
-	return n, s.persist(ctx)
+	s.mu.Unlock()
+	s.markDirty()
+	return n, nil
 }
 
 // Sessions returns the current state, newest event first.
@@ -302,7 +410,7 @@ func sortedSessions(m map[string]Session) []Session {
 // what the agent engine (codex, claude-code, etc.) itself reports for its current state.
 func DeriveStatus(sess Session) string {
 	// 1. User is blocked on a permission prompt, regardless of engine state.
-	if sess.LastEvent == "PermissionRequest" {
+	if sess.LastEvent == EventPermissionRequest {
 		return "waiting"
 	}
 	// 2. Engine signal (when present) is authoritative for idle, overriding
@@ -311,7 +419,7 @@ func DeriveStatus(sess Session) string {
 		return "idle"
 	}
 	// 3. User attention requested and engine isn't idle.
-	if sess.LastEvent == "Notification" {
+	if sess.LastEvent == EventNotification {
 		return "waiting"
 	}
 	// 4. Engine signal authoritative for busy.
@@ -320,7 +428,7 @@ func DeriveStatus(sess Session) string {
 	}
 	// 5. No engine signal: fall back to the hook event.
 	switch sess.LastEvent {
-	case "SessionStart", "Stop", "StopFailure", "Discovered":
+	case EventSessionStart, EventStop, EventStopFailure, EventDiscovered:
 		return "idle"
 	default:
 		return "active"

@@ -4,21 +4,102 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/state"
+	"github.com/samling/agent-status/internal/version"
 )
 
-func Handler(s *state.Store) http.Handler {
+const maxHookBodyBytes = 1 << 20 // 1 MiB
+
+// MetaProvider is the daemon-side hook for surfacing discovery-owned data
+// over HTTP. The daemon wires in an implementation backed by the live
+// discovery cache; tests can pass a stub or a nil-returning default.
+type MetaProvider interface {
+	// LatestMeta returns a snapshot of the most recent SessionMeta map.
+	LatestMeta() map[string]source.SessionMeta
+	// Transcript loads the transcript for sessionID belonging to agent,
+	// using meta to resolve any agent-specific paths.
+	Transcript(sessionID, agent string, meta source.SessionMeta) (source.TranscriptInfo, error)
+}
+
+// nopMeta is the zero-value MetaProvider used when callers (notably tests)
+// don't supply one. Endpoints that depend on meta still respond, just with
+// empty payloads.
+type nopMeta struct{}
+
+func (nopMeta) LatestMeta() map[string]source.SessionMeta { return nil }
+func (nopMeta) Transcript(string, string, source.SessionMeta) (source.TranscriptInfo, error) {
+	return source.TranscriptInfo{}, nil
+}
+
+// Handler builds the HTTP mux. mp may be nil; when nil, the meta-backed
+// endpoints respond with empty payloads.
+func Handler(s *state.Store, mp MetaProvider) http.Handler {
+	if mp == nil {
+		mp = nopMeta{}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hook", makeHookHandler(s))
 	mux.HandleFunc("GET /state", makeStateListHandler(s))
 	mux.HandleFunc("GET /state/{session_id}", makeStateOneHandler(s))
+	mux.HandleFunc("GET /state/{session_id}/transcript", makeTranscriptHandler(s, mp))
+	mux.HandleFunc("GET /meta", makeMetaHandler(mp))
+	mux.HandleFunc("GET /healthz", makeHealthHandler())
+	mux.HandleFunc("GET /version", makeVersionHandler())
 	return logMiddleware(mux)
+}
+
+func makeMetaHandler(mp MetaProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		meta := mp.LatestMeta()
+		if meta == nil {
+			meta = map[string]source.SessionMeta{}
+		}
+		writeJSON(r.Context(), w, http.StatusOK, meta)
+	}
+}
+
+func makeTranscriptHandler(s *state.Store, mp MetaProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("session_id")
+		if id == "" {
+			http.Error(w, "missing session_id", http.StatusBadRequest)
+			return
+		}
+		sess, ok := s.GetSession(id)
+		if !ok {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		meta := mp.LatestMeta()[id]
+		info, err := mp.Transcript(id, sess.Agent, meta)
+		if err != nil {
+			slog.WarnContext(r.Context(), "transcript: load failed",
+				"session", state.ShortID(id), "agent", sess.Agent, "err", err)
+			http.Error(w, "transcript load failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(r.Context(), w, http.StatusOK, info)
+	}
+}
+
+func makeHealthHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(r.Context(), w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+func makeVersionHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(r.Context(), w, http.StatusOK, map[string]string{"version": version.Get()})
+	}
 }
 
 func makeStateListHandler(s *state.Store) http.HandlerFunc {
@@ -105,8 +186,15 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxHookBodyBytes)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				slog.WarnContext(ctx, "hook: body too large", "limit", maxErr.Limit)
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			slog.ErrorContext(ctx, "hook: read body", "err", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -115,8 +203,10 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 
 		var env envelope
 		if err := json.Unmarshal(body, &env); err != nil {
-			slog.WarnContext(ctx, "hook: unmarshal failed (continuing with zero envelope)",
+			slog.WarnContext(ctx, "hook: unmarshal failed",
 				"err", err, "bytes", len(body))
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
 		}
 
 		agent := strings.TrimSpace(r.Header.Get("X-Agent"))
@@ -166,8 +256,18 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 			return
 		}
 		if applied {
+			// Prefer the agent the store ended up with: discovery may have
+			// stamped a concrete value before this hook arrived, so the inbound
+			// header (often "unidentified") is just a fallback. SessionEnd
+			// deletes the row, so the inbound value is all we have left.
+			loggedAgent := agent
+			if env.HookEventName != state.EventSessionEnd {
+				if sess, ok := s.GetSession(env.SessionID); ok && sess.Agent != "" {
+					loggedAgent = sess.Agent
+				}
+			}
 			recordedAttrs := []slog.Attr{
-				slog.String("agent", agent),
+				slog.String("agent", loggedAgent),
 				slog.String("event", env.HookEventName),
 				slog.String("session", state.ShortID(env.SessionID)),
 			}
@@ -188,4 +288,3 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
-

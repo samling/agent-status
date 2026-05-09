@@ -38,9 +38,11 @@ The data read by `agent-status` is **local** and **only data provided by the sup
 
 This tool aggregates that data, tracks state by agent and session id, and presents it in a terminal UI.
 
-## Compatability
+## Compatibility
 
 I made this tool for me initially, which means I've prioritized my own use cases first. It builds for ARM and so I presume it will work there too.
+
+> **Note on arm64:** the SQLite driver is `modernc.org/sqlite` (pure Go, no CGo) so cross-compilation stays simple, but it is meaningfully slower than the CGo-based driver on arm64. Personal use is fine; if you ever pin this against larger Codex state databases on an arm64 host and notice query latency, that's the trade-off.
 
 The mechanism to bring focus to active sessions (called "activating a window") varies greatly across OSes, desktop environments and sometimes applications. I primarily work in tmux and using the VSCode extension in CLI mode, so those were my initial targets. It has limited or (more likely) no support (yet) for other DEs/compositors.
 
@@ -109,6 +111,9 @@ Start the server:
 agent-status server
 ```
 
+By default the collector listens on `127.0.0.1:7878`. Override with
+`agent-status server --addr <addr> --port <port>`.
+
 Open the UI:
 
 ```sh
@@ -116,6 +121,30 @@ agent-status ui
 ```
 
 See `agent-status -h` and subcommand `-h` output for configuration.
+
+### HTTP API
+
+The collector exposes a local JSON API:
+
+- `POST /hook` records agent hook events.
+- `GET /state` lists live sessions.
+- `GET /state/{session_id}` returns one live session.
+- `GET /state/{session_id}/transcript` returns parsed transcript metadata.
+- `GET /meta` returns discovery metadata keyed by session id.
+- `GET /healthz` returns collector health.
+- `GET /version` returns the running collector version.
+
+### Notifications
+
+Desktop notifications are disabled by default. Enable them on the server:
+
+```sh
+agent-status server --notify
+```
+
+Useful notification flags include `--notify-initial-delay`,
+`--notify-repeat`, `--notify-title`, `--notify-body`, and
+`--notify-action-label`.
 
 ### Run the collector as a user service
 
