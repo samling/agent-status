@@ -193,8 +193,10 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 
 		var env envelope
 		if err := json.Unmarshal(body, &env); err != nil {
-			slog.WarnContext(ctx, "hook: unmarshal failed (continuing with zero envelope)",
+			slog.WarnContext(ctx, "hook: unmarshal failed",
 				"err", err, "bytes", len(body))
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
 		}
 
 		agent := strings.TrimSpace(r.Header.Get("X-Agent"))
@@ -244,8 +246,18 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 			return
 		}
 		if applied {
+			// Prefer the agent the store ended up with: discovery may have
+			// stamped a concrete value before this hook arrived, so the inbound
+			// header (often "unidentified") is just a fallback. SessionEnd
+			// deletes the row, so the inbound value is all we have left.
+			loggedAgent := agent
+			if env.HookEventName != state.EventSessionEnd {
+				if sess, ok := s.GetSession(env.SessionID); ok && sess.Agent != "" {
+					loggedAgent = sess.Agent
+				}
+			}
 			recordedAttrs := []slog.Attr{
-				slog.String("agent", agent),
+				slog.String("agent", loggedAgent),
 				slog.String("event", env.HookEventName),
 				slog.String("session", state.ShortID(env.SessionID)),
 			}
@@ -266,4 +278,3 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
-

@@ -38,7 +38,7 @@ The data read by `agent-status` is **local** and **only data provided by the sup
 
 This tool aggregates that data, tracks state by agent and session id, and presents it in a terminal UI.
 
-## Compatability
+## Compatibility
 
 I made this tool for me initially, which means I've prioritized my own use cases first. It builds for ARM and so I presume it will work there too.
 

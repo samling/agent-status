@@ -148,6 +148,25 @@ func TestHookAcceptsClaudeAgentFields(t *testing.T) {
 	}
 }
 
+func TestHookRejectsInvalidJSON(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/hook", strings.NewReader(`{"session_id":`))
+	req.Header.Set("X-Agent", "codex")
+	rr := httptest.NewRecorder()
+
+	Handler(store, nil).ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	if sessions := store.Sessions(); len(sessions) != 0 {
+		t.Fatalf("len(Sessions()) = %d, want 0", len(sessions))
+	}
+}
+
 func TestStateListReturnsAllSessions(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
