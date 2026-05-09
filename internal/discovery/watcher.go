@@ -86,6 +86,7 @@ func syncDiscovered(ctx context.Context, s *state.Store, sources []liveSource) (
 			ch <- result{src: src, sessions: sessions, scanned: scanned, err: err}
 		}(src)
 	}
+	metaSnap := map[string]source.SessionMeta{}
 	for range sources {
 		res := <-ch
 		if res.err != nil {
@@ -99,6 +100,7 @@ func syncDiscovered(ctx context.Context, s *state.Store, sources []liveSource) (
 		aliveSet := make(map[string]bool, len(res.sessions))
 		for _, sess := range res.sessions {
 			aliveSet[sess.SessionID] = true
+			metaSnap[sess.SessionID] = sess.Meta
 			if res.src.apply(ctx, s, sess) {
 				updated++
 			}
@@ -120,5 +122,8 @@ func syncDiscovered(ctx context.Context, s *state.Store, sources []liveSource) (
 			updated += n
 		}
 	}
+	// Publish the merged meta so out-of-process readers can fetch it via the
+	// daemon's /meta endpoint instead of scanning the filesystem themselves.
+	setMetaSnapshot(metaSnap)
 	return scanned, alive, updated, err
 }

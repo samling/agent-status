@@ -53,7 +53,7 @@ func Scan() ([]source.LiveSession, int, error) {
 			Agent:        state.AgentClaudeCode,
 			SessionID:    sf.SessionID,
 			StartedAt:    startedAt,
-			Event:        "Discovered",
+			Event:        state.EventDiscovered,
 			EngineStatus: sf.Status,
 			Meta: source.SessionMeta{
 				PID:        sf.PID,
@@ -142,7 +142,7 @@ func applySessionFile(ctx context.Context, s *state.Store, sf sessionFile) bool 
 		Agent:        state.AgentClaudeCode,
 		PID:          sf.PID,
 		FirstSeenAt:  ts,
-		LastEvent:    "Discovered",
+		LastEvent:    state.EventDiscovered,
 		LastEventAt:  ts,
 		StatusAt:     ts,
 		EngineStatus: sf.Status,

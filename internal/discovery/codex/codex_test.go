@@ -144,10 +144,10 @@ func TestScanLabelsFreshThreadAsSessionStart(t *testing.T) {
 	for _, sess := range sessions {
 		got[sess.SessionID] = sess.Event
 	}
-	if got["thread-fresh"] != "SessionStart" {
+	if got["thread-fresh"] != state.EventSessionStart {
 		t.Fatalf("thread-fresh Event = %q, want SessionStart", got["thread-fresh"])
 	}
-	if got["thread-stale"] != "Discovered" {
+	if got["thread-stale"] != state.EventDiscovered {
 		t.Fatalf("thread-stale Event = %q, want Discovered", got["thread-stale"])
 	}
 }

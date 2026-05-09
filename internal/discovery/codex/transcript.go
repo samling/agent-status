@@ -1,7 +1,6 @@
 package codex
 
 import (
-	"bufio"
 	"encoding/json"
 	"os"
 
@@ -31,14 +30,11 @@ func parseTranscript(path string) (source.TranscriptInfo, error) {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<20), 1<<24)
-
 	var info source.TranscriptInfo
-	for scanner.Scan() {
+	if err := source.ScanJSONL(f, func(buf []byte) bool {
 		var line transcriptLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue
+		if err := json.Unmarshal(buf, &line); err != nil {
+			return true
 		}
 		switch line.Type {
 		case "session_meta":
@@ -59,10 +55,10 @@ func parseTranscript(path string) (source.TranscriptInfo, error) {
 		case "response_item":
 			var payload responseItem
 			if err := json.Unmarshal(line.Payload, &payload); err != nil {
-				continue
+				return true
 			}
 			if payload.Type != "message" {
-				continue
+				return true
 			}
 			switch payload.Role {
 			case "assistant":
@@ -75,14 +71,14 @@ func parseTranscript(path string) (source.TranscriptInfo, error) {
 		case "event_msg":
 			var payload eventMsg
 			if err := json.Unmarshal(line.Payload, &payload); err != nil || payload.Type != "token_count" {
-				continue
+				return true
 			}
 			info.InputTokens = payload.Info.TotalTokenUsage.InputTokens
 			info.OutputTokens = payload.Info.TotalTokenUsage.OutputTokens
 			info.CacheReadTokens = payload.Info.TotalTokenUsage.CachedInputTokens
 		}
-	}
-	if err := scanner.Err(); err != nil {
+		return true
+	}); err != nil {
 		return info, err
 	}
 	return info, nil

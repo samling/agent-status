@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,10 +14,25 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/samling/agent-status/internal/discovery"
+	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/notify"
 	"github.com/samling/agent-status/internal/server"
 	"github.com/samling/agent-status/internal/state"
 )
+
+// discoveryMeta adapts the discovery package's exported helpers to the
+// server's MetaProvider interface. Keeping this adapter in cli/server.go
+// (rather than in internal/server) avoids importing the discovery backends
+// from the bare HTTP layer.
+type discoveryMeta struct{}
+
+func (discoveryMeta) LatestMeta() map[string]source.SessionMeta {
+	return discovery.LatestMeta()
+}
+
+func (discoveryMeta) Transcript(sessionID, agent string, meta source.SessionMeta) (source.TranscriptInfo, error) {
+	return discovery.LoadTranscript(sessionID, agent, meta)
+}
 
 var serverCmd = &cobra.Command{
 	Use:   "server",
@@ -83,6 +99,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	go s.Run(ctx)
+
 	go func() {
 		if err := discovery.Watch(ctx, s); err != nil {
 			slog.ErrorContext(ctx, "discovery: watcher exited with error", "err", err)
@@ -113,6 +131,32 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	slog.InfoContext(ctx, "collector listening", "addr", addr, "state", statePath)
-	return http.ListenAndServe(addr, server.Handler(s))
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           server.Handler(s, discoveryMeta{}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		slog.InfoContext(ctx, "collector listening", "addr", addr, "state", statePath)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		slog.InfoContext(ctx, "collector: shutting down", "reason", ctx.Err())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.WarnContext(ctx, "collector: shutdown error", "err", err)
+			return err
+		}
+		return <-errCh
+	case err := <-errCh:
+		return err
+	}
 }

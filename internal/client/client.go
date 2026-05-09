@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/focus"
 	"github.com/samling/agent-status/internal/state"
 )
@@ -43,6 +44,48 @@ func (c *Client) Sessions(ctx context.Context) ([]state.Session, error) {
 	var out []state.Session
 	if err := c.getJSON(ctx, "/state", &out); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// Health probes GET /healthz; returns nil when the collector is reachable
+// and responding 200.
+func (c *Client) Health(ctx context.Context) error {
+	var out map[string]string
+	return c.getJSON(ctx, "/healthz", &out)
+}
+
+// Version fetches the collector's reported version from GET /version.
+func (c *Client) Version(ctx context.Context) (string, error) {
+	var out struct {
+		Version string `json:"version"`
+	}
+	if err := c.getJSON(ctx, "/version", &out); err != nil {
+		return "", err
+	}
+	return out.Version, nil
+}
+
+// Meta returns the daemon's most recent SessionMeta snapshot, keyed by
+// session id, from GET /meta.
+func (c *Client) Meta(ctx context.Context) (map[string]source.SessionMeta, error) {
+	var out map[string]source.SessionMeta
+	if err := c.getJSON(ctx, "/meta", &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = map[string]source.SessionMeta{}
+	}
+	return out, nil
+}
+
+// Transcript returns the parsed transcript for sessionID via GET
+// /state/{session_id}/transcript. Returns ErrSessionNotFound if the daemon
+// doesn't know the session.
+func (c *Client) Transcript(ctx context.Context, sessionID string) (source.TranscriptInfo, error) {
+	var out source.TranscriptInfo
+	if err := c.getJSON(ctx, "/state/"+sessionID+"/transcript", &out); err != nil {
+		return source.TranscriptInfo{}, err
 	}
 	return out, nil
 }

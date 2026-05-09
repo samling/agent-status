@@ -12,7 +12,6 @@
 package codex
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -27,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
 	"github.com/samling/agent-status/internal/discovery/source"
@@ -130,11 +130,11 @@ func Scan() ([]source.LiveSession, int, error) {
 				"age", now.Sub(th.UpdatedAt).Round(time.Second))
 			continue
 		}
-		event := "Discovered"
+		event := state.EventDiscovered
 		eventAt := updatedAt
 		// ReconcileDiscovered only honors SessionStart on first insert.
 		if !th.CreatedAt.IsZero() && now.Sub(th.CreatedAt) < freshSessionWindow {
-			event = "SessionStart"
+			event = state.EventSessionStart
 			eventAt = th.CreatedAt
 		}
 		out = append(out, source.LiveSession{
@@ -182,7 +182,7 @@ func Apply(ctx context.Context, s *state.Store, sess source.LiveSession) bool {
 	ts := createdAt.UTC().Format(time.RFC3339Nano)
 	insertEvent := sess.Event
 	if insertEvent == "" {
-		insertEvent = "Discovered"
+		insertEvent = state.EventDiscovered
 	}
 
 	inserted, err := s.InsertSession(ctx, state.Session{
@@ -395,29 +395,34 @@ func loadRolloutThread(path string, modTime time.Time) (thread, bool) {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<20), 1<<24)
-	for scanner.Scan() {
+	var (
+		found    thread
+		ok       bool
+		parseErr bool
+	)
+	_ = source.ScanJSONL(f, func(buf []byte) bool {
 		var line transcriptLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil || line.Type != "session_meta" {
-			continue
+		if err := json.Unmarshal(buf, &line); err != nil || line.Type != "session_meta" {
+			return true
 		}
 		var payload sessionMeta
 		if err := json.Unmarshal(line.Payload, &payload); err != nil {
-			return thread{}, false
+			parseErr = true
+			return false
 		}
 		id := payload.ID
 		if id == "" {
 			id = threadIDFromRolloutPath(path)
 		}
 		if id == "" {
-			return thread{}, false
+			parseErr = true
+			return false
 		}
 		createdAt := parseTimestamp(payload.Timestamp)
 		if createdAt.IsZero() {
 			createdAt = modTime
 		}
-		return thread{
+		found = thread{
 			ID:          id,
 			RolloutPath: path,
 			CreatedAt:   createdAt,
@@ -427,7 +432,15 @@ func loadRolloutThread(path string, modTime time.Time) (thread, bool) {
 			Version:     payload.CLIVersion,
 			Model:       payload.Model,
 			GitBranch:   payload.Git.Branch,
-		}, true
+		}
+		ok = true
+		return false
+	})
+	if parseErr {
+		return thread{}, false
+	}
+	if ok {
+		return found, true
 	}
 	// No session_meta line found. Codex creates the rollout JSONL at session
 	// open but only writes session_meta on the first turn, so a no-turn
@@ -454,7 +467,7 @@ func threadIDFromRolloutPath(path string) string {
 		return ""
 	}
 	id := base[len(base)-36:]
-	if strings.Count(id, "-") != 4 {
+	if _, err := uuid.Parse(id); err != nil {
 		return ""
 	}
 	return id
@@ -637,16 +650,12 @@ func loadProcesses(path string) (map[string]process, error) {
 
 func parseConversationID(body string) string {
 	const key = "conversation.id="
-	i := strings.Index(body, key)
-	if i < 0 {
+	_, after, ok := strings.Cut(body, key)
+	if !ok || len(after) < 36 {
 		return ""
 	}
-	id := body[i+len(key):]
-	if len(id) < 36 {
-		return ""
-	}
-	id = id[:36]
-	if strings.Count(id, "-") != 4 {
+	id := after[:36]
+	if _, err := uuid.Parse(id); err != nil {
 		return ""
 	}
 	return id

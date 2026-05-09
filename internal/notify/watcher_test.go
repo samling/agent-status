@@ -45,7 +45,7 @@ func markWaiting(t *testing.T, store *state.Store, id, agent string) {
 		Agent:       agent,
 		PID:         1234,
 		FirstSeenAt: "2026-05-08T00:00:00Z",
-		LastEvent:   "Notification",
+		LastEvent:   state.EventNotification,
 		LastEventAt: "2026-05-08T00:00:00Z",
 		StatusAt:    "2026-05-08T00:00:00Z",
 	}); err != nil {
@@ -69,7 +69,7 @@ func reenterWaiting(t *testing.T, store *state.Store, id string) {
 	t.Helper()
 	if _, err := store.UpdateSession(context.Background(), id, func(s *state.Session) bool {
 		s.EngineStatus = ""
-		s.LastEvent = "Notification"
+		s.LastEvent = state.EventNotification
 		return true
 	}); err != nil {
 		t.Fatal(err)

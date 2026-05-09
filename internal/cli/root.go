@@ -5,8 +5,10 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -29,11 +31,15 @@ var configPathFlag string
 var shutdownFn func(context.Context) error
 
 func Execute() error {
-	err := rootCmd.Execute()
+	// Bind the root command context to SIGINT/SIGTERM so long-running
+	// subcommands (server, ui) can shut down gracefully on Ctrl-C.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err := rootCmd.ExecuteContext(ctx)
 	if shutdownFn != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = shutdownFn(ctx)
+		_ = shutdownFn(shutdownCtx)
 		shutdownFn = nil
 	}
 	return err

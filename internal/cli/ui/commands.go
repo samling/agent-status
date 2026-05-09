@@ -7,7 +7,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/samling/agent-status/internal/client"
-	"github.com/samling/agent-status/internal/discovery"
 	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/state"
 )
@@ -27,12 +26,13 @@ func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		sessions, err := client.New(serverAddr).Sessions(ctx)
+		c := client.New(serverAddr)
+		sessions, err := c.Sessions(ctx)
 		serverUp := err == nil
 		if err != nil {
 			sessions = nil
 		}
-		meta, _ := discovery.LiveSessionMeta()
+		meta, _ := c.Meta(ctx)
 		sortSessions(sessions, mode)
 		focus := selectedID
 		if focus == "" && len(sessions) > 0 {
@@ -40,15 +40,8 @@ func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
 		}
 		var detail source.TranscriptInfo
 		if focus != "" {
-			if md, ok := meta[focus]; ok {
-				var agent string
-				for _, sess := range sessions {
-					if sess.SessionID == focus {
-						agent = sess.Agent
-						break
-					}
-				}
-				detail, _ = discovery.LoadTranscript(focus, agent, md)
+			if _, ok := meta[focus]; ok {
+				detail, _ = c.Transcript(ctx, focus)
 			}
 		}
 		return snapshotMsg{

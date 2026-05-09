@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
 
 	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/state"
@@ -115,7 +116,11 @@ func shellSnapshotTimestamp(path string) time.Time {
 }
 
 func looksLikeUUID(s string) bool {
-	return len(s) == 36 && strings.Count(s, "-") == 4
+	if len(s) != 36 {
+		return false
+	}
+	_, err := uuid.Parse(s)
+	return err == nil
 }
 
 // applySessionFromShellSnapshot dispatches a minimal LiveSession synthesized
@@ -140,7 +145,7 @@ func applySessionFromShellSnapshot(ctx context.Context, s *state.Store, path str
 		Agent:     state.AgentCodex,
 		SessionID: id,
 		StartedAt: startedAt,
-		Event:     "SessionStart",
+		Event:     state.EventSessionStart,
 		EventAt:   startedAt,
 		Meta: source.SessionMeta{
 			Entrypoint: "cli",
