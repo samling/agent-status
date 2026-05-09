@@ -23,6 +23,21 @@ func TestCompareVersions(t *testing.T) {
 		{"", "1.0.0", -1},
 		{"1.0.0", "", 1},
 		{"", "", 0},
+		// Pre-release: a release version outranks the same version with a
+		// pre-release tag, per SemVer 2.0.0.
+		{"2.1.128", "2.1.128-rc1", 1},
+		{"2.1.128-rc1", "2.1.128", -1},
+		// Pre-release identifier ordering: numeric is less than alphanumeric;
+		// numeric identifiers compare numerically (so rc.10 > rc.2).
+		{"1.0.0-alpha", "1.0.0-beta", -1},
+		{"1.0.0-rc.10", "1.0.0-rc.2", 1},
+		{"1.0.0-1", "1.0.0-alpha", -1},
+		// Shorter pre-release identifier set is lower precedence when all
+		// leading identifiers are equal.
+		{"1.0.0-alpha", "1.0.0-alpha.1", -1},
+		// Build metadata is ignored for ordering.
+		{"1.0.0+abc", "1.0.0+xyz", 0},
+		{"1.0.0-rc1+build1", "1.0.0-rc1+build2", 0},
 	}
 	for _, tc := range cases {
 		if got := compareVersions(tc.a, tc.b); got != tc.want {

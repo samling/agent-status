@@ -92,10 +92,11 @@ func runStatusline(cmd *cobra.Command, _ []string) error {
 	format := viper.GetString("statusline.format")
 	asJSON := viper.GetBool("statusline.json")
 
-	// 2s budget: statusline is a fast-path render. If the daemon isn't
-	// reachable in that window, show empty state with Connected=false so
-	// widgets can render a "down" indicator.
-	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+	// 300ms budget: statusline is a fast-path render driven by status bars
+	// (tmux defaults to a 1s status-interval). If the daemon isn't reachable
+	// in that window, show empty state with Connected=false so widgets can
+	// render a "down" indicator without stalling the bar.
+	ctx, cancel := context.WithTimeout(cmd.Context(), 300*time.Millisecond)
 	defer cancel()
 	sessions, err := client.New(ServerEndpoint()).Sessions(ctx)
 	connected := err == nil

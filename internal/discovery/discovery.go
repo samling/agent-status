@@ -21,29 +21,29 @@ type liveSource struct {
 	transcript func(sessionID string, meta source.SessionMeta) (source.TranscriptInfo, error)
 }
 
-func liveSources() []liveSource {
-	return []liveSource{
-		{
-			agent:      state.AgentClaudeCode,
-			scan:       claudecode.Scan,
-			watch:      claudecode.Watch,
-			apply:      claudecode.Apply,
-			transcript: claudecode.Transcript,
-		},
-		{
-			agent:      state.AgentCodex,
-			scan:       codex.Scan,
-			watch:      codex.Watch,
-			apply:      codex.Apply,
-			transcript: codex.Transcript,
-		},
-	}
+// sources is the registry of live agent backends. Treat as read-only after
+// init; the slice and its function fields are shared by every caller.
+var sources = []liveSource{
+	{
+		agent:      state.AgentClaudeCode,
+		scan:       claudecode.Scan,
+		watch:      claudecode.Watch,
+		apply:      claudecode.Apply,
+		transcript: claudecode.Transcript,
+	},
+	{
+		agent:      state.AgentCodex,
+		scan:       codex.Scan,
+		watch:      codex.Watch,
+		apply:      codex.Apply,
+		transcript: codex.Transcript,
+	},
 }
 
 // LoadTranscript dispatches transcript loading to the registered backend for
 // the given agent.
 func LoadTranscript(sessionID, agent string, meta source.SessionMeta) (source.TranscriptInfo, error) {
-	for _, src := range liveSources() {
+	for _, src := range sources {
 		if src.agent == agent {
 			return src.transcript(sessionID, meta)
 		}

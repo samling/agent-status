@@ -42,6 +42,8 @@ This tool aggregates that data, tracks state by agent and session id, and presen
 
 I made this tool for me initially, which means I've prioritized my own use cases first. It builds for ARM and so I presume it will work there too.
 
+> **Note on arm64:** the SQLite driver is `modernc.org/sqlite` (pure Go, no CGo) so cross-compilation stays simple, but it is meaningfully slower than the CGo-based driver on arm64. Personal use is fine; if you ever pin this against larger Codex state databases on an arm64 host and notice query latency, that's the trade-off.
+
 The mechanism to bring focus to active sessions (called "activating a window") varies greatly across OSes, desktop environments and sometimes applications. I primarily work in tmux and using the VSCode extension in CLI mode, so those were my initial targets. It has limited or (more likely) no support (yet) for other DEs/compositors.
 
 | OS            | Shell/DE/Compositor | Supported  | Notes |

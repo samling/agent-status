@@ -11,8 +11,6 @@ import (
 
 // Watch polls every discovery source until ctx is cancelled.
 func Watch(ctx context.Context, s *state.Store) error {
-	sources := liveSources()
-
 	for _, src := range sources {
 		if src.watch == nil {
 			continue
