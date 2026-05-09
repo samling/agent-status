@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"github.com/samling/agent-status/internal/state"
 	"github.com/samling/agent-status/internal/version"
 )
+
+const maxHookBodyBytes = 1 << 20 // 1 MiB
 
 // MetaProvider is the daemon-side hook for surfacing discovery-owned data
 // over HTTP. The daemon wires in an implementation backed by the live
@@ -183,8 +186,15 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxHookBodyBytes)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				slog.WarnContext(ctx, "hook: body too large", "limit", maxErr.Limit)
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			slog.ErrorContext(ctx, "hook: read body", "err", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

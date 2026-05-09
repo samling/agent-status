@@ -135,6 +135,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		Addr:              addr,
 		Handler:           server.Handler(s, discoveryMeta{}),
 		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() {

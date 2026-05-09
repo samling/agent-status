@@ -167,6 +167,25 @@ func TestHookRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHookRejectsOversizedBody(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/hook", strings.NewReader(strings.Repeat("x", maxHookBodyBytes+1)))
+	req.Header.Set("X-Agent", "codex")
+	rr := httptest.NewRecorder()
+
+	Handler(store, nil).ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusRequestEntityTooLarge)
+	}
+	if sessions := store.Sessions(); len(sessions) != 0 {
+		t.Fatalf("len(Sessions()) = %d, want 0", len(sessions))
+	}
+}
+
 func TestStateListReturnsAllSessions(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

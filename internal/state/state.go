@@ -154,7 +154,15 @@ func (s *Store) load() error {
 	}
 	var m map[string]Session
 	if err := json.Unmarshal(b, &m); err != nil {
-		return err
+		corruptPath := s.path + ".corrupt-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+		if renameErr := os.Rename(s.path, corruptPath); renameErr != nil {
+			return renameErr
+		}
+		slog.Warn("state: corrupt file quarantined",
+			"path", s.path,
+			"corrupt_path", corruptPath,
+			"err", err)
+		return nil
 	}
 	if m != nil {
 		s.sessions = m

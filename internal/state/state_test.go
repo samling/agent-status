@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -45,3 +46,28 @@ func TestRecordEventSameTurnStopWins(t *testing.T) {
 	}
 }
 
+func TestOpenQuarantinesCorruptState(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(path, []byte(`{"session-1":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessions := store.Sessions(); len(sessions) != 0 {
+		t.Fatalf("len(Sessions()) = %d, want 0", len(sessions))
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("state file exists after quarantine or unexpected stat err: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "state.json.corrupt-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("corrupt file matches = %v, want exactly one", matches)
+	}
+}

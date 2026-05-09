@@ -47,7 +47,12 @@ render_and_merge() {
             echo "into the \"hooks\" object in $target, then delete the temp file."
             return 1
         fi
-        cp "$target" "$target.bak"
+        local backup
+        backup="$target.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        if [ -e "$backup" ]; then
+            backup="$backup.$$"
+        fi
+        cp "$target" "$backup"
         local tmp
         tmp="$(mktemp)"
         jq -s '
@@ -65,7 +70,7 @@ render_and_merge() {
         ' "$target" "$rendered" > "$tmp"
         mv "$tmp" "$target"
         rm -f "$rendered"
-        echo "merged $label hooks into $target (backup at $target.bak)"
+        echo "merged $label hooks into $target (backup at $backup)"
     else
         mkdir -p "$(dirname "$target")"
         cp "$rendered" "$target"
