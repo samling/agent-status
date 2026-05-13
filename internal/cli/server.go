@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -38,6 +39,41 @@ var serverCmd = &cobra.Command{
 	Use:   "server",
 	Short: "Run the HTTP collector",
 	RunE:  runServer,
+}
+
+// endpointFilePath returns the path of the file the forwarder script
+// reads to discover the running collector's address. Lives next to the
+// state file under $XDG_STATE_HOME/agent-status/. Returns "" if the home
+// directory can't be resolved (in which case the script just falls back
+// to its compiled-in default).
+func endpointFilePath() string {
+	dir := defaultStateDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "endpoint")
+}
+
+// writeEndpointFile atomically writes the collector's "<addr>:<port>" so
+// the forwarder script can discover it without parsing config.
+func writeEndpointFile(path, addr string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.WriteString(addr + "\n"); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // focusOnActivate handles a notification action click by exec'ing the focus
@@ -138,6 +174,15 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
+	if path := endpointFilePath(); path != "" {
+		if err := writeEndpointFile(path, addr); err != nil {
+			slog.WarnContext(ctx, "endpoint file: write failed (hooks will fall back to default)",
+				"path", path, "err", err)
+		} else {
+			slog.InfoContext(ctx, "endpoint file written", "path", path, "endpoint", addr)
+		}
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		slog.InfoContext(ctx, "collector listening", "addr", addr, "state", statePath)
