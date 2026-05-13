@@ -26,7 +26,7 @@ make install
 
 ## How It Works
 
-AI agents like Claude Code and Codex support [hooks](https://code.claude.com/docs/en/hooks) that enable users to execute actions at various points in the agent's lifecycle (new session, prompt submitted, tool used, etc.). We configure the agent hooks to execute a [script](./scripts/post-agent-status.sh) to POST the event to the collector (`agent-status server`). The collector receives those events over local HTTP and persists per-session state. Agent state files and databases are also checked for locally to discover live sessions and reap stale ones. Clients (the TUI `agent-status ui`, `agent-status statusline`, `agent-status focus <session_id>`) read live state through the collector's `GET /state` HTTP endpoints, so the daemon is the single source of truth.
+AI agents like Claude Code and Codex support [hooks](https://code.claude.com/docs/en/hooks) that enable users to execute actions at various points in the agent's lifecycle (new session, prompt submitted, tool used, etc.). We configure the agent hooks to execute a [forwarder script](./internal/bootstrap/assets/post-agent-status.sh) to POST the event to the collector (`agent-status server`). The collector receives those events over local HTTP and persists per-session state. Agent state files and databases are also checked for locally to discover live sessions and reap stale ones. Clients (the TUI `agent-status ui`, `agent-status statusline`, `agent-status focus <session_id>`) read live state through the collector's `GET /state` HTTP endpoints, so the daemon is the single source of truth.
 
 The data read by `agent-status` is **local** and **only data provided by the supported agents**. **Nothing ever leaves your machine.** `agent-status` uses the _presence_ of certain files (e.g. `~/.claude/sessions/*.jsonl`) to infer the existence of sessions; it uses the _contents_ to provide information on that session (model name, agent version, a preview of the last submitted prompt). This data already exists unencrypted on your machine; poke around `~/.claude`, `~/.codex` etc. if you're curious. Absolutely no data is collected by me from service nor will it ever be. A non-exhaustive list of data and locations checked includes:
 
@@ -60,42 +60,37 @@ The mechanism to bring focus to active sessions (called "activating a window") v
 
 ## Setup
 
-> **Requirements:** `jq make`
-
-The fastest path, from a clone of this repo:
+Run the bootstrap subcommand from the installed binary:
 
 ```sh
-make bootstrap
+agent-status bootstrap
 ```
 
-`scripts/bootstrap.sh` configures Claude Code and Codex and will:
+It configures Claude Code and Codex and will:
 
-1. Copy `scripts/post-agent-status.sh` to each agent config dir.
-2. Render `hooks/claude-code.json` and `hooks/codex.json` with the absolute path to the forwarder.
-3. Merge the rendered Claude Code hooks into `~/.claude/settings.json` and Codex hooks into `~/.codex/hooks.json`. If a file already exists, the merge leaves a `.bak` next to the original.
+1. Copy the forwarder script into each agent's config dir.
+2. Render the embedded hook templates with the absolute path to the forwarder.
+3. Merge the rendered Claude Code hooks into `~/.claude/settings.json` and Codex hooks into `~/.codex/hooks.json`. If a file already exists, the merge leaves a `.bak.<timestamp>` next to the original.
 
-Set `CLAUDE_CONFIG_DIR` to point bootstrap at a different config directory.
-Set `CODEX_HOME` if your Codex config directory lives somewhere other than `~/.codex`.
+The planned changes are printed before any files are written, and the
+command asks for confirmation. Useful flags:
+
+- `--yes` skip the confirmation prompt
+- `--dry-run` print the plan without writing anything
+- `--agents=claude` (or `--agents=codex`) configure just one agent
+- `--claude-dir` / `--codex-dir` override the config dir for either agent
+
+`CLAUDE_CONFIG_DIR` and `CODEX_HOME` are honored when their respective
+`--*-dir` flags aren't passed.
 
 ### Manual setup
 
-If you don't want to run the script, do it by hand:
-
-```sh
-mkdir -p ~/.claude/scripts
-cp scripts/post-agent-status.sh ~/.claude/scripts/
-sed -i "s|path-to-post-agent-status|$HOME/.claude/scripts/post-agent-status.sh|g" hooks/claude-code.json
-```
-
-Copy/merge the contents of `hooks/claude-code.json` into `~/.claude/settings.json`
-
-For Codex:
-
-```sh
-mkdir -p ~/.codex/scripts
-cp scripts/post-agent-status.sh ~/.codex/scripts/
-sed "s|path-to-post-agent-status|$HOME/.codex/scripts/post-agent-status.sh|g" hooks/codex.json > ~/.codex/hooks.json
-```
+If you'd rather wire the hooks yourself, the templates and forwarder live
+at [`internal/bootstrap/assets/`](./internal/bootstrap/assets/). Copy
+`post-agent-status.sh` into each agent's config dir, replace
+`path-to-post-agent-status` in `claude-code.json` / `codex.json` with the
+absolute path you copied to, then merge the rendered JSON into
+`~/.claude/settings.json` and write it to `~/.codex/hooks.json`.
 
 ## Configure
 

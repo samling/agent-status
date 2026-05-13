@@ -16,8 +16,8 @@ build:
 install:
 	go install -ldflags "$(LDFLAGS)" ./cmd/agent-status
 
-bootstrap:
-	bash scripts/bootstrap.sh
+bootstrap: build
+	$(BIN) bootstrap
 
 install-service:
 	mkdir -p $(SYSTEMD_USER_DIR)
