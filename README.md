@@ -68,9 +68,10 @@ agent-status bootstrap
 
 It configures Claude Code and Codex and will:
 
-1. Copy the forwarder script into each agent's config dir.
+1. Install a single shared forwarder script to `$XDG_CONFIG_HOME/agent-status/post-agent-status.sh` (default `~/.config/agent-status/post-agent-status.sh`). Both agents' hook configs point at this one location.
 2. Render the embedded hook templates with the absolute path to the forwarder.
-3. Merge the rendered Claude Code hooks into `~/.claude/settings.json` and Codex hooks into `~/.codex/hooks.json`. If a file already exists, the merge leaves a `.bak.<timestamp>` next to the original.
+3. Merge the rendered Claude Code hooks into `~/.claude/settings.json` and Codex hooks into `~/.codex/hooks.json`. If a file already exists, the merge leaves a `.bak.<timestamp>` next to the original. Existing hook entries that reference any prior `post-agent-status.sh` are replaced (not duplicated) with the new one.
+4. Remove any per-agent script copies left behind by earlier installs (`~/.claude/scripts/post-agent-status.sh`, `~/.codex/scripts/post-agent-status.sh`); modified copies are backed up first.
 
 The planned changes are printed before any files are written, and the
 command asks for confirmation. Useful flags:
@@ -83,14 +84,26 @@ command asks for confirmation. Useful flags:
 `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are honored when their respective
 `--*-dir` flags aren't passed.
 
+The forwarder discovers the collector's address at runtime, so changing
+`--addr` / `--port` (or the matching config keys) only requires
+restarting the server — no need to re-run bootstrap. Resolution order in
+the script is:
+
+1. `$AGENT_STATUS_ENDPOINT` (e.g. `127.0.0.1:7878`) if set in the agent's environment.
+2. `$XDG_STATE_HOME/agent-status/endpoint` (default `~/.local/state/agent-status/endpoint`), which the server writes on startup.
+3. `127.0.0.1:7878` fallback.
+
 ### Manual setup
 
 If you'd rather wire the hooks yourself, the templates and forwarder live
 at [`internal/bootstrap/assets/`](./internal/bootstrap/assets/). Copy
-`post-agent-status.sh` into each agent's config dir, replace
-`path-to-post-agent-status` in `claude-code.json` / `codex.json` with the
-absolute path you copied to, then merge the rendered JSON into
-`~/.claude/settings.json` and write it to `~/.codex/hooks.json`.
+`post-agent-status.sh` to `$XDG_CONFIG_HOME/agent-status/`, replace
+`path-to-post-agent-status` in `claude-code.json` / `codex.json` with
+that absolute path, then merge the rendered JSON into
+`~/.claude/settings.json` and write it to `~/.codex/hooks.json`. The
+script reads the collector's address from
+`$XDG_STATE_HOME/agent-status/endpoint` at runtime, so the same script
+works regardless of which port the server runs on.
 
 ## Configure
 

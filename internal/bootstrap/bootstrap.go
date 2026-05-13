@@ -42,8 +42,6 @@ type Agent struct {
 	Label string
 	// ConfigDir is the agent's config directory (e.g. ~/.claude).
 	ConfigDir string
-	// ScriptPath is where the forwarder is installed.
-	ScriptPath string
 	// HooksTarget is the config file the hook block is merged into.
 	HooksTarget string
 	// hooksAsset is the embedded template name for this agent.
@@ -52,16 +50,24 @@ type Agent struct {
 
 // Options controls which agents to configure and where their files live.
 // An empty ClaudeDir / CodexDir falls back to the standard environment
-// (CLAUDE_CONFIG_DIR / CODEX_HOME) or ~/.claude / ~/.codex.
+// (CLAUDE_CONFIG_DIR / CODEX_HOME) or ~/.claude / ~/.codex. An empty
+// BootstrapDir falls back to $XDG_CONFIG_HOME/agent-status (or
+// ~/.config/agent-status).
 type Options struct {
-	Agents    []string
-	ClaudeDir string
-	CodexDir  string
+	Agents        []string
+	ClaudeDir     string
+	CodexDir      string
+	BootstrapDir  string
 }
 
 // Plan describes the work bootstrap will perform.
 type Plan struct {
-	Agents []AgentPlan
+	// ScriptPath is the single shared location for the forwarder.
+	ScriptPath string
+	// OrphanedScripts are forwarder copies left behind by earlier
+	// per-agent installs that bootstrap will remove.
+	OrphanedScripts []string
+	Agents          []AgentPlan
 }
 
 // AgentPlan is the per-agent slice of a Plan.
@@ -80,6 +86,10 @@ func BuildPlan(opts Options) (Plan, error) {
 		agentIDs = KnownAgents()
 	}
 
+	bootstrapDir, err := resolveBootstrapDir(opts.BootstrapDir)
+	if err != nil {
+		return Plan{}, err
+	}
 	claudeDir, err := resolveClaudeDir(opts.ClaudeDir)
 	if err != nil {
 		return Plan{}, err
@@ -89,8 +99,11 @@ func BuildPlan(opts Options) (Plan, error) {
 		return Plan{}, err
 	}
 
+	plan := Plan{
+		ScriptPath: filepath.Join(bootstrapDir, "post-agent-status.sh"),
+	}
+
 	seen := map[string]bool{}
-	plan := Plan{}
 	for _, raw := range agentIDs {
 		id := strings.ToLower(strings.TrimSpace(raw))
 		if id == "" {
@@ -108,7 +121,6 @@ func BuildPlan(opts Options) (Plan, error) {
 				ID:          agentClaude,
 				Label:       "Claude Code",
 				ConfigDir:   claudeDir,
-				ScriptPath:  filepath.Join(claudeDir, "scripts", "post-agent-status.sh"),
 				HooksTarget: filepath.Join(claudeDir, "settings.json"),
 				hooksAsset:  "assets/claude-code.json",
 			}
@@ -117,7 +129,6 @@ func BuildPlan(opts Options) (Plan, error) {
 				ID:          agentCodex,
 				Label:       "Codex",
 				ConfigDir:   codexDir,
-				ScriptPath:  filepath.Join(codexDir, "scripts", "post-agent-status.sh"),
 				HooksTarget: filepath.Join(codexDir, "hooks.json"),
 				hooksAsset:  "assets/codex.json",
 			}
@@ -130,6 +141,13 @@ func BuildPlan(opts Options) (Plan, error) {
 			return Plan{}, err
 		}
 		plan.Agents = append(plan.Agents, AgentPlan{Agent: a, TargetExists: exists})
+
+		legacy := filepath.Join(a.ConfigDir, "scripts", "post-agent-status.sh")
+		if legacy != plan.ScriptPath {
+			if ok, err := fileExists(legacy); err == nil && ok {
+				plan.OrphanedScripts = append(plan.OrphanedScripts, legacy)
+			}
+		}
 	}
 
 	if len(plan.Agents) == 0 {
@@ -143,50 +161,79 @@ func BuildPlan(opts Options) (Plan, error) {
 func (p Plan) Describe(w io.Writer) {
 	fmt.Fprintln(w, "This will configure agent hooks to post events to the agent-status collector.")
 	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  Shared forwarder script: %s\n", p.ScriptPath)
+	fmt.Fprintln(w)
 	for _, ap := range p.Agents {
 		fmt.Fprintf(w, "  %s (%s)\n", ap.Agent.Label, ap.Agent.ConfigDir)
-		fmt.Fprintf(w, "    • install forwarder script: %s\n", ap.Agent.ScriptPath)
 		if ap.TargetExists {
-			fmt.Fprintf(w, "    • merge hooks into:         %s\n", ap.Agent.HooksTarget)
-			fmt.Fprintf(w, "                                (existing file backed up alongside as .bak.<timestamp>)\n")
+			fmt.Fprintf(w, "    • merge hooks into:      %s\n", ap.Agent.HooksTarget)
+			fmt.Fprintf(w, "                             (existing file backed up alongside as .bak.<timestamp>)\n")
 		} else {
-			fmt.Fprintf(w, "    • create new hooks file:    %s\n", ap.Agent.HooksTarget)
+			fmt.Fprintf(w, "    • create new hooks file: %s\n", ap.Agent.HooksTarget)
+		}
+	}
+	if len(p.OrphanedScripts) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  Cleanup of legacy per-agent script copies:")
+		for _, path := range p.OrphanedScripts {
+			fmt.Fprintf(w, "    • remove: %s\n", path)
 		}
 	}
 }
 
 // Execute carries out the plan. When dryRun is true it performs no writes.
 func (p Plan) Execute(dryRun bool, w io.Writer) error {
-	for _, ap := range p.Agents {
-		if err := executeAgent(ap, dryRun, w); err != nil {
-			return fmt.Errorf("%s: %w", ap.Agent.Label, err)
-		}
-	}
-	return nil
-}
-
-func executeAgent(ap AgentPlan, dryRun bool, w io.Writer) error {
 	script, err := assets.ReadFile("assets/post-agent-status.sh")
-	if err != nil {
-		return err
-	}
-	hookTmpl, err := assets.ReadFile(ap.Agent.hooksAsset)
-	if err != nil {
-		return err
-	}
-	rendered, err := canonicalizeJSON(bytes.ReplaceAll(hookTmpl, []byte(placeholder), []byte(ap.Agent.ScriptPath)))
 	if err != nil {
 		return err
 	}
 
 	if dryRun {
-		return previewAgent(ap, script, rendered, w)
+		previewFile(w, p.ScriptPath, script, true)
+	} else {
+		if err := installScript(p.ScriptPath, script); err != nil {
+			return fmt.Errorf("install forwarder: %w", err)
+		}
+		fmt.Fprintf(w, "installed forwarder to %s\n", p.ScriptPath)
 	}
 
-	if err := installScript(ap.Agent.ScriptPath, script); err != nil {
+	for _, ap := range p.Agents {
+		if err := executeAgent(p.ScriptPath, ap, dryRun, w); err != nil {
+			return fmt.Errorf("%s: %w", ap.Agent.Label, err)
+		}
+	}
+
+	for _, path := range p.OrphanedScripts {
+		if err := cleanupOrphan(path, script, dryRun, w); err != nil {
+			return fmt.Errorf("cleanup %s: %w", path, err)
+		}
+	}
+
+	return nil
+}
+
+func executeAgent(scriptPath string, ap AgentPlan, dryRun bool, w io.Writer) error {
+	hookTmpl, err := assets.ReadFile(ap.Agent.hooksAsset)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "installed %s forwarder to %s\n", ap.Agent.Label, ap.Agent.ScriptPath)
+	rendered, err := canonicalizeJSON(bytes.ReplaceAll(hookTmpl, []byte(placeholder), []byte(scriptPath)))
+	if err != nil {
+		return err
+	}
+
+	if dryRun {
+		if !ap.TargetExists {
+			previewFile(w, ap.Agent.HooksTarget, rendered, false)
+			return nil
+		}
+		existing, merged, err := computeMerged(ap.Agent.HooksTarget, rendered)
+		if err != nil {
+			return err
+		}
+		previewMerge(w, ap.Agent.HooksTarget, existing, merged)
+		return nil
+	}
 
 	if ap.TargetExists {
 		backup, err := mergeHooksFile(ap.Agent.HooksTarget, rendered)
@@ -204,21 +251,37 @@ func executeAgent(ap AgentPlan, dryRun bool, w io.Writer) error {
 	return nil
 }
 
-// previewAgent prints what executeAgent would do, including a unified
-// diff of each file that would change.
-func previewAgent(ap AgentPlan, script, rendered []byte, w io.Writer) error {
-	previewFile(w, ap.Agent.ScriptPath, script, true)
-
-	if !ap.TargetExists {
-		previewFile(w, ap.Agent.HooksTarget, rendered, false)
-		return nil
-	}
-
-	existing, merged, err := computeMerged(ap.Agent.HooksTarget, rendered)
+// cleanupOrphan removes a legacy per-agent forwarder copy. If its
+// contents diverge from the canonical script we know about, a backup is
+// taken first so the user can recover any local edits.
+func cleanupOrphan(path string, canonical []byte, dryRun bool, w io.Writer) error {
+	existing, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
-	previewMerge(w, ap.Agent.HooksTarget, existing, merged)
+	differs := !bytes.Equal(existing, canonical)
+	if dryRun {
+		if differs {
+			fmt.Fprintf(w, "[dry-run] would remove orphaned %s (backing up first: contents differ from installed script)\n", path)
+		} else {
+			fmt.Fprintf(w, "[dry-run] would remove orphaned %s\n", path)
+		}
+		return nil
+	}
+	if differs {
+		backup, err := backupFile(path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "backed up modified orphan %s -> %s\n", path, backup)
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "removed orphaned %s\n", path)
 	return nil
 }
 
@@ -377,11 +440,22 @@ func backupFile(path string) (string, error) {
 	return backup, nil
 }
 
+// staleScriptMarker is the substring used to recognise prior agent-status
+// hook entries during merges. Any hook entry whose command contains this
+// marker is dropped from the base before the new entries are merged in,
+// so re-running bootstrap (after the script's location or path scheme
+// changes) replaces stale entries instead of leaving them alongside the
+// new ones.
+const staleScriptMarker = "post-agent-status.sh"
+
 // mergeHooks merges add into base. Top-level keys from base are preserved.
-// The "hooks" key is handled specially: for each event name, hook entries
-// from base and add are concatenated and de-duplicated by canonical JSON.
-// Other top-level keys in add overwrite their counterparts in base.
+// The "hooks" key is handled specially: any pre-existing entries that look
+// like prior agent-status hooks are dropped, then for each event name
+// entries from base and add are concatenated and de-duplicated by
+// canonical JSON. Other top-level keys in add overwrite their
+// counterparts in base.
 func mergeHooks(base, add map[string]any) map[string]any {
+	base = stripStaleHookEntries(base, staleScriptMarker)
 	if base == nil {
 		base = map[string]any{}
 	}
@@ -427,6 +501,64 @@ func mergeHooks(base, add map[string]any) map[string]any {
 	return out
 }
 
+// stripStaleHookEntries returns a shallow copy of m with any hook entry
+// whose embedded command contains marker removed. An empty event list is
+// dropped; an empty hooks map is dropped entirely so the JSON marshals
+// cleanly.
+func stripStaleHookEntries(m map[string]any, marker string) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := map[string]any{}
+	for k, v := range m {
+		out[k] = v
+	}
+	hooks := mapOrEmpty(m["hooks"])
+	if len(hooks) == 0 {
+		return out
+	}
+	cleaned := map[string]any{}
+	for event, raw := range hooks {
+		entries := listOrEmpty(raw)
+		kept := make([]any, 0, len(entries))
+		for _, entry := range entries {
+			if !entryMatchesMarker(entry, marker) {
+				kept = append(kept, entry)
+			}
+		}
+		if len(kept) > 0 {
+			cleaned[event] = kept
+		}
+	}
+	if len(cleaned) == 0 {
+		delete(out, "hooks")
+	} else {
+		out["hooks"] = cleaned
+	}
+	return out
+}
+
+func entryMatchesMarker(entry any, marker string) bool {
+	em, ok := entry.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, h := range listOrEmpty(em["hooks"]) {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		cmd, ok := hm["command"].(string)
+		if !ok {
+			continue
+		}
+		if strings.Contains(cmd, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func mapOrEmpty(v any) map[string]any {
 	if m, ok := v.(map[string]any); ok {
 		return m
@@ -469,6 +601,20 @@ func fileExists(path string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+func resolveBootstrapDir(override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
+		return filepath.Join(v, "agent-status"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "agent-status"), nil
 }
 
 func resolveClaudeDir(override string) (string, error) {
