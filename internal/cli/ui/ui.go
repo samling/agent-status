@@ -126,6 +126,7 @@ type uiModel struct {
 	height         int
 	detail         sessionview.SessionDetail
 	detailFor      string // session id that detail belongs to
+	detailErr      error
 	inputMode      bool
 	inputBuf       string
 	inputForID     string
@@ -195,6 +196,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cards = msg.cards
 		m.detail = msg.detail
 		m.detailFor = msg.detailFor
+		m.detailErr = msg.detailErr
 		m.serverUp = msg.serverUp
 		if msg.sortedBy != m.sort {
 			sortCards(m.cards, m.sort)

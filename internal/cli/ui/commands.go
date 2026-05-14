@@ -15,6 +15,7 @@ type snapshotMsg struct {
 	cards     []sessionview.SessionCard
 	detail    sessionview.SessionDetail
 	detailFor string
+	detailErr error
 	sortedBy  sortMode
 	serverUp  bool
 }
@@ -38,13 +39,15 @@ func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
 			focus = cards[0].SessionID
 		}
 		var detail sessionview.SessionDetail
+		var detailErr error
 		if focus != "" {
-			detail, _ = c.SessionDetail(ctx, focus)
+			detail, detailErr = c.SessionDetail(ctx, focus)
 		}
 		return snapshotMsg{
 			cards:     cards,
 			detail:    detail,
 			detailFor: focus,
+			detailErr: detailErr,
 			sortedBy:  mode,
 			serverUp:  serverUp,
 		}

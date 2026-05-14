@@ -134,25 +134,54 @@ func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+func renderDetailUnavailable(err error, width int) string {
+	lines := []string{errorStyle.Render("detail unavailable")}
+	if err != nil {
+		lines = append(lines, truncate(err.Error(), width))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func renderMetadata(fields []sessionview.Field, width int) []string {
 	if len(fields) == 0 {
 		return []string{dimStyle.Render("(no metadata)")}
 	}
 	lines := make([]string, 0, (len(fields)+1)/2)
 	for i := 0; i < len(fields); i += 2 {
-		left := labeledField(fields[i].Label, fields[i].Value)
-		right := ""
-		if i+1 < len(fields) {
-			right = labeledField(fields[i+1].Label, fields[i+1].Value)
+		left := metadataField(fields[i], width)
+		if i+1 >= len(fields) {
+			lines = append(lines, left)
+			continue
 		}
-		line := strings.TrimSpace(left + "   " + right)
-		lines = append(lines, truncate(line, width))
+		right := metadataField(fields[i+1], width)
+		line := left + "   " + right
+		if lipgloss.Width(line) <= width {
+			lines = append(lines, line)
+		} else {
+			lines = append(lines, left, right)
+		}
 	}
 	return lines
 }
 
+func metadataField(field sessionview.Field, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	value := field.Value
+	if value == "" {
+		value = "-"
+	}
+	label := truncate(field.Label+": ", width)
+	labelWidth := lipgloss.Width(label)
+	if labelWidth >= width {
+		return dimStyle.Render(label)
+	}
+	return dimStyle.Render(label) + truncate(value, width-labelWidth)
+}
+
 func (m uiModel) View() string {
-	var head, foot strings.Builder
+	var head strings.Builder
 
 	head.WriteString(accentStyle.Render("agent-status"))
 	head.WriteString(" " + dimStyle.Render(version.Get()))
@@ -176,26 +205,24 @@ func (m uiModel) View() string {
 	} else {
 		leftW, rightW := m.paneWidths()
 		left := lipgloss.NewStyle().Width(leftW).Render(m.renderCards(leftW, selectedID))
-		rightDetail := sessionview.SessionDetail{}
-		if m.detailFor == selectedID {
-			rightDetail = m.detail
+		rightContent := ""
+		switch {
+		case m.showConfig:
+			rightContent = m.renderConfig()
+		case m.detailFor == selectedID && m.detailErr != nil:
+			rightContent = renderDetailUnavailable(m.detailErr, rightW)
+		default:
+			rightDetail := sessionview.SessionDetail{}
+			if m.detailFor == selectedID {
+				rightDetail = m.detail
+			}
+			rightContent = renderSessionDetail(rightDetail, rightW)
 		}
-		right := lipgloss.NewStyle().Width(rightW).Render(renderSessionDetail(rightDetail, rightW))
+		right := lipgloss.NewStyle().Width(rightW).Render(rightContent)
 		head.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", paneGap), right))
-	}
-	if m.showConfig {
-		foot.Reset()
-		foot.WriteString(m.renderConfig())
 	}
 
 	inner := head.String()
-	if footStr := foot.String(); footStr != "" {
-		boxH := max(m.height-4, 1)
-		headLines := lineCount(inner)
-		footLines := lineCount(footStr)
-		pad := max(boxH-headLines-footLines, 1)
-		inner = inner + strings.Repeat("\n", pad+1) + footStr
-	}
 
 	var b strings.Builder
 	box := borderStyle

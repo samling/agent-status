@@ -72,6 +72,33 @@ func TestLoadSnapshotDoesNotFetchStaleDetailWhenCardsFail(t *testing.T) {
 	}
 }
 
+func TestLoadSnapshotCarriesDetailError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/views/sessions":
+			writeJSON(w, []sessionview.SessionCard{
+				{SessionID: "s1", Status: "active", FirstSeenAt: "2026-05-14T10:00:00Z"},
+			})
+		case "/views/sessions/s1":
+			http.Error(w, "detail exploded", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	msg := loadSnapshot(serverAddr(server), "s1", sortStatus)().(snapshotMsg)
+	if msg.detailFor != "s1" {
+		t.Fatalf("detailFor = %q, want s1", msg.detailFor)
+	}
+	if msg.detailErr == nil {
+		t.Fatal("detailErr = nil, want error")
+	}
+	if !strings.Contains(msg.detailErr.Error(), "detail exploded") {
+		t.Fatalf("detailErr = %v, want detail exploded", msg.detailErr)
+	}
+}
+
 func TestViewShowsSessionsHeadingForEmptyCards(t *testing.T) {
 	m := uiModel{width: 80, height: 20}
 

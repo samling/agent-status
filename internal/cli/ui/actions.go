@@ -86,6 +86,31 @@ func (m uiModel) commitNote() uiModel {
 	} else {
 		m.notes[id] = text
 	}
+	m = m.updateNoteDisplay(id, text)
+	return m
+}
+
+func (m uiModel) updateNoteDisplay(id, text string) uiModel {
+	for i := range m.cards {
+		if m.cards[i].SessionID == id {
+			m.cards[i].Note = text
+			break
+		}
+	}
+	if m.detailFor != id || m.detail.SessionID != id {
+		return m
+	}
+	value := text
+	if value == "" {
+		value = "-"
+	}
+	for i := range m.detail.Metadata {
+		if m.detail.Metadata[i].Label == "note" {
+			m.detail.Metadata[i].Value = value
+			return m
+		}
+	}
+	m.detail.Metadata = append(m.detail.Metadata, sessionview.Field{Label: "note", Value: value})
 	return m
 }
 

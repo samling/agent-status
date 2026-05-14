@@ -1,8 +1,12 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/samling/agent-status/internal/sessionview"
 )
@@ -75,6 +79,123 @@ func TestViewShowsSessionCardsAndRightPaneDetail(t *testing.T) {
 	}
 }
 
+func TestRenderMetadataKeepsNarrowValuesVisible(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	out := strings.Join(renderMetadata([]sessionview.Field{
+		{Label: "model", Value: "gpt-5.5"},
+		{Label: "branch", Value: "feature/ui"},
+	}, 20), "\n")
+	for _, want := range []string{"gpt-5.5", "feature/ui"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("renderMetadata() missing %q; output:\n%q", want, out)
+		}
+	}
+	if hasDanglingANSI(out) {
+		t.Fatalf("renderMetadata() has dangling ANSI sequence; output:\n%q", out)
+	}
+}
+
+func TestViewConfigReplacesDetailPaneInSmallHeight(t *testing.T) {
+	m := uiModel{
+		width:      90,
+		height:     10,
+		showConfig: true,
+		configPath: "/tmp/config.toml",
+		cards: []sessionview.SessionCard{{
+			SessionID: "s1",
+			Agent:     "codex",
+			Status:    "active",
+			Title:     "agent-status",
+			Subtitle:  "UserPromptSubmit",
+		}},
+		selectedID: "s1",
+		detailFor:  "s1",
+		detail: sessionview.SessionDetail{
+			SessionID: "s1",
+			Agent:     "codex",
+			Status:    "active",
+			Title:     "agent-status",
+			Conversation: []sessionview.ConversationMessage{
+				{Role: "user", Text: "conversation should be hidden"},
+			},
+		},
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "Config") {
+		t.Fatalf("View() missing Config; output:\n%s", out)
+	}
+	if strings.Contains(out, "conversation should be hidden") {
+		t.Fatalf("View() should replace detail pane with config; output:\n%s", out)
+	}
+}
+
+func TestViewShowsDetailUnavailable(t *testing.T) {
+	m := uiModel{
+		width:  90,
+		height: 20,
+		cards: []sessionview.SessionCard{{
+			SessionID: "s1",
+			Agent:     "codex",
+			Status:    "active",
+			Title:     "agent-status",
+			Subtitle:  "UserPromptSubmit",
+		}},
+		selectedID: "s1",
+		detailFor:  "s1",
+		detailErr:  errors.New("GET /views/sessions/s1: 500"),
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "detail unavailable") {
+		t.Fatalf("View() missing detail unavailable state; output:\n%s", out)
+	}
+	if strings.Contains(out, "select a session") {
+		t.Fatalf("View() should not ask to select a session; output:\n%s", out)
+	}
+}
+
+func TestCommitNoteUpdatesVisibleDetailMetadata(t *testing.T) {
+	m := uiModel{
+		width:      100,
+		height:     24,
+		notesPath:  t.TempDir() + "/notes.json",
+		notes:      map[string]string{"s1": "old note"},
+		inputMode:  true,
+		inputForID: "s1",
+		inputBuf:   "new note",
+		cards: []sessionview.SessionCard{{
+			SessionID: "s1",
+			Agent:     "codex",
+			Status:    "active",
+			Title:     "agent-status",
+		}},
+		selectedID: "s1",
+		detailFor:  "s1",
+		detail: sessionview.SessionDetail{
+			SessionID: "s1",
+			Agent:     "codex",
+			Status:    "active",
+			Title:     "agent-status",
+			Metadata: []sessionview.Field{
+				{Label: "note", Value: "old note"},
+			},
+		},
+	}
+
+	m = m.commitNote()
+	out := m.View()
+	if !strings.Contains(out, "new note") {
+		t.Fatalf("View() missing saved note; output:\n%s", out)
+	}
+	if strings.Contains(out, "old note") {
+		t.Fatalf("View() still shows stale note; output:\n%s", out)
+	}
+}
+
 func TestViewKeepsAgentVisibleInNarrowPane(t *testing.T) {
 	m := uiModel{
 		width:  70,
@@ -96,4 +217,25 @@ func TestViewKeepsAgentVisibleInNarrowPane(t *testing.T) {
 	if !strings.Contains(out, "approve Bash") {
 		t.Fatalf("View() should keep waiting hint visible; output:\n%s", out)
 	}
+}
+
+func hasDanglingANSI(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\x1b' {
+			continue
+		}
+		if i+1 >= len(s) || s[i+1] != '[' {
+			return true
+		}
+		i += 2
+		for ; i < len(s); i++ {
+			if s[i] >= '@' && s[i] <= '~' {
+				break
+			}
+		}
+		if i == len(s) {
+			return true
+		}
+	}
+	return false
 }
