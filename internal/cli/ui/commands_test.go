@@ -101,6 +101,37 @@ func TestLoadSnapshotCarriesDetailError(t *testing.T) {
 	}
 }
 
+func TestLoadSnapshotPrefersActiveCardWhenOpening(t *testing.T) {
+	var detailPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/views/sessions":
+			writeJSON(w, []sessionview.SessionCard{
+				{SessionID: "waiting", Status: "waiting", FirstSeenAt: "2026-05-14T10:00:00Z"},
+				{SessionID: "active", Status: "active", FirstSeenAt: "2026-05-14T10:01:00Z"},
+				{SessionID: "idle", Status: "idle", FirstSeenAt: "2026-05-14T10:02:00Z"},
+			})
+		case "/views/sessions/active":
+			detailPath = r.URL.Path
+			writeJSON(w, sessionview.SessionDetail{SessionID: "active"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	msg := loadSnapshot(serverAddr(server), "", sortStatus)().(snapshotMsg)
+	if msg.detailFor != "active" {
+		t.Fatalf("detailFor = %q, want active", msg.detailFor)
+	}
+	if msg.detail.SessionID != "active" {
+		t.Fatalf("detail.SessionID = %q, want active", msg.detail.SessionID)
+	}
+	if detailPath != "/views/sessions/active" {
+		t.Fatalf("detail path = %q, want /views/sessions/active", detailPath)
+	}
+}
+
 func TestUpdateDownReturnsImmediateDetailLoad(t *testing.T) {
 	var detailPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,6 +175,31 @@ func TestUpdateDownReturnsImmediateDetailLoad(t *testing.T) {
 	}
 	if got.detail.SessionID != "s2" {
 		t.Fatalf("detail.SessionID = %q, want s2", got.detail.SessionID)
+	}
+}
+
+func TestUpdateAdoptsSnapshotFocusWhenSelectionIsEmpty(t *testing.T) {
+	m := uiModel{}
+
+	updated, _ := m.Update(snapshotMsg{
+		cards: []sessionview.SessionCard{
+			{SessionID: "waiting", Status: "waiting"},
+			{SessionID: "active", Status: "active"},
+		},
+		detailFor: "active",
+		detail:    sessionview.SessionDetail{SessionID: "active"},
+		serverUp:  true,
+	})
+	got := updated.(uiModel)
+
+	if got.selectedID != "active" {
+		t.Fatalf("selectedID = %q, want active", got.selectedID)
+	}
+	if got.detailFor != "active" {
+		t.Fatalf("detailFor = %q, want active", got.detailFor)
+	}
+	if got.scrollOffset != 1 {
+		t.Fatalf("scrollOffset = %d, want 1", got.scrollOffset)
 	}
 }
 

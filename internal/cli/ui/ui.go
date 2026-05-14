@@ -215,6 +215,13 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedID != "" && !cardsContain(m.cards, m.selectedID) {
 			m.selectedID = ""
 		}
+		adoptedFocus := m.selectedID == "" && msg.detailFor != ""
+		if adoptedFocus {
+			m.selectedID = msg.detailFor
+		}
+		if adoptedFocus {
+			m.scrollOffset = cardIndex(m.cards, m.selectedID)
+		}
 		m.keepSelectionVisible()
 		activeID := m.selectedID
 		if activeID == "" && len(m.cards) > 0 {

@@ -37,12 +37,7 @@ func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
 			cards = nil
 		}
 		sortCards(cards, mode)
-		focus := ""
-		if selectedID != "" && cardsContain(cards, selectedID) {
-			focus = selectedID
-		} else if len(cards) > 0 {
-			focus = cards[0].SessionID
-		}
+		focus := initialFocusID(cards, selectedID)
 		var detail sessionview.SessionDetail
 		var detailErr error
 		if focus != "" {
@@ -57,6 +52,23 @@ func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
 			serverUp:  serverUp,
 		}
 	}
+}
+
+func initialFocusID(cards []sessionview.SessionCard, selectedID string) string {
+	if selectedID != "" && cardsContain(cards, selectedID) {
+		return selectedID
+	}
+	if selectedID == "" {
+		for _, card := range cards {
+			if card.Status == "active" {
+				return card.SessionID
+			}
+		}
+	}
+	if len(cards) > 0 {
+		return cards[0].SessionID
+	}
+	return ""
 }
 
 func loadDetail(serverAddr, id string) tea.Cmd {
