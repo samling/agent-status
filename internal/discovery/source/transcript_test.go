@@ -61,3 +61,15 @@ func TestExtractUserPromptIgnoresOutputText(t *testing.T) {
 		t.Fatalf("ExtractUserPrompt() = %q, want %q", got, want)
 	}
 }
+
+func TestExtractUserPromptStripsIDEContextWrapper(t *testing.T) {
+	raw := `[
+		{"type":"input_text","text":"# Context from my IDE setup:\n\n## Active file: agent-status/internal/discovery/source/source.go\n\n## Open tabs:\n- source.go: agent-status/internal/discovery/source/source.go\n- waiting.go: agent-status/internal/discovery/codex/waiting.go\n\n## My request for Codex:\nCan we see the actual message?\n"}
+	]`
+
+	got := ExtractUserPrompt([]byte(raw))
+	want := "Can we see the actual message?"
+	if got != want {
+		t.Fatalf("ExtractUserPrompt() = %q, want %q", got, want)
+	}
+}

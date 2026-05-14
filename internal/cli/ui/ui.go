@@ -114,29 +114,30 @@ func runUI(_ *cobra.Command, _ []string) error {
 }
 
 type uiModel struct {
-	statePath      string
-	notesPath      string
-	configPath     string
-	interval       time.Duration
-	cards          []sessionview.SessionCard
-	notes          map[string]string
-	selectedID     string
-	scrollOffset   int
-	sort           sortMode
-	width          int
-	height         int
-	detail         sessionview.SessionDetail
-	detailFor      string // session id that detail belongs to
-	detailErr      error
-	inputMode      bool
-	inputBuf       string
-	inputForID     string
-	showConfig     bool
-	quitAfterFocus bool
-	serverAddr     string
-	serverUp       bool
-	status         string
-	err            error
+	statePath       string
+	notesPath       string
+	configPath      string
+	interval        time.Duration
+	cards           []sessionview.SessionCard
+	notes           map[string]string
+	selectedID      string
+	scrollOffset    int
+	expandedParents map[string]bool
+	sort            sortMode
+	width           int
+	height          int
+	detail          sessionview.SessionDetail
+	detailFor       string // session id that detail belongs to
+	detailErr       error
+	inputMode       bool
+	inputBuf        string
+	inputForID      string
+	showConfig      bool
+	quitAfterFocus  bool
+	serverAddr      string
+	serverUp        bool
+	status          string
+	err             error
 }
 
 func (m uiModel) Init() tea.Cmd {
@@ -186,6 +187,22 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selectedID != "" && m.selectedID != prev {
 				return m, loadDetail(m.serverAddr, m.selectedID)
 			}
+		case " ":
+			if m.toggleExpanded(m.selectedID) {
+				return m, nil
+			}
+		case "right", "l":
+			if m.expandSelected() {
+				return m, nil
+			}
+		case "left", "h":
+			prev := m.selectedID
+			if m.collapseSelected() {
+				if m.selectedID != "" && m.selectedID != prev {
+					return m, loadDetail(m.serverAddr, m.selectedID)
+				}
+				return m, nil
+			}
 		case "enter":
 			var cmd tea.Cmd
 			m, cmd = m.focusSelected()
@@ -209,11 +226,19 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case snapshotMsg:
 		m.cards = msg.cards
 		m.serverUp = msg.serverUp
+		m.pruneExpandedParents()
 		if msg.sortedBy != m.sort {
 			sortCards(m.cards, m.sort)
 		}
 		if m.selectedID != "" && !cardsContain(m.cards, m.selectedID) {
 			m.selectedID = ""
+		}
+		if m.selectedID != "" && !cardsContain(m.visibleCards(), m.selectedID) {
+			if parentID := parentIDFor(m.cards, m.selectedID); parentID != "" {
+				m.selectedID = parentID
+			} else {
+				m.selectedID = ""
+			}
 		}
 		adoptedFocus := m.selectedID == "" && msg.detailFor != ""
 		if adoptedFocus {

@@ -1,5 +1,8 @@
 .serena/
+.superpowers/
+.codex/
 .claude/
+.agents/
 /agent-status
 /bin
 /state.json

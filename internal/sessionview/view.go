@@ -22,15 +22,19 @@ type Provider struct {
 }
 
 type SessionCard struct {
-	SessionID    string `json:"session_id"`
-	Agent        string `json:"agent"`
-	Status       string `json:"status"`
-	Title        string `json:"title"`
-	Subtitle     string `json:"subtitle"`
-	ActivityTime string `json:"activity_time"`
-	FirstSeenAt  string `json:"first_seen_at"`
-	StatusAt     string `json:"status_at"`
-	Note         string `json:"note,omitempty"`
+	SessionID       string `json:"session_id"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	Agent           string `json:"agent"`
+	Status          string `json:"status"`
+	Title           string `json:"title"`
+	Subtitle        string `json:"subtitle"`
+	ActivityTime    string `json:"activity_time"`
+	FirstSeenAt     string `json:"first_seen_at"`
+	StatusAt        string `json:"status_at"`
+	Note            string `json:"note,omitempty"`
+	ChildCount      int    `json:"child_count,omitempty"`
+	OpenChildCount  int    `json:"open_child_count,omitempty"`
+	ChildStatus     string `json:"child_status,omitempty"`
 }
 
 type Field struct {
@@ -59,19 +63,32 @@ func (p Provider) Cards(ctx context.Context) ([]SessionCard, error) {
 	meta := p.latestMeta()
 	notes := p.loadNotes()
 	sessions := p.Store.Sessions()
+	sessionIDs := make(map[string]struct{}, len(sessions))
+	for _, sess := range sessions {
+		sessionIDs[sess.SessionID] = struct{}{}
+	}
 	out := make([]SessionCard, 0, len(sessions))
 	for _, sess := range sessions {
 		m := meta[sess.SessionID]
+		if m.ParentSessionID != "" {
+			if _, ok := sessionIDs[m.ParentSessionID]; !ok {
+				continue
+			}
+		}
 		out = append(out, SessionCard{
-			SessionID:    sess.SessionID,
-			Agent:        sess.Agent,
-			Status:       state.DeriveStatus(sess),
-			Title:        titleFor(m.Cwd),
-			Subtitle:     subtitleFor(sess, m),
-			ActivityTime: relTime(sess.StatusTime),
-			FirstSeenAt:  sess.FirstSeenAt,
-			StatusAt:     sess.StatusAt,
-			Note:         notes[sess.SessionID],
+			SessionID:       sess.SessionID,
+			ParentSessionID: m.ParentSessionID,
+			Agent:           sess.Agent,
+			Status:          state.DeriveStatus(sess),
+			Title:           titleFor(m.Name, m.Cwd),
+			Subtitle:        subtitleFor(sess, m),
+			ActivityTime:    relTime(sess.StatusTime),
+			FirstSeenAt:     sess.FirstSeenAt,
+			StatusAt:        sess.StatusAt,
+			Note:            notes[sess.SessionID],
+			ChildCount:      m.ChildCount,
+			OpenChildCount:  m.OpenChildCount,
+			ChildStatus:     m.ChildStatus,
 		})
 	}
 	return out, nil
@@ -96,7 +113,7 @@ func (p Provider) Detail(ctx context.Context, id string) (SessionDetail, error) 
 		SessionID: sess.SessionID,
 		Agent:     sess.Agent,
 		Status:    state.DeriveStatus(sess),
-		Title:     titleFor(m.Cwd),
+		Title:     titleFor(m.Name, m.Cwd),
 	}
 	if transcriptErr != nil {
 		detail.TranscriptError = transcriptErr.Error()
@@ -127,7 +144,10 @@ func (p Provider) loadNotes() map[string]string {
 	return notes
 }
 
-func titleFor(cwd string) string {
+func titleFor(name, cwd string) string {
+	if name != "" {
+		return name
+	}
 	if cwd == "" {
 		return "-"
 	}
@@ -159,14 +179,28 @@ func metadataFields(sess state.Session, meta source.SessionMeta, info source.Tra
 	}
 	return []Field{
 		{Label: "agent", Value: valueOrDash(sess.Agent)},
+		{Label: "version", Value: valueOrDash(version)},
+		{Label: "session", Value: valueOrDash(meta.Name)},
+		{Label: "session id", Value: valueOrDash(sess.SessionID)},
 		{Label: "model", Value: valueOrDash(model)},
 		{Label: "branch", Value: valueOrDash(info.GitBranch)},
-		{Label: "version", Value: valueOrDash(version)},
 		{Label: "pid", Value: pid},
 		{Label: "cwd", Value: valueOrDash(meta.Cwd)},
+		{Label: "parent", Value: valueOrDash(meta.ParentSessionID)},
+		{Label: "children", Value: childCountValue(meta.ChildCount, meta.OpenChildCount)},
 		{Label: "waiting", Value: valueOrDash(meta.WaitingFor)},
 		{Label: "note", Value: valueOrDash(note)},
 	}
+}
+
+func childCountValue(total, open int) string {
+	if total <= 0 {
+		return "-"
+	}
+	if open > 0 {
+		return strconv.Itoa(total) + " (" + strconv.Itoa(open) + " open)"
+	}
+	return strconv.Itoa(total)
 }
 
 func newestFirst(in []source.ConversationMessage) []ConversationMessage {

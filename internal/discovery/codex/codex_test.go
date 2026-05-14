@@ -125,6 +125,88 @@ func TestScanIncludesRecentThreadBeforeProcessLink(t *testing.T) {
 	}
 }
 
+func TestScanUsesCodexSessionIndexName(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	stateDB := openTestDB(t, filepath.Join(dir, "state_5.sqlite"))
+	createThreadsTable(t, stateDB)
+	now := time.Now()
+	insertThread(t, stateDB, "thread-1", filepath.Join(dir, "rollout.jsonl"), now, now, "/tmp/project")
+	stateDB.Close()
+	if err := os.WriteFile(
+		filepath.Join(dir, "session_index.jsonl"),
+		[]byte(`{"id":"thread-1","thread_name":"Compare lazyagent to agent-status"}`+"\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, _, err := Scan()
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(sessions))
+	}
+	if sessions[0].Meta.Name != "Compare lazyagent to agent-status" {
+		t.Fatalf("Meta.Name = %q, want Compare lazyagent to agent-status", sessions[0].Meta.Name)
+	}
+}
+
+func TestScanUsesCodexSpawnEdges(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	stateDB := openTestDB(t, filepath.Join(dir, "state_5.sqlite"))
+	createThreadsTable(t, stateDB)
+	createThreadSpawnEdgesTable(t, stateDB)
+	now := time.Now()
+	insertThread(t, stateDB, "parent", filepath.Join(dir, "parent.jsonl"), now, now, "/tmp/project")
+	insertThread(t, stateDB, "child-open", filepath.Join(dir, "child-open.jsonl"), now, now, "/tmp/project")
+	insertThread(t, stateDB, "child-closed", filepath.Join(dir, "child-closed.jsonl"), now, now, "/tmp/project")
+	execTestSQL(t, stateDB,
+		`insert into thread_spawn_edges (parent_thread_id, child_thread_id, status) values (?, ?, ?)`,
+		"parent",
+		"child-open",
+		"open",
+	)
+	execTestSQL(t, stateDB,
+		`insert into thread_spawn_edges (parent_thread_id, child_thread_id, status) values (?, ?, ?)`,
+		"parent",
+		"child-closed",
+		"closed",
+	)
+	stateDB.Close()
+
+	sessions, _, err := Scan()
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	byID := map[string]string{}
+	childCounts := map[string]int{}
+	openCounts := map[string]int{}
+	childStatus := map[string]string{}
+	for _, sess := range sessions {
+		byID[sess.SessionID] = sess.Meta.ParentSessionID
+		childCounts[sess.SessionID] = sess.Meta.ChildCount
+		openCounts[sess.SessionID] = sess.Meta.OpenChildCount
+		childStatus[sess.SessionID] = sess.Meta.ChildStatus
+	}
+	if byID["child-open"] != "parent" {
+		t.Fatalf("child-open parent = %q, want parent", byID["child-open"])
+	}
+	if childStatus["child-closed"] != "closed" {
+		t.Fatalf("child-closed status = %q, want closed", childStatus["child-closed"])
+	}
+	if childCounts["parent"] != 2 {
+		t.Fatalf("parent child count = %d, want 2", childCounts["parent"])
+	}
+	if openCounts["parent"] != 1 {
+		t.Fatalf("parent open child count = %d, want 1", openCounts["parent"])
+	}
+}
+
 func TestScanLabelsFreshThreadAsSessionStart(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
@@ -336,6 +418,16 @@ func createLogsTable(t *testing.T, db *sql.DB) {
 			ts integer not null,
 			ts_nanos integer not null,
 			feedback_log_body text
+		)`)
+}
+
+func createThreadSpawnEdgesTable(t *testing.T, db *sql.DB) {
+	t.Helper()
+	execTestSQL(t, db, `
+		create table thread_spawn_edges (
+			parent_thread_id text not null,
+			child_thread_id text not null primary key,
+			status text not null
 		)`)
 }
 

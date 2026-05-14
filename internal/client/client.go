@@ -46,6 +46,9 @@ func (c *Client) Sessions(ctx context.Context) ([]state.Session, error) {
 	if err := c.getJSON(ctx, "/state", &out); err != nil {
 		return nil, err
 	}
+	for i := range out {
+		parseSessionTimes(&out[i])
+	}
 	return out, nil
 }
 
@@ -155,4 +158,9 @@ func (c *Client) getJSON(ctx context.Context, path string, dst any) error {
 		return fmt.Errorf("GET %s: %s: %s", path, resp.Status, string(body))
 	}
 	return json.NewDecoder(resp.Body).Decode(dst)
+}
+
+func parseSessionTimes(sess *state.Session) {
+	sess.FirstSeenTime, _ = time.Parse(time.RFC3339Nano, sess.FirstSeenAt)
+	sess.StatusTime, _ = time.Parse(time.RFC3339Nano, sess.StatusAt)
 }

@@ -11,6 +11,16 @@ import (
 
 // Transcript loads the Claude transcript for the given session.
 func Transcript(sessionID string, meta source.SessionMeta) (source.TranscriptInfo, error) {
+	if meta.Path != "" {
+		info, err := source.LoadTranscriptPath(meta.Path, parseTranscript)
+		if info.Model == "" {
+			info.Model = meta.Model
+		}
+		if info.Version == "" {
+			info.Version = meta.Version
+		}
+		return info, err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return source.TranscriptInfo{}, err

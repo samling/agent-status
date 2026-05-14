@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/samling/agent-status/internal/discovery/source"
 )
 
 func TestParseTranscriptCapturesConversationPreviews(t *testing.T) {
@@ -31,5 +33,21 @@ func TestParseTranscriptCapturesConversationPreviews(t *testing.T) {
 	}
 	if info.LastUserPrompt != "second user message" {
 		t.Fatalf("LastUserPrompt = %q, want second user message", info.LastUserPrompt)
+	}
+}
+
+func TestTranscriptUsesMetaPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "child.jsonl")
+	data := `{"type":"user","timestamp":"2026-05-14T10:00:00Z","message":{"content":"child prompt"}}` + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Transcript("synthetic-child", source.SessionMeta{Path: path})
+	if err != nil {
+		t.Fatalf("Transcript() error = %v", err)
+	}
+	if info.LastUserPrompt != "child prompt" {
+		t.Fatalf("LastUserPrompt = %q, want child prompt", info.LastUserPrompt)
 	}
 }

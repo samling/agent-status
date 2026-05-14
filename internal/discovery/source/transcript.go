@@ -156,7 +156,7 @@ func ExtractUserPrompt(content json.RawMessage) string {
 	}
 	var s string
 	if err := json.Unmarshal(content, &s); err == nil {
-		return s
+		return cleanUserPrompt(s)
 	}
 	var blocks []struct {
 		Type string `json:"type"`
@@ -169,7 +169,24 @@ func ExtractUserPrompt(content json.RawMessage) string {
 				parts = append(parts, b.Text)
 			}
 		}
-		return strings.Join(parts, "\n")
+		return cleanUserPrompt(strings.Join(parts, "\n"))
 	}
 	return ""
+}
+
+func cleanUserPrompt(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return ""
+	}
+	if !strings.HasPrefix(trimmed, "# Context from my IDE setup:") {
+		return s
+	}
+	lines := strings.Split(trimmed, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "## My request for ") {
+			return strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
+		}
+	}
+	return s
 }

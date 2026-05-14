@@ -60,13 +60,15 @@ func initialFocusID(cards []sessionview.SessionCard, selectedID string) string {
 	}
 	if selectedID == "" {
 		for _, card := range cards {
-			if card.Status == "active" {
+			if card.ParentSessionID == "" && card.Status == "active" {
 				return card.SessionID
 			}
 		}
 	}
-	if len(cards) > 0 {
-		return cards[0].SessionID
+	for _, card := range cards {
+		if card.ParentSessionID == "" {
+			return card.SessionID
+		}
 	}
 	return ""
 }

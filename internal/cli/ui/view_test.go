@@ -70,10 +70,13 @@ func TestViewShowsSessionCardsAndRightPaneDetail(t *testing.T) {
 	}
 
 	out := m.View()
-	for _, want := range []string{"CODEX", "agent-status", "Metadata", "model", "gpt-5.5", "Conversation", "User", "newest"} {
+	for _, want := range []string{"codex", "agent-status", "Metadata", "model", "gpt-5.5", "Conversation", "User", "newest"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("View() missing %q; output:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "CODEX") {
+		t.Fatalf("View() should render agent names lowercase; output:\n%s", out)
 	}
 	if strings.Index(out, "newest") > strings.Index(out, "older") {
 		t.Fatalf("conversation not newest first; output:\n%s", out)
@@ -95,8 +98,8 @@ func TestSelectedCardKeepsFixedHeightAndOmitsPreview(t *testing.T) {
 		},
 	}
 
-	selected := renderCard(card, 36, true, true, detail)
-	plain := renderCard(card, 36, false, false, sessionview.SessionDetail{})
+	selected := renderCard(card, 36, true, true, detail, false)
+	plain := renderCard(card, 36, false, false, sessionview.SessionDetail{}, false)
 	if strings.Contains(selected, "user: newest") {
 		t.Fatalf("selected card should not include conversation preview; output:\n%s", selected)
 	}
@@ -121,9 +124,27 @@ func TestSelectedCardUsesBorderAccentWithoutInnerBackground(t *testing.T) {
 		Subtitle:  "UserPromptSubmit",
 	}
 
-	out := renderCard(card, 36, true, false, sessionview.SessionDetail{})
+	out := renderCard(card, 36, true, false, sessionview.SessionDetail{}, false)
 	if strings.Contains(out, "48;5;237") {
 		t.Fatalf("selected card should not render an inner background block; output:\n%q", out)
+	}
+}
+
+func TestRenderCardStylesSessionName(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	card := sessionview.SessionCard{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "agent-status",
+	}
+
+	out := renderCard(card, 36, false, false, sessionview.SessionDetail{}, false)
+	if !strings.Contains(out, sessionNameStyle.Render("agent-status")) {
+		t.Fatalf("renderCard() should style session name; output:\n%q", out)
 	}
 }
 
@@ -150,6 +171,174 @@ func TestRenderCardsAddsCompactBorders(t *testing.T) {
 	}
 }
 
+func TestRenderCardOmitsMarkerSpaceForLeafSession(t *testing.T) {
+	card := sessionview.SessionCard{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "leaf",
+	}
+
+	out := renderCard(card, 36, false, false, sessionview.SessionDetail{}, false)
+	if !strings.Contains(out, "│ codex") {
+		t.Fatalf("renderCard() should start leaf agent without marker padding; output:\n%s", out)
+	}
+	if strings.Contains(out, "│   codex") {
+		t.Fatalf("renderCard() should not reserve marker space for leaf sessions; output:\n%s", out)
+	}
+}
+
+func TestRenderCardRightAlignsSubtitle(t *testing.T) {
+	card := sessionview.SessionCard{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "project",
+		Subtitle:  "Stop",
+	}
+
+	out := renderCard(card, 36, false, false, sessionview.SessionDetail{}, false)
+	found := false
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "project") {
+			continue
+		}
+		found = true
+		if !strings.Contains(line, "project") || !strings.Contains(line, "Stop │") {
+			t.Fatalf("renderCard() should keep title and subtitle visible; line=%q output:\n%s", line, out)
+		}
+		if strings.Contains(line, "project Stop") {
+			t.Fatalf("renderCard() should right-align subtitle instead of placing it beside title; line=%q output:\n%s", line, out)
+		}
+	}
+	if !found {
+		t.Fatalf("renderCard() missing title line; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsCollapsesChildrenByDefault(t *testing.T) {
+	m := uiModel{
+		width:  90,
+		height: 24,
+		cards: []sessionview.SessionCard{
+			{SessionID: "parent", Agent: "codex", Status: "active", Title: "parent", ChildCount: 1},
+			{SessionID: "child", ParentSessionID: "parent", Agent: "codex", Status: "idle", Title: "child"},
+		},
+		selectedID: "parent",
+	}
+
+	out := m.renderCards(36, "parent")
+	if strings.Contains(out, "> codex") {
+		t.Fatalf("renderCards() showed collapsed child; output:\n%s", out)
+	}
+	if !strings.Contains(out, "+") {
+		t.Fatalf("renderCards() missing collapsed child marker; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsExpandsChildren(t *testing.T) {
+	m := uiModel{
+		width:           90,
+		height:          24,
+		expandedParents: map[string]bool{"parent": true},
+		cards: []sessionview.SessionCard{
+			{SessionID: "parent", Agent: "codex", Status: "active", Title: "parent", ChildCount: 1},
+			{SessionID: "child", ParentSessionID: "parent", Agent: "codex", Status: "idle", Title: "child"},
+		},
+		selectedID: "parent",
+	}
+
+	out := m.renderCards(36, "parent")
+	if !strings.Contains(out, "child") {
+		t.Fatalf("renderCards() missing expanded child; output:\n%s", out)
+	}
+	if !strings.Contains(out, "-") {
+		t.Fatalf("renderCards() missing expanded child marker; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsIndentsExpandedChildren(t *testing.T) {
+	m := uiModel{
+		width:           90,
+		height:          24,
+		expandedParents: map[string]bool{"parent": true},
+		cards: []sessionview.SessionCard{
+			{SessionID: "parent", Agent: "codex", Status: "active", Title: "parent", ChildCount: 1},
+			{SessionID: "child", ParentSessionID: "parent", Agent: "codex", Status: "idle", Title: "nested"},
+		},
+		selectedID: "parent",
+	}
+
+	out := m.renderCards(36, "parent")
+	found := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "nested") {
+			found = true
+			if !strings.HasPrefix(line, "  ") {
+				t.Fatalf("child card line should be indented; line=%q output:\n%s", line, out)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("renderCards() missing child title; output:\n%s", out)
+	}
+	if strings.Contains(out, "> codex") {
+		t.Fatalf("renderCards() should not show a child marker; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsKeepsChildCountsOutOfSubtitle(t *testing.T) {
+	m := uiModel{
+		width:  90,
+		height: 24,
+		cards: []sessionview.SessionCard{
+			{
+				SessionID:      "parent",
+				Agent:          "codex",
+				Status:         "active",
+				Title:          "Compare lazyagent to agent-status",
+				Subtitle:       "Stop",
+				ChildCount:     17,
+				OpenChildCount: 6,
+			},
+		},
+		selectedID: "parent",
+	}
+
+	out := m.renderCards(36, "parent")
+	if !strings.Contains(out, "Stop") {
+		t.Fatalf("renderCards() should keep the existing subtitle; output:\n%s", out)
+	}
+	for _, noisy := range []string{"17 child", "children", "6 open"} {
+		if strings.Contains(out, noisy) {
+			t.Fatalf("renderCards() should not append child counts to subtitle; found %q in:\n%s", noisy, out)
+		}
+	}
+}
+
+func TestMoveSelectionUsesVisibleChildren(t *testing.T) {
+	m := uiModel{
+		width:           90,
+		height:          24,
+		expandedParents: map[string]bool{"parent": true},
+		cards: []sessionview.SessionCard{
+			{SessionID: "parent", Agent: "codex", Status: "active", Title: "parent", ChildCount: 1},
+			{SessionID: "child", ParentSessionID: "parent", Agent: "codex", Status: "idle", Title: "child"},
+			{SessionID: "next", Agent: "codex", Status: "idle", Title: "next"},
+		},
+		selectedID: "parent",
+	}
+
+	m.moveSelection(+1)
+	if m.selectedID != "child" {
+		t.Fatalf("selectedID = %q, want child", m.selectedID)
+	}
+	m.toggleExpanded("parent")
+	if m.selectedID != "parent" {
+		t.Fatalf("selectedID after collapse = %q, want parent", m.selectedID)
+	}
+}
+
 func TestRenderSessionDetailUsesSectionDividers(t *testing.T) {
 	out := renderSessionDetail(sessionview.SessionDetail{
 		SessionID: "s1",
@@ -166,6 +355,141 @@ func TestRenderSessionDetailUsesSectionDividers(t *testing.T) {
 
 	if strings.Count(out, "────────") < 2 {
 		t.Fatalf("renderSessionDetail() missing section dividers; output:\n%s", out)
+	}
+}
+
+func TestRenderSessionDetailLabelsAssistantAsAgent(t *testing.T) {
+	out := renderSessionDetail(sessionview.SessionDetail{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "agent-status",
+		Conversation: []sessionview.ConversationMessage{
+			{Role: "assistant", Text: "here is the answer"},
+		},
+	}, 40)
+
+	if !strings.Contains(out, "Agent here is the answer") {
+		t.Fatalf("renderSessionDetail() missing Agent label; output:\n%s", out)
+	}
+	if strings.Contains(out, "AI   here is the answer") {
+		t.Fatalf("renderSessionDetail() should not use AI label; output:\n%s", out)
+	}
+}
+
+func TestRenderSessionDetailDarkensConversationLabels(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	out := renderSessionDetail(sessionview.SessionDetail{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "agent-status",
+		Conversation: []sessionview.ConversationMessage{
+			{Role: "user", Text: "question"},
+			{Role: "assistant", Text: "answer"},
+		},
+	}, 40)
+
+	for _, want := range []string{"\x1b[38;5;245mUser", "\x1b[38;5;245mAgent"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("renderSessionDetail() should darken conversation label %q; output:\n%q", want, out)
+		}
+	}
+	for _, want := range []string{"question", "answer"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("renderSessionDetail() missing message %q; output:\n%q", want, out)
+		}
+	}
+	if hasDanglingANSI(out) {
+		t.Fatalf("renderSessionDetail() has dangling ANSI sequence; output:\n%q", out)
+	}
+}
+
+func TestRenderSessionDetailGroupsAgentAndVersion(t *testing.T) {
+	out := renderSessionDetail(sessionview.SessionDetail{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "agent-status",
+		Metadata: []sessionview.Field{
+			{Label: "agent", Value: "codex"},
+			{Label: "version", Value: "0.128.0"},
+			{Label: "session id", Value: "s1"},
+			{Label: "session", Value: "agent-status"},
+		},
+	}, 80)
+
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "agent: codex") {
+			if !strings.Contains(line, "version: 0.128.0") {
+				t.Fatalf("version should share metadata row with agent; line=%q output:\n%s", line, out)
+			}
+			return
+		}
+	}
+	t.Fatalf("renderSessionDetail() missing agent metadata row; output:\n%s", out)
+}
+
+func TestViewAddsVerticalPanelDivider(t *testing.T) {
+	m := uiModel{
+		width:  100,
+		height: 24,
+		cards: []sessionview.SessionCard{{
+			SessionID: "s1",
+			Agent:     "codex",
+			Status:    "active",
+			Title:     "agent-status",
+		}},
+		selectedID: "s1",
+		detailFor:  "s1",
+		detail: sessionview.SessionDetail{
+			SessionID: "s1",
+			Agent:     "codex",
+			Status:    "active",
+			Title:     "agent-status",
+		},
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "│") {
+		t.Fatalf("View() should include a vertical divider between panes; output:\n%s", out)
+	}
+}
+
+func TestViewPanelDividerUsesRuleStyleAndFullPaneHeight(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	m := uiModel{
+		width:  100,
+		height: 24,
+		cards: []sessionview.SessionCard{{
+			SessionID: "s1",
+			Agent:     "codex",
+			Status:    "active",
+			Title:     "agent-status",
+		}},
+		selectedID: "s1",
+		detailFor:  "s1",
+		detail: sessionview.SessionDetail{
+			SessionID: "s1",
+			Agent:     "codex",
+			Status:    "active",
+			Title:     "agent-status",
+		},
+	}
+
+	out := m.View()
+	styledPipe := dimStyle.Render("│")
+	if got := strings.Count(out, styledPipe); got != m.cardPaneHeight() {
+		t.Fatalf("styled divider height = %d, want %d; output:\n%q", got, m.cardPaneHeight(), out)
+	}
+	if strings.Contains(out, " │ ") {
+		t.Fatalf("divider should be styled, not plain; output:\n%q", out)
 	}
 }
 
@@ -337,8 +661,11 @@ func TestViewKeepsAgentVisibleInNarrowPane(t *testing.T) {
 	}
 
 	out := m.View()
-	if !strings.Contains(out, "CLAUDE-CODE") {
+	if !strings.Contains(out, "claude-code") {
 		t.Fatalf("View() should keep agent kind visible; output:\n%s", out)
+	}
+	if strings.Contains(out, "CLAUDE-CODE") {
+		t.Fatalf("View() should render agent names lowercase; output:\n%s", out)
 	}
 	if !strings.Contains(out, "approve Bash") {
 		t.Fatalf("View() should keep waiting hint visible; output:\n%s", out)

@@ -11,11 +11,13 @@ import (
 )
 
 var (
-	accentStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	headerStyle = lipgloss.NewStyle().Bold(true)
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	borderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	accentStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	sessionNameStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
+	headerStyle      = lipgloss.NewStyle().Bold(true)
+	dimStyle         = lipgloss.NewStyle().Faint(true)
+	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	borderStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	roleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 
 	connectedStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
 	disconnectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9"))
@@ -30,10 +32,13 @@ func keyHint(key, desc string) string {
 const (
 	minLeftPane     = 24
 	maxLeftPane     = 46
-	paneGap         = 2
+	paneGap         = 1
+	paneDividerCols = 1
 	cardPaddingCols = 2
 	cardBodyLines   = 2
 	cardBorderRows  = 2
+	childIndentCols = 2
+	roleLabelWidth  = 5
 )
 
 func rowStyle(status string, selected bool) lipgloss.Style {
@@ -66,9 +71,10 @@ func cardBorderColor(status string, selected bool) lipgloss.Color {
 
 func (m uiModel) paneWidths() (int, int) {
 	inner := m.width - 4
+	separatorWidth := paneGap*2 + paneDividerCols
 	if inner < 50 {
 		left := minLeftPane
-		right := inner - left - paneGap
+		right := inner - left - separatorWidth
 		if right < 20 {
 			right = 20
 		}
@@ -81,7 +87,7 @@ func (m uiModel) paneWidths() (int, int) {
 	if left > maxLeftPane {
 		left = maxLeftPane
 	}
-	right := inner - left - paneGap
+	right := inner - left - separatorWidth
 	if right < 20 {
 		right = 20
 	}
@@ -104,14 +110,15 @@ func (m uiModel) cardHeight(_ sessionview.SessionCard, _ string) int {
 }
 
 func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) {
-	if len(m.cards) == 0 {
+	cards := m.visibleCards()
+	if len(cards) == 0 {
 		return 0, 0
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	if offset >= len(m.cards) {
-		offset = len(m.cards) - 1
+	if offset >= len(cards) {
+		offset = len(cards) - 1
 	}
 	height := m.cardPaneHeight()
 	if height == 0 {
@@ -123,8 +130,8 @@ func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) 
 	}
 	used := 0
 	end := offset
-	for end < len(m.cards) {
-		nextHeight := m.cardHeight(m.cards[end], selectedID)
+	for end < len(cards) {
+		nextHeight := m.cardHeight(cards[end], selectedID)
 		if end > offset && used+nextHeight > budget {
 			break
 		}
@@ -138,28 +145,52 @@ func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) 
 }
 
 func (m uiModel) renderCards(width int, selectedID string) string {
+	cards := m.visibleCards()
 	title := "Sessions"
-	if len(m.cards) > 0 {
-		if idx := cardIndex(m.cards, selectedID); idx >= 0 {
-			title = fmt.Sprintf("Sessions %d/%d", idx+1, len(m.cards))
+	if len(cards) > 0 {
+		if idx := cardIndex(cards, selectedID); idx >= 0 {
+			title = fmt.Sprintf("Sessions %d/%d", idx+1, len(cards))
 		} else {
-			title = fmt.Sprintf("Sessions %d", len(m.cards))
+			title = fmt.Sprintf("Sessions %d", len(cards))
 		}
 	}
 	lines := []string{headerStyle.Render(title)}
-	if len(m.cards) == 0 {
+	if len(cards) == 0 {
 		lines = append(lines, dimStyle.Render("(no live sessions)"))
 		return strings.Join(lines, "\n")
 	}
 	start, end := m.visibleCardRangeFrom(m.scrollOffset, selectedID)
-	for _, card := range m.cards[start:end] {
+	for _, card := range cards[start:end] {
 		selected := card.SessionID == selectedID
-		lines = append(lines, renderCard(card, width, selected, m.detailFor == card.SessionID, m.detail))
+		rendered := renderCard(card, cardWidth(width, card), selected, m.detailFor == card.SessionID, m.detail, m.expandedParents[card.SessionID])
+		if card.ParentSessionID != "" {
+			rendered = indentBlock(rendered, childIndentCols)
+		}
+		lines = append(lines, rendered)
 	}
 	return strings.Join(lines, "\n")
 }
 
-func renderCard(card sessionview.SessionCard, width int, selected, _ bool, _ sessionview.SessionDetail) string {
+func cardWidth(width int, card sessionview.SessionCard) int {
+	if card.ParentSessionID == "" {
+		return width
+	}
+	return width - childIndentCols
+}
+
+func indentBlock(text string, cols int) string {
+	if cols <= 0 || text == "" {
+		return text
+	}
+	prefix := strings.Repeat(" ", cols)
+	lines := strings.Split(text, "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderCard(card sessionview.SessionCard, width int, selected, _ bool, _ sessionview.SessionDetail, expanded bool) string {
 	if width < 10 {
 		width = 10
 	}
@@ -171,11 +202,14 @@ func renderCard(card sessionview.SessionCard, width int, selected, _ bool, _ ses
 	if contentWidth < 4 {
 		contentWidth = 4
 	}
-	agent := strings.ToUpper(card.Agent)
+	agent := cardAgent(card, expanded)
 	status := card.Status
+	if card.ChildStatus != "" {
+		status = card.ChildStatus
+	}
 	agentWidth := max(contentWidth-len(status)-1, 1)
 	agent = truncate(agent, agentWidth)
-	title := compactCardLine(card.Title, card.Subtitle, contentWidth)
+	title := compactCardLine(card.Title, cardSubtitle(card), contentWidth)
 	top := fmt.Sprintf("%-*s %s", agentWidth, agent, status)
 	parts := []string{top, title}
 	style := rowStyle(card.Status, false).
@@ -186,16 +220,55 @@ func renderCard(card sessionview.SessionCard, width int, selected, _ bool, _ ses
 	return style.Render(strings.Join(parts, "\n"))
 }
 
+func cardAgent(card sessionview.SessionCard, expanded bool) string {
+	agent := strings.ToLower(card.Agent)
+	if marker := cardMarker(card, expanded); marker != "" {
+		return marker + " " + agent
+	}
+	return agent
+}
+
+func cardMarker(card sessionview.SessionCard, expanded bool) string {
+	switch {
+	case card.ParentSessionID != "":
+		return ""
+	case card.ChildCount > 0 && expanded:
+		return "-"
+	case card.ChildCount > 0:
+		return "+"
+	default:
+		return ""
+	}
+}
+
+func cardSubtitle(card sessionview.SessionCard) string {
+	if card.Subtitle == "-" {
+		return ""
+	}
+	return card.Subtitle
+}
+
 func compactCardLine(title, subtitle string, width int) string {
 	if subtitle == "" {
-		return truncate(title, width)
+		return sessionNameStyle.Render(truncate(title, width))
 	}
 	subtitle = truncate(subtitle, max(width-5, 1))
-	spaceForTitle := width - len([]rune(subtitle)) - 1
-	if spaceForTitle < 4 {
-		return truncate(subtitle, width)
+	subtitleWidth := len([]rune(subtitle))
+	titleWidth := width - subtitleWidth - 1
+	if titleWidth < 4 {
+		return leftPad(truncate(subtitle, width), width)
 	}
-	return truncate(title, spaceForTitle) + " " + subtitle
+	title = truncate(title, titleWidth)
+	padding := strings.Repeat(" ", max(titleWidth-len([]rune(title)), 0))
+	return sessionNameStyle.Render(title) + padding + " " + subtitle
+}
+
+func leftPad(s string, width int) string {
+	padding := width - len([]rune(s))
+	if padding <= 0 {
+		return s
+	}
+	return strings.Repeat(" ", padding) + s
 }
 
 func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
@@ -203,7 +276,7 @@ func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
 		return dimStyle.Render("select a session")
 	}
 	lines := []string{
-		accentStyle.Render(detail.Title),
+		sessionNameStyle.Render(detail.Title),
 		rowStyle(detail.Status, false).Render(detail.Agent + " " + detail.Status),
 		sectionDivider(width),
 		headerStyle.Render("Metadata"),
@@ -219,14 +292,29 @@ func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
 		return strings.Join(lines, "\n")
 	}
 	for _, msg := range detail.Conversation {
-		label := "User"
-		if msg.Role == "assistant" {
-			label = "AI"
-		}
-		line := fmt.Sprintf("%-4s %s", label, msg.Text)
-		lines = append(lines, truncate(line, width))
+		lines = append(lines, renderConversationLine(msg, width))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func renderConversationLine(msg sessionview.ConversationMessage, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	label := conversationLabel(msg.Role)
+	labelText := fmt.Sprintf("%-*s", roleLabelWidth, label)
+	labelWidth := lipgloss.Width(labelText)
+	if labelWidth >= width {
+		return roleStyle.Render(truncate(labelText, width))
+	}
+	return roleStyle.Render(labelText) + " " + truncate(msg.Text, width-labelWidth-1)
+}
+
+func conversationLabel(role string) string {
+	if role == "assistant" {
+		return "Agent"
+	}
+	return "User"
 }
 
 func sectionDivider(width int) string {
@@ -264,6 +352,17 @@ func renderMetadata(fields []sessionview.Field, width int) []string {
 		}
 	}
 	return lines
+}
+
+func verticalDivider(height int) string {
+	if height <= 0 {
+		return ""
+	}
+	lines := make([]string, height)
+	for i := range lines {
+		lines[i] = dimStyle.Render("│")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func metadataField(field sessionview.Field, width int) string {
@@ -321,7 +420,15 @@ func (m uiModel) View() string {
 			rightContent = renderSessionDetail(rightDetail, rightW)
 		}
 		right := lipgloss.NewStyle().Width(rightW).Render(rightContent)
-		head.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", paneGap), right))
+		divider := verticalDivider(m.cardPaneHeight())
+		head.WriteString(lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			left,
+			strings.Repeat(" ", paneGap),
+			divider,
+			strings.Repeat(" ", paneGap),
+			right,
+		))
 	}
 
 	inner := head.String()
@@ -354,6 +461,7 @@ func (m uiModel) View() string {
 	} else {
 		keymap = strings.Join([]string{
 			keyHint("↑/↓", "select"),
+			keyHint("space", "expand"),
 			keyHint("enter", "focus"),
 			keyHint("n", "note"),
 			keyHint("s", "sort:"+m.sort.String()),

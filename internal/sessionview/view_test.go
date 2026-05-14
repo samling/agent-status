@@ -43,12 +43,28 @@ func seedStore(t *testing.T) *state.Store {
 	return store
 }
 
+func insertTestSession(t *testing.T, store *state.Store, id string) {
+	t.Helper()
+	_, err := store.InsertSession(context.Background(), state.Session{
+		SessionID:   id,
+		Agent:       state.AgentCodex,
+		PID:         1234,
+		FirstSeenAt: "2026-05-14T10:00:00Z",
+		LastEvent:   state.EventDiscovered,
+		LastEventAt: "2026-05-14T10:01:00Z",
+		StatusAt:    "2026-05-14T10:01:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCardsIncludeAgentStatusTitleAndHint(t *testing.T) {
 	store := seedStore(t)
 	p := Provider{
 		Store: store,
 		Meta: fakeMeta{meta: map[string]source.SessionMeta{
-			"session-1": {Cwd: "/home/test/github/agent-status", WaitingFor: "approve shell"},
+			"session-1": {Name: "Compare lazyagent to agent-status", Cwd: "/home/test/github/agent-status", WaitingFor: "approve shell"},
 		}},
 	}
 
@@ -63,8 +79,8 @@ func TestCardsIncludeAgentStatusTitleAndHint(t *testing.T) {
 	if card.Agent != state.AgentCodex || card.Status != "active" {
 		t.Fatalf("card identity = %#v", card)
 	}
-	if card.Title != "agent-status" {
-		t.Fatalf("Title = %q, want agent-status", card.Title)
+	if card.Title != "Compare lazyagent to agent-status" {
+		t.Fatalf("Title = %q, want Compare lazyagent to agent-status", card.Title)
 	}
 	if card.Subtitle != "approve shell" {
 		t.Fatalf("Subtitle = %q, want approve shell", card.Subtitle)
@@ -82,7 +98,7 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 		NotesPath: notesPath,
 		Meta: fakeMeta{
 			meta: map[string]source.SessionMeta{
-				"session-1": {Cwd: "/home/test/github/agent-status", Model: "gpt-5.5", Version: "0.128.0", PID: 1234},
+				"session-1": {Name: "Useful session name", Cwd: "/home/test/github/agent-status", Model: "gpt-5.5", Version: "0.128.0", PID: 1234},
 			},
 			transcript: source.TranscriptInfo{
 				GitBranch: "feature/ui",
@@ -101,11 +117,54 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 	if got := fieldValue(detail.Metadata, "note"); got != "follow up" {
 		t.Fatalf("note field = %q, want follow up", got)
 	}
+	if detail.Title != "Useful session name" {
+		t.Fatalf("Title = %q, want Useful session name", detail.Title)
+	}
+	if got := fieldValue(detail.Metadata, "session"); got != "Useful session name" {
+		t.Fatalf("session field = %q, want Useful session name", got)
+	}
+	if got := fieldValue(detail.Metadata, "session id"); got != "session-1" {
+		t.Fatalf("session id field = %q, want session-1", got)
+	}
+	assertFieldOrder(t, detail.Metadata, []string{"agent", "version", "session", "session id", "model", "branch"})
 	if got := fieldValue(detail.Metadata, "branch"); got != "feature/ui" {
 		t.Fatalf("branch field = %q, want feature/ui", got)
 	}
 	if len(detail.Conversation) != 2 || detail.Conversation[0].Text != "newer" || detail.Conversation[1].Text != "older" {
 		t.Fatalf("conversation order = %#v", detail.Conversation)
+	}
+}
+
+func TestCardsExposeChildrenAndDropOrphans(t *testing.T) {
+	store := seedStore(t)
+	insertTestSession(t, store, "child-1")
+	insertTestSession(t, store, "orphan-1")
+	p := Provider{
+		Store: store,
+		Meta: fakeMeta{meta: map[string]source.SessionMeta{
+			"session-1": {Name: "parent", ChildCount: 2, OpenChildCount: 1},
+			"child-1":   {Name: "child", ParentSessionID: "session-1", ChildStatus: "open"},
+			"orphan-1":  {Name: "orphan", ParentSessionID: "missing"},
+		}},
+	}
+
+	cards, err := p.Cards(context.Background())
+	if err != nil {
+		t.Fatalf("Cards() error = %v", err)
+	}
+	if len(cards) != 2 {
+		t.Fatalf("len(Cards()) = %d, want 2: %#v", len(cards), cards)
+	}
+	parent := cardByID(cards, "session-1")
+	if parent.ChildCount != 2 || parent.OpenChildCount != 1 {
+		t.Fatalf("parent child counts = %d/%d, want 2/1", parent.ChildCount, parent.OpenChildCount)
+	}
+	child := cardByID(cards, "child-1")
+	if child.ParentSessionID != "session-1" || child.ChildStatus != "open" {
+		t.Fatalf("child grouping = %#v", child)
+	}
+	if got := cardByID(cards, "orphan-1"); got.SessionID != "" {
+		t.Fatalf("orphan card should be filtered, got %#v", got)
 	}
 }
 
@@ -199,4 +258,33 @@ func fieldValue(fields []Field, label string) string {
 		}
 	}
 	return ""
+}
+
+func assertFieldOrder(t *testing.T, fields []Field, want []string) {
+	t.Helper()
+	if len(fields) < len(want) {
+		t.Fatalf("metadata labels = %#v, want prefix %#v", fieldLabels(fields), want)
+	}
+	for i, label := range want {
+		if fields[i].Label != label {
+			t.Fatalf("metadata labels = %#v, want prefix %#v", fieldLabels(fields), want)
+		}
+	}
+}
+
+func fieldLabels(fields []Field) []string {
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		out = append(out, field.Label)
+	}
+	return out
+}
+
+func cardByID(cards []SessionCard, id string) SessionCard {
+	for _, card := range cards {
+		if card.SessionID == id {
+			return card
+		}
+	}
+	return SessionCard{}
 }
