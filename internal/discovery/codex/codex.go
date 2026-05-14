@@ -690,8 +690,9 @@ func parsePID(processUUID string) int {
 // Rollout-line shapes used by Scan to extract session metadata. The shared
 // transcript parsers in the parent discovery package use their own copies.
 type transcriptLine struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Type      string          `json:"type"`
+	Timestamp string          `json:"timestamp,omitempty"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
 type sessionMeta struct {

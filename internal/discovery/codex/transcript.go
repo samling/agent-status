@@ -63,9 +63,21 @@ func parseTranscript(path string) (source.TranscriptInfo, error) {
 			switch payload.Role {
 			case "assistant":
 				info.TurnCount++
+				if text := source.ExtractTextContent(payload.Content); text != "" {
+					source.AppendConversationMessage(&info, source.ConversationMessage{
+						Role:      "assistant",
+						Text:      source.OneLinePreview(text, 120),
+						Timestamp: line.Timestamp,
+					})
+				}
 			case "user":
 				if prompt := source.ExtractUserPrompt(payload.Content); prompt != "" {
 					info.LastUserPrompt = prompt
+					source.AppendConversationMessage(&info, source.ConversationMessage{
+						Role:      "user",
+						Text:      source.OneLinePreview(prompt, 120),
+						Timestamp: line.Timestamp,
+					})
 				}
 			}
 		case "event_msg":

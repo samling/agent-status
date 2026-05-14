@@ -66,6 +66,13 @@ func parseTranscript(path string) (source.TranscriptInfo, error) {
 			if line.Version != "" {
 				info.Version = line.Version
 			}
+			if text := source.ExtractTextContent(line.Message.Content); text != "" {
+				source.AppendConversationMessage(&info, source.ConversationMessage{
+					Role:      "assistant",
+					Text:      source.OneLinePreview(text, 120),
+					Timestamp: line.Timestamp,
+				})
+			}
 		case "permission-mode":
 			if line.PermissionMode != "" {
 				info.PermissionMode = line.PermissionMode
@@ -76,6 +83,11 @@ func parseTranscript(path string) (source.TranscriptInfo, error) {
 			}
 			if prompt := source.ExtractUserPrompt(line.Message.Content); prompt != "" {
 				info.LastUserPrompt = prompt
+				source.AppendConversationMessage(&info, source.ConversationMessage{
+					Role:      "user",
+					Text:      source.OneLinePreview(prompt, 120),
+					Timestamp: line.Timestamp,
+				})
 			}
 		}
 		return true
@@ -87,6 +99,7 @@ func parseTranscript(path string) (source.TranscriptInfo, error) {
 
 type transcriptLine struct {
 	Type           string `json:"type"`
+	Timestamp      string `json:"timestamp,omitempty"`
 	PermissionMode string `json:"permissionMode,omitempty"`
 	GitBranch      string `json:"gitBranch,omitempty"`
 	Version        string `json:"version,omitempty"`
