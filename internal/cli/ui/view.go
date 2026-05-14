@@ -34,7 +34,6 @@ const (
 	cardPaddingCols = 2
 	cardBodyLines   = 3
 	cardBorderRows  = 2
-	cardGapRows     = 1
 )
 
 func rowStyle(status string, selected bool) lipgloss.Style {
@@ -112,9 +111,6 @@ func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) 
 	end := offset
 	for end < len(m.cards) {
 		nextHeight := m.cardHeight(m.cards[end], selectedID)
-		if end > offset {
-			nextHeight += cardGapRows
-		}
 		if end > offset && used+nextHeight > budget {
 			break
 		}
@@ -142,10 +138,7 @@ func (m uiModel) renderCards(width int, selectedID string) string {
 		return strings.Join(lines, "\n")
 	}
 	start, end := m.visibleCardRangeFrom(m.scrollOffset, selectedID)
-	for i, card := range m.cards[start:end] {
-		if i > 0 {
-			lines = append(lines, "")
-		}
+	for _, card := range m.cards[start:end] {
 		selected := card.SessionID == selectedID
 		lines = append(lines, renderCard(card, width, selected, m.detailFor == card.SessionID, m.detail))
 	}
@@ -172,7 +165,7 @@ func renderCard(card sessionview.SessionCard, width int, selected, _ bool, _ ses
 	subtitle := truncate(card.Subtitle, contentWidth)
 	top := fmt.Sprintf("%-*s %s", agentWidth, agent, status)
 	parts := []string{top, title, subtitle}
-	style := rowStyle(card.Status, selected).
+	style := rowStyle(card.Status, false).
 		Width(boxWidth).
 		Padding(0, 1).
 		Border(lipgloss.RoundedBorder()).

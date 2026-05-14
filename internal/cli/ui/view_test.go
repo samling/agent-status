@@ -105,7 +105,26 @@ func TestSelectedCardKeepsFixedHeightAndOmitsPreview(t *testing.T) {
 	}
 }
 
-func TestRenderCardsAddsBordersAndSpacing(t *testing.T) {
+func TestSelectedCardUsesBorderAccentWithoutInnerBackground(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	card := sessionview.SessionCard{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "agent-status",
+		Subtitle:  "UserPromptSubmit",
+	}
+
+	out := renderCard(card, 36, true, false, sessionview.SessionDetail{})
+	if strings.Contains(out, "48;5;237") {
+		t.Fatalf("selected card should not render an inner background block; output:\n%q", out)
+	}
+}
+
+func TestRenderCardsAddsCompactBorders(t *testing.T) {
 	m := uiModel{
 		width:  90,
 		height: 24,
@@ -120,8 +139,11 @@ func TestRenderCardsAddsBordersAndSpacing(t *testing.T) {
 	if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") {
 		t.Fatalf("renderCards() missing card borders; output:\n%s", out)
 	}
-	if !strings.Contains(out, "╯\n\n╭") {
-		t.Fatalf("renderCards() missing blank line between bordered cards; output:\n%s", out)
+	if strings.Contains(out, "╯\n\n╭") {
+		t.Fatalf("renderCards() has too much space between cards; output:\n%s", out)
+	}
+	if !strings.Contains(out, "╯\n╭") {
+		t.Fatalf("renderCards() should keep cards compactly stacked; output:\n%s", out)
 	}
 }
 
