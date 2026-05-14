@@ -28,10 +28,13 @@ func keyHint(key, desc string) string {
 }
 
 const (
-	minLeftPane  = 24
-	maxLeftPane  = 46
-	paneGap      = 2
-	cardPadWidth = 2
+	minLeftPane     = 24
+	maxLeftPane     = 46
+	paneGap         = 2
+	cardPaddingCols = 2
+	cardBodyLines   = 3
+	cardBorderRows  = 2
+	cardGapRows     = 1
 )
 
 func rowStyle(status string, selected bool) lipgloss.Style {
@@ -83,12 +86,8 @@ func (m uiModel) cardPaneHeight() int {
 	return height
 }
 
-func (m uiModel) cardHeight(card sessionview.SessionCard, selectedID string) int {
-	height := 3
-	if card.SessionID == selectedID && m.detailFor == card.SessionID && len(m.detail.Conversation) > 0 {
-		height++
-	}
-	return height
+func (m uiModel) cardHeight(_ sessionview.SessionCard, _ string) int {
+	return cardBodyLines + cardBorderRows
 }
 
 func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) {
@@ -112,11 +111,14 @@ func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) 
 	used := 0
 	end := offset
 	for end < len(m.cards) {
-		cardHeight := m.cardHeight(m.cards[end], selectedID)
-		if end > offset && used+cardHeight > budget {
+		nextHeight := m.cardHeight(m.cards[end], selectedID)
+		if end > offset {
+			nextHeight += cardGapRows
+		}
+		if end > offset && used+nextHeight > budget {
 			break
 		}
-		used += cardHeight
+		used += nextHeight
 		end++
 	}
 	if end == offset {
@@ -140,29 +142,45 @@ func (m uiModel) renderCards(width int, selectedID string) string {
 		return strings.Join(lines, "\n")
 	}
 	start, end := m.visibleCardRangeFrom(m.scrollOffset, selectedID)
-	for _, card := range m.cards[start:end] {
+	for i, card := range m.cards[start:end] {
+		if i > 0 {
+			lines = append(lines, "")
+		}
 		selected := card.SessionID == selectedID
 		lines = append(lines, renderCard(card, width, selected, m.detailFor == card.SessionID, m.detail))
 	}
 	return strings.Join(lines, "\n")
 }
 
-func renderCard(card sessionview.SessionCard, width int, selected, hasDetail bool, detail sessionview.SessionDetail) string {
+func renderCard(card sessionview.SessionCard, width int, selected, _ bool, _ sessionview.SessionDetail) string {
 	if width < 10 {
 		width = 10
 	}
+	boxWidth := width - 2
+	if boxWidth < 8 {
+		boxWidth = 8
+	}
+	contentWidth := boxWidth - cardPaddingCols
+	if contentWidth < 4 {
+		contentWidth = 4
+	}
 	agent := strings.ToUpper(card.Agent)
 	status := card.Status
-	title := truncate(card.Title, width-cardPadWidth)
-	subtitle := truncate(card.Subtitle, width-cardPadWidth)
-	top := fmt.Sprintf("%-*s %s", max(width-len(status)-1, 1), agent, status)
+	agentWidth := max(contentWidth-len(status)-1, 1)
+	agent = truncate(agent, agentWidth)
+	title := truncate(card.Title, contentWidth)
+	subtitle := truncate(card.Subtitle, contentWidth)
+	top := fmt.Sprintf("%-*s %s", agentWidth, agent, status)
 	parts := []string{top, title, subtitle}
-	if selected && hasDetail && len(detail.Conversation) > 0 {
-		preview := detail.Conversation[0].Role + ": " + detail.Conversation[0].Text
-		parts = append(parts, truncate(preview, width-cardPadWidth))
+	style := rowStyle(card.Status, selected).
+		Width(boxWidth).
+		Padding(0, 1).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240"))
+	if selected {
+		style = style.BorderForeground(lipgloss.Color("12"))
 	}
-	body := strings.Join(parts, "\n")
-	return rowStyle(card.Status, selected).Render(body)
+	return style.Render(strings.Join(parts, "\n"))
 }
 
 func renderSessionDetail(detail sessionview.SessionDetail, width int) string {

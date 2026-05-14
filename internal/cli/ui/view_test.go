@@ -31,7 +31,7 @@ func TestViewTruncatesLongCardTitle(t *testing.T) {
 	if strings.Contains(out, longTitle) {
 		t.Fatalf("View() contains untruncated title %q", longTitle)
 	}
-	if !strings.Contains(out, "a-very-long-project-...") {
+	if !strings.Contains(out, "a-very-long-projec...") {
 		t.Fatalf("View() missing truncated title; output:\n%s", out)
 	}
 	if !strings.Contains(out, "UserPromptSubmit") {
@@ -77,6 +77,51 @@ func TestViewShowsSessionCardsAndRightPaneDetail(t *testing.T) {
 	}
 	if strings.Index(out, "newest") > strings.Index(out, "older") {
 		t.Fatalf("conversation not newest first; output:\n%s", out)
+	}
+}
+
+func TestSelectedCardKeepsFixedHeightAndOmitsPreview(t *testing.T) {
+	card := sessionview.SessionCard{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "agent-status",
+		Subtitle:  "UserPromptSubmit",
+	}
+	detail := sessionview.SessionDetail{
+		SessionID: "s1",
+		Conversation: []sessionview.ConversationMessage{
+			{Role: "user", Text: "newest"},
+		},
+	}
+
+	selected := renderCard(card, 36, true, true, detail)
+	plain := renderCard(card, 36, false, false, sessionview.SessionDetail{})
+	if strings.Contains(selected, "user: newest") {
+		t.Fatalf("selected card should not include conversation preview; output:\n%s", selected)
+	}
+	if lipgloss.Height(selected) != lipgloss.Height(plain) {
+		t.Fatalf("selected card height = %d, plain height = %d", lipgloss.Height(selected), lipgloss.Height(plain))
+	}
+}
+
+func TestRenderCardsAddsBordersAndSpacing(t *testing.T) {
+	m := uiModel{
+		width:  90,
+		height: 24,
+		cards: []sessionview.SessionCard{
+			{SessionID: "s1", Agent: "codex", Status: "active", Title: "first", Subtitle: "ready"},
+			{SessionID: "s2", Agent: "claude-code", Status: "waiting", Title: "second", Subtitle: "approve Bash"},
+		},
+		selectedID: "s1",
+	}
+
+	out := m.renderCards(36, "s1")
+	if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") {
+		t.Fatalf("renderCards() missing card borders; output:\n%s", out)
+	}
+	if !strings.Contains(out, "╯\n\n╭") {
+		t.Fatalf("renderCards() missing blank line between bordered cards; output:\n%s", out)
 	}
 }
 
