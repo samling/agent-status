@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/samling/agent-status/internal/discovery/source"
+	"github.com/samling/agent-status/internal/sessionview"
 	"github.com/samling/agent-status/internal/state"
 	"github.com/samling/agent-status/internal/version"
 )
@@ -39,11 +40,33 @@ func (nopMeta) Transcript(string, string, source.SessionMeta) (source.Transcript
 	return source.TranscriptInfo{}, nil
 }
 
+type ViewProvider interface {
+	Cards(context.Context) ([]sessionview.SessionCard, error)
+	Detail(context.Context, string) (sessionview.SessionDetail, error)
+}
+
+type nopViews struct{}
+
+func (nopViews) Cards(context.Context) ([]sessionview.SessionCard, error) {
+	return []sessionview.SessionCard{}, nil
+}
+
+func (nopViews) Detail(context.Context, string) (sessionview.SessionDetail, error) {
+	return sessionview.SessionDetail{}, state.ErrSessionNotFound
+}
+
 // Handler builds the HTTP mux. mp may be nil; when nil, the meta-backed
 // endpoints respond with empty payloads.
 func Handler(s *state.Store, mp MetaProvider) http.Handler {
+	return HandlerWithViews(s, mp, nopViews{})
+}
+
+func HandlerWithViews(s *state.Store, mp MetaProvider, vp ViewProvider) http.Handler {
 	if mp == nil {
 		mp = nopMeta{}
+	}
+	if vp == nil {
+		vp = nopViews{}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hook", makeHookHandler(s))
@@ -51,9 +74,42 @@ func Handler(s *state.Store, mp MetaProvider) http.Handler {
 	mux.HandleFunc("GET /state/{session_id}", makeStateOneHandler(s))
 	mux.HandleFunc("GET /state/{session_id}/transcript", makeTranscriptHandler(s, mp))
 	mux.HandleFunc("GET /meta", makeMetaHandler(mp))
+	mux.HandleFunc("GET /views/sessions", makeSessionCardsHandler(vp))
+	mux.HandleFunc("GET /views/sessions/{session_id}", makeSessionDetailHandler(vp))
 	mux.HandleFunc("GET /healthz", makeHealthHandler())
 	mux.HandleFunc("GET /version", makeVersionHandler())
 	return logMiddleware(mux)
+}
+
+func makeSessionCardsHandler(vp ViewProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cards, err := vp.Cards(r.Context())
+		if err != nil {
+			http.Error(w, "session views failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(r.Context(), w, http.StatusOK, cards)
+	}
+}
+
+func makeSessionDetailHandler(vp ViewProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("session_id")
+		if id == "" {
+			http.Error(w, "missing session_id", http.StatusBadRequest)
+			return
+		}
+		detail, err := vp.Detail(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, state.ErrSessionNotFound) {
+				http.Error(w, "session not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "session detail failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(r.Context(), w, http.StatusOK, detail)
+	}
 }
 
 func makeMetaHandler(mp MetaProvider) http.HandlerFunc {

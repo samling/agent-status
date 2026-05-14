@@ -17,6 +17,7 @@ import (
 
 	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/focus"
+	"github.com/samling/agent-status/internal/sessionview"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -44,6 +45,22 @@ func (c *Client) Sessions(ctx context.Context) ([]state.Session, error) {
 	var out []state.Session
 	if err := c.getJSON(ctx, "/state", &out); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) SessionCards(ctx context.Context) ([]sessionview.SessionCard, error) {
+	var out []sessionview.SessionCard
+	if err := c.getJSON(ctx, "/views/sessions", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) SessionDetail(ctx context.Context, id string) (sessionview.SessionDetail, error) {
+	var out sessionview.SessionDetail
+	if err := c.getJSON(ctx, "/views/sessions/"+id, &out); err != nil {
+		return sessionview.SessionDetail{}, err
 	}
 	return out, nil
 }
