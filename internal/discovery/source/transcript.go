@@ -6,9 +6,19 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
+
+const MaxConversationMessages = 12
+
+// ConversationMessage is a single transcript message preview.
+type ConversationMessage struct {
+	Role      string `json:"role"`
+	Text      string `json:"text"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
 
 // TranscriptInfo summarizes one agent transcript.
 type TranscriptInfo struct {
@@ -22,6 +32,7 @@ type TranscriptInfo struct {
 	CacheCreationTokens int64
 	CacheReadTokens     int64
 	LastUserPrompt      string // raw text of the most recent user-typed prompt
+	RecentMessages      []ConversationMessage
 }
 
 // LoadTranscriptPath stat-caches a transcript file and runs parse on cache miss.
@@ -52,6 +63,52 @@ func LoadTranscriptPath(path string, parse func(string) (TranscriptInfo, error))
 	transcriptMu.Unlock()
 
 	return info, nil
+}
+
+func AppendConversationMessage(info *TranscriptInfo, msg ConversationMessage) {
+	if info == nil || msg.Role == "" || msg.Text == "" {
+		return
+	}
+	info.RecentMessages = append(info.RecentMessages, msg)
+	if len(info.RecentMessages) > MaxConversationMessages {
+		info.RecentMessages = info.RecentMessages[len(info.RecentMessages)-MaxConversationMessages:]
+	}
+}
+
+func OneLinePreview(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if max <= 0 || len([]rune(s)) <= max {
+		return s
+	}
+	r := []rune(s)
+	if max <= 3 {
+		return string(r[:max])
+	}
+	return string(r[:max-3]) + "..."
+}
+
+func ExtractTextContent(content json.RawMessage) string {
+	if len(content) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(content, &s); err == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &blocks); err == nil {
+		parts := make([]string, 0, len(blocks))
+		for _, b := range blocks {
+			if (b.Type == "text" || b.Type == "input_text" || b.Type == "output_text") && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
 }
 
 type cachedTranscript struct {
@@ -94,24 +151,5 @@ func ScanJSONL(r io.Reader, fn func(line []byte) bool) error {
 // ExtractUserPrompt returns typed text from a transcript user message,
 // ignoring tool results and other non-typed content.
 func ExtractUserPrompt(content json.RawMessage) string {
-	if len(content) == 0 {
-		return ""
-	}
-	// Most typed prompts are stored as a plain string.
-	var s string
-	if err := json.Unmarshal(content, &s); err == nil {
-		return s
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(content, &blocks); err == nil {
-		for _, b := range blocks {
-			if (b.Type == "text" || b.Type == "input_text") && b.Text != "" {
-				return b.Text
-			}
-		}
-	}
-	return ""
+	return ExtractTextContent(content)
 }
