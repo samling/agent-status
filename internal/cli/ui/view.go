@@ -72,13 +72,75 @@ func (m uiModel) paneWidths() (int, int) {
 	return left, right
 }
 
+func (m uiModel) cardPaneHeight() int {
+	if m.height <= 0 {
+		return 0
+	}
+	height := m.height - 6
+	if height < 2 {
+		return 2
+	}
+	return height
+}
+
+func (m uiModel) cardHeight(card sessionview.SessionCard, selectedID string) int {
+	height := 3
+	if card.SessionID == selectedID && m.detailFor == card.SessionID && len(m.detail.Conversation) > 0 {
+		height++
+	}
+	return height
+}
+
+func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) {
+	if len(m.cards) == 0 {
+		return 0, 0
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(m.cards) {
+		offset = len(m.cards) - 1
+	}
+	height := m.cardPaneHeight()
+	if height == 0 {
+		return 0, len(m.cards)
+	}
+	budget := height - 1
+	if budget < 1 {
+		return offset, offset + 1
+	}
+	used := 0
+	end := offset
+	for end < len(m.cards) {
+		cardHeight := m.cardHeight(m.cards[end], selectedID)
+		if end > offset && used+cardHeight > budget {
+			break
+		}
+		used += cardHeight
+		end++
+	}
+	if end == offset {
+		end = offset + 1
+	}
+	return offset, end
+}
+
 func (m uiModel) renderCards(width int, selectedID string) string {
-	lines := []string{headerStyle.Render("Sessions")}
+	title := "Sessions"
+	if len(m.cards) > 0 {
+		if idx := cardIndex(m.cards, selectedID); idx >= 0 {
+			title = fmt.Sprintf("Sessions %d/%d", idx+1, len(m.cards))
+		} else {
+			title = fmt.Sprintf("Sessions %d", len(m.cards))
+		}
+	}
+	lines := []string{headerStyle.Render(title)}
 	if len(m.cards) == 0 {
 		lines = append(lines, dimStyle.Render("(no live sessions)"))
 		return strings.Join(lines, "\n")
 	}
-	for _, card := range m.cards {
+	start, end := m.visibleCardRangeFrom(m.scrollOffset, selectedID)
+	for _, card := range m.cards[start:end] {
 		selected := card.SessionID == selectedID
 		lines = append(lines, renderCard(card, width, selected, m.detailFor == card.SessionID, m.detail))
 	}

@@ -121,6 +121,7 @@ type uiModel struct {
 	cards          []sessionview.SessionCard
 	notes          map[string]string
 	selectedID     string
+	scrollOffset   int
 	sort           sortMode
 	width          int
 	height         int
@@ -147,6 +148,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.keepSelectionVisible()
 	case tea.KeyMsg:
 		if m.inputMode {
 			switch msg.String() {
@@ -191,8 +193,12 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 		case "s":
+			if m.selectedID == "" {
+				m.selectedID = m.activeSelectionID()
+			}
 			m.sort = m.sort.next()
 			sortCards(m.cards, m.sort)
+			m.keepSelectionVisible()
 		case "n":
 			m = m.beginNote()
 		case "?":
@@ -209,6 +215,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedID != "" && !cardsContain(m.cards, m.selectedID) {
 			m.selectedID = ""
 		}
+		m.keepSelectionVisible()
 		activeID := m.selectedID
 		if activeID == "" && len(m.cards) > 0 {
 			activeID = m.cards[0].SessionID

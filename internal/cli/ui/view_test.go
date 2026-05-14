@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -76,6 +77,43 @@ func TestViewShowsSessionCardsAndRightPaneDetail(t *testing.T) {
 	}
 	if strings.Index(out, "newest") > strings.Index(out, "older") {
 		t.Fatalf("conversation not newest first; output:\n%s", out)
+	}
+}
+
+func TestMoveSelectionScrollsSelectedCardIntoView(t *testing.T) {
+	cards := make([]sessionview.SessionCard, 12)
+	for i := range cards {
+		cards[i] = sessionview.SessionCard{
+			SessionID: fmt.Sprintf("s%02d", i),
+			Agent:     "codex",
+			Status:    "active",
+			Title:     fmt.Sprintf("session-%02d", i),
+			Subtitle:  "UserPromptSubmit",
+		}
+	}
+	m := uiModel{
+		width:      80,
+		height:     12,
+		cards:      cards,
+		selectedID: "s00",
+	}
+
+	for i := 0; i < 9; i++ {
+		m.moveSelection(+1)
+	}
+
+	if m.scrollOffset == 0 {
+		t.Fatal("scrollOffset stayed at 0, want selected card scrolled into view")
+	}
+	out := m.View()
+	if !strings.Contains(out, "session-09") {
+		t.Fatalf("View() missing selected card; output:\n%s", out)
+	}
+	if strings.Contains(out, "session-00") {
+		t.Fatalf("View() still shows first card after scrolling; output:\n%s", out)
+	}
+	if !strings.Contains(out, "10/12") {
+		t.Fatalf("View() missing position hint; output:\n%s", out)
 	}
 }
 

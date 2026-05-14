@@ -15,6 +15,7 @@ import (
 func (m *uiModel) moveSelection(delta int) {
 	if len(m.cards) == 0 {
 		m.selectedID = ""
+		m.scrollOffset = 0
 		return
 	}
 	cur := 0
@@ -31,6 +32,7 @@ func (m *uiModel) moveSelection(delta int) {
 		next = len(m.cards) - 1
 	}
 	m.selectedID = m.cards[next].SessionID
+	m.keepSelectionVisible()
 }
 
 func (m uiModel) activeSelectionID() string {
@@ -50,6 +52,55 @@ func cardsContain(cards []sessionview.SessionCard, id string) bool {
 		}
 	}
 	return false
+}
+
+func cardIndex(cards []sessionview.SessionCard, id string) int {
+	for i, c := range cards {
+		if c.SessionID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *uiModel) clampCardScroll() {
+	if len(m.cards) == 0 {
+		m.scrollOffset = 0
+		return
+	}
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	}
+	if m.scrollOffset >= len(m.cards) {
+		m.scrollOffset = len(m.cards) - 1
+	}
+}
+
+func (m *uiModel) keepSelectionVisible() {
+	m.clampCardScroll()
+	if len(m.cards) == 0 {
+		return
+	}
+	id := m.selectedID
+	if id == "" {
+		id = m.cards[0].SessionID
+	}
+	idx := cardIndex(m.cards, id)
+	if idx < 0 {
+		return
+	}
+	if idx < m.scrollOffset {
+		m.scrollOffset = idx
+		return
+	}
+	for m.scrollOffset < idx {
+		_, end := m.visibleCardRangeFrom(m.scrollOffset, id)
+		if idx < end {
+			break
+		}
+		m.scrollOffset++
+	}
+	m.clampCardScroll()
 }
 
 func (m uiModel) beginNote() uiModel {
