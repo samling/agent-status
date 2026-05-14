@@ -31,7 +31,7 @@ func TestViewTruncatesLongCardTitle(t *testing.T) {
 	if strings.Contains(out, longTitle) {
 		t.Fatalf("View() contains untruncated title %q", longTitle)
 	}
-	if !strings.Contains(out, "a-very-long-projec...") {
+	if !strings.Contains(out, "a...") {
 		t.Fatalf("View() missing truncated title; output:\n%s", out)
 	}
 	if !strings.Contains(out, "UserPromptSubmit") {
@@ -103,6 +103,9 @@ func TestSelectedCardKeepsFixedHeightAndOmitsPreview(t *testing.T) {
 	if lipgloss.Height(selected) != lipgloss.Height(plain) {
 		t.Fatalf("selected card height = %d, plain height = %d", lipgloss.Height(selected), lipgloss.Height(plain))
 	}
+	if lipgloss.Height(selected) != 4 {
+		t.Fatalf("selected card height = %d, want 4", lipgloss.Height(selected))
+	}
 }
 
 func TestSelectedCardUsesBorderAccentWithoutInnerBackground(t *testing.T) {
@@ -147,6 +150,25 @@ func TestRenderCardsAddsCompactBorders(t *testing.T) {
 	}
 }
 
+func TestRenderSessionDetailUsesSectionDividers(t *testing.T) {
+	out := renderSessionDetail(sessionview.SessionDetail{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "agent-status",
+		Metadata: []sessionview.Field{
+			{Label: "model", Value: "gpt-5.5"},
+		},
+		Conversation: []sessionview.ConversationMessage{
+			{Role: "user", Text: "hello"},
+		},
+	}, 40)
+
+	if strings.Count(out, "────────") < 2 {
+		t.Fatalf("renderSessionDetail() missing section dividers; output:\n%s", out)
+	}
+}
+
 func TestMoveSelectionScrollsSelectedCardIntoView(t *testing.T) {
 	cards := make([]sessionview.SessionCard, 12)
 	for i := range cards {
@@ -155,7 +177,6 @@ func TestMoveSelectionScrollsSelectedCardIntoView(t *testing.T) {
 			Agent:     "codex",
 			Status:    "active",
 			Title:     fmt.Sprintf("session-%02d", i),
-			Subtitle:  "UserPromptSubmit",
 		}
 	}
 	m := uiModel{

@@ -32,7 +32,7 @@ const (
 	maxLeftPane     = 46
 	paneGap         = 2
 	cardPaddingCols = 2
-	cardBodyLines   = 3
+	cardBodyLines   = 2
 	cardBorderRows  = 2
 )
 
@@ -48,6 +48,20 @@ func rowStyle(status string, selected bool) lipgloss.Style {
 		s = s.Background(selectedBG)
 	}
 	return s
+}
+
+func cardBorderColor(status string, selected bool) lipgloss.Color {
+	if selected {
+		return lipgloss.Color("12")
+	}
+	switch status {
+	case "active":
+		return lipgloss.Color("10")
+	case "waiting":
+		return lipgloss.Color("11")
+	default:
+		return lipgloss.Color("240")
+	}
 }
 
 func (m uiModel) paneWidths() (int, int) {
@@ -161,19 +175,27 @@ func renderCard(card sessionview.SessionCard, width int, selected, _ bool, _ ses
 	status := card.Status
 	agentWidth := max(contentWidth-len(status)-1, 1)
 	agent = truncate(agent, agentWidth)
-	title := truncate(card.Title, contentWidth)
-	subtitle := truncate(card.Subtitle, contentWidth)
+	title := compactCardLine(card.Title, card.Subtitle, contentWidth)
 	top := fmt.Sprintf("%-*s %s", agentWidth, agent, status)
-	parts := []string{top, title, subtitle}
+	parts := []string{top, title}
 	style := rowStyle(card.Status, false).
 		Width(boxWidth).
 		Padding(0, 1).
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("240"))
-	if selected {
-		style = style.BorderForeground(lipgloss.Color("12"))
-	}
+		BorderForeground(cardBorderColor(card.Status, selected))
 	return style.Render(strings.Join(parts, "\n"))
+}
+
+func compactCardLine(title, subtitle string, width int) string {
+	if subtitle == "" {
+		return truncate(title, width)
+	}
+	subtitle = truncate(subtitle, max(width-5, 1))
+	spaceForTitle := width - len([]rune(subtitle)) - 1
+	if spaceForTitle < 4 {
+		return truncate(subtitle, width)
+	}
+	return truncate(title, spaceForTitle) + " " + subtitle
 }
 
 func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
@@ -183,11 +205,11 @@ func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
 	lines := []string{
 		accentStyle.Render(detail.Title),
 		rowStyle(detail.Status, false).Render(detail.Agent + " " + detail.Status),
-		"",
+		sectionDivider(width),
 		headerStyle.Render("Metadata"),
 	}
 	lines = append(lines, renderMetadata(detail.Metadata, width)...)
-	lines = append(lines, "", headerStyle.Render("Conversation"))
+	lines = append(lines, sectionDivider(width), headerStyle.Render("Conversation"))
 	if detail.TranscriptError != "" {
 		lines = append(lines, errorStyle.Render("transcript: "+detail.TranscriptError))
 		return strings.Join(lines, "\n")
@@ -205,6 +227,13 @@ func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
 		lines = append(lines, truncate(line, width))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func sectionDivider(width int) string {
+	if width < 8 {
+		width = 8
+	}
+	return dimStyle.Render(strings.Repeat("─", width))
 }
 
 func renderDetailUnavailable(err error, width int) string {
