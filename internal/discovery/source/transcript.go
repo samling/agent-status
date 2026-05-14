@@ -151,5 +151,25 @@ func ScanJSONL(r io.Reader, fn func(line []byte) bool) error {
 // ExtractUserPrompt returns typed text from a transcript user message,
 // ignoring tool results and other non-typed content.
 func ExtractUserPrompt(content json.RawMessage) string {
-	return ExtractTextContent(content)
+	if len(content) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(content, &s); err == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &blocks); err == nil {
+		parts := make([]string, 0, len(blocks))
+		for _, b := range blocks {
+			if (b.Type == "text" || b.Type == "input_text") && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
 }

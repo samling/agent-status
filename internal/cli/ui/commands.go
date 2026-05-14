@@ -19,6 +19,11 @@ type snapshotMsg struct {
 	sortedBy  sortMode
 	serverUp  bool
 }
+type detailMsg struct {
+	detail    sessionview.SessionDetail
+	detailFor string
+	detailErr error
+}
 type errMsg struct{ err error }
 
 func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
@@ -50,6 +55,22 @@ func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
 			detailErr: detailErr,
 			sortedBy:  mode,
 			serverUp:  serverUp,
+		}
+	}
+}
+
+func loadDetail(serverAddr, id string) tea.Cmd {
+	return func() tea.Msg {
+		if id == "" {
+			return detailMsg{}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		detail, err := client.New(serverAddr).SessionDetail(ctx, id)
+		return detailMsg{
+			detail:    detail,
+			detailFor: id,
+			detailErr: err,
 		}
 	}
 }

@@ -46,3 +46,18 @@ func TestExtractTextContentSupportsStringAndBlocks(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractUserPromptIgnoresOutputText(t *testing.T) {
+	raw := `[
+		{"type":"text","text":"typed"},
+		{"type":"output_text","text":"assistant output"},
+		{"type":"input_text","text":"more typed"},
+		{"type":"tool_result","text":"tool output"}
+	]`
+
+	got := ExtractUserPrompt([]byte(raw))
+	want := "typed\nmore typed"
+	if got != want {
+		t.Fatalf("ExtractUserPrompt() = %q, want %q", got, want)
+	}
+}

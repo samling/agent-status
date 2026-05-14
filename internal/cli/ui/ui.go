@@ -173,9 +173,17 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
 		case "up", "k":
+			prev := m.selectedID
 			m.moveSelection(-1)
+			if m.selectedID != "" && m.selectedID != prev {
+				return m, loadDetail(m.serverAddr, m.selectedID)
+			}
 		case "down", "j":
+			prev := m.selectedID
 			m.moveSelection(+1)
+			if m.selectedID != "" && m.selectedID != prev {
+				return m, loadDetail(m.serverAddr, m.selectedID)
+			}
 		case "enter":
 			var cmd tea.Cmd
 			m, cmd = m.focusSelected()
@@ -194,9 +202,6 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
 	case snapshotMsg:
 		m.cards = msg.cards
-		m.detail = msg.detail
-		m.detailFor = msg.detailFor
-		m.detailErr = msg.detailErr
 		m.serverUp = msg.serverUp
 		if msg.sortedBy != m.sort {
 			sortCards(m.cards, m.sort)
@@ -204,7 +209,22 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedID != "" && !cardsContain(m.cards, m.selectedID) {
 			m.selectedID = ""
 		}
+		activeID := m.selectedID
+		if activeID == "" && len(m.cards) > 0 {
+			activeID = m.cards[0].SessionID
+		}
+		if msg.detailFor == activeID {
+			m.detail = msg.detail
+			m.detailFor = msg.detailFor
+			m.detailErr = msg.detailErr
+		}
 		m.err = nil
+	case detailMsg:
+		if msg.detailFor == m.selectedID {
+			m.detail = msg.detail
+			m.detailFor = msg.detailFor
+			m.detailErr = msg.detailErr
+		}
 	case errMsg:
 		m.err = msg.err
 	}
