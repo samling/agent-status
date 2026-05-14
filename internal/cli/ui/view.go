@@ -73,10 +73,11 @@ func (m uiModel) paneWidths() (int, int) {
 }
 
 func (m uiModel) renderCards(width int, selectedID string) string {
-	if len(m.cards) == 0 {
-		return dimStyle.Render("(no live sessions)")
-	}
 	lines := []string{headerStyle.Render("Sessions")}
+	if len(m.cards) == 0 {
+		lines = append(lines, dimStyle.Render("(no live sessions)"))
+		return strings.Join(lines, "\n")
+	}
 	for _, card := range m.cards {
 		selected := card.SessionID == selectedID
 		lines = append(lines, renderCard(card, width, selected, m.detailFor == card.SessionID, m.detail))
