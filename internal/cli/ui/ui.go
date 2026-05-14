@@ -12,8 +12,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/logging"
+	"github.com/samling/agent-status/internal/sessionview"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -118,14 +118,13 @@ type uiModel struct {
 	notesPath      string
 	configPath     string
 	interval       time.Duration
-	sessions       []state.Session
-	meta           map[string]source.SessionMeta
+	cards          []sessionview.SessionCard
 	notes          map[string]string
 	selectedID     string
 	sort           sortMode
 	width          int
 	height         int
-	detail         source.TranscriptInfo
+	detail         sessionview.SessionDetail
 	detailFor      string // session id that detail belongs to
 	inputMode      bool
 	inputBuf       string
@@ -184,7 +183,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "s":
 			m.sort = m.sort.next()
-			sortSessions(m.sessions, m.sort)
+			sortCards(m.cards, m.sort)
 		case "n":
 			m = m.beginNote()
 		case "?":
@@ -193,15 +192,14 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
 	case snapshotMsg:
-		m.sessions = msg.sessions
-		m.meta = msg.meta
+		m.cards = msg.cards
 		m.detail = msg.detail
 		m.detailFor = msg.detailFor
 		m.serverUp = msg.serverUp
 		if msg.sortedBy != m.sort {
-			sortSessions(m.sessions, m.sort)
+			sortCards(m.cards, m.sort)
 		}
-		if m.selectedID != "" && !sessionsContain(m.sessions, m.selectedID) {
+		if m.selectedID != "" && !cardsContain(m.cards, m.selectedID) {
 			m.selectedID = ""
 		}
 		m.err = nil

@@ -7,15 +7,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/samling/agent-status/internal/client"
-	"github.com/samling/agent-status/internal/discovery/source"
-	"github.com/samling/agent-status/internal/state"
+	"github.com/samling/agent-status/internal/sessionview"
 )
 
 type tickMsg time.Time
 type snapshotMsg struct {
-	sessions  []state.Session
-	meta      map[string]source.SessionMeta
-	detail    source.TranscriptInfo
+	cards     []sessionview.SessionCard
+	detail    sessionview.SessionDetail
 	detailFor string
 	sortedBy  sortMode
 	serverUp  bool
@@ -27,26 +25,22 @@ func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		c := client.New(serverAddr)
-		sessions, err := c.Sessions(ctx)
+		cards, err := c.SessionCards(ctx)
 		serverUp := err == nil
 		if err != nil {
-			sessions = nil
+			cards = nil
 		}
-		meta, _ := c.Meta(ctx)
-		sortSessions(sessions, mode)
+		sortCards(cards, mode)
 		focus := selectedID
-		if focus == "" && len(sessions) > 0 {
-			focus = sessions[0].SessionID
+		if focus == "" && len(cards) > 0 {
+			focus = cards[0].SessionID
 		}
-		var detail source.TranscriptInfo
+		var detail sessionview.SessionDetail
 		if focus != "" {
-			if _, ok := meta[focus]; ok {
-				detail, _ = c.Transcript(ctx, focus)
-			}
+			detail, _ = c.SessionDetail(ctx, focus)
 		}
 		return snapshotMsg{
-			sessions:  sessions,
-			meta:      meta,
+			cards:     cards,
 			detail:    detail,
 			detailFor: focus,
 			sortedBy:  mode,

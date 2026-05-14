@@ -6,17 +6,15 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/samling/agent-status/internal/discovery/source"
-	"github.com/samling/agent-status/internal/state"
+	"github.com/samling/agent-status/internal/sessionview"
 	"github.com/samling/agent-status/internal/version"
 )
 
 var (
-	accentStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	headerStyle  = lipgloss.NewStyle().Bold(true)
-	dimStyle     = lipgloss.NewStyle().Faint(true)
-	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	waitingStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11"))
+	accentStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	headerStyle = lipgloss.NewStyle().Bold(true)
+	dimStyle    = lipgloss.NewStyle().Faint(true)
+	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	borderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 
 	connectedStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
@@ -29,63 +27,12 @@ func keyHint(key, desc string) string {
 	return accentStyle.Render(key) + " " + dimStyle.Render(desc)
 }
 
-// Fixed column widths; CWD flexes with terminal width.
 const (
-	colStatus     = 8
-	colAgent      = 11 // length of "claude-code"
-	colVersion    = 10
-	colLastEvent  = 20
-	colWaiting    = 16 // fits "approve WebFetch"; longer values are truncated
-	colTransition = 15
-	colCreated    = 19 // length of "2026-05-05 15:04:05"
-	colNote       = 30
+	minLeftPane  = 24
+	maxLeftPane  = 46
+	paneGap      = 2
+	cardPadWidth = 2
 )
-
-const fixedCols = colStatus + colAgent + colVersion + colLastEvent + colWaiting + colTransition + colCreated + colNote + 16 + 4
-
-func (m uiModel) cwdWidth() int {
-	if m.width <= 0 {
-		return 30
-	}
-	w := m.width - fixedCols
-	if w < 20 {
-		return 20
-	}
-	// No upper clamp: shortPath collapses long prefixes, and on wide
-	// terminals an extra-wide CWD column is more useful than padded blanks.
-	return w
-}
-
-func renderHeader(active sortMode, cwd int) string {
-	cols := []struct {
-		title   string
-		width   int
-		sortKey sortMode
-	}{
-		{"STATUS", colStatus, sortStatus},
-		{"AGENT", colAgent, -1},
-		{"  VERSION", colVersion, -1},
-		{"CWD", cwd, -1},
-		{"LAST EVENT", colLastEvent, -1},
-		{"WAITING", colWaiting, -1},
-		{"LAST TRANSITION", colTransition, sortActivity},
-		{"CREATED", colCreated, sortCreated},
-		{"NOTE", 0, -1},
-	}
-	parts := make([]string, 0, len(cols))
-	for _, c := range cols {
-		text := c.title
-		if c.width > 0 {
-			text = fmt.Sprintf("%-*s", c.width, text)
-		}
-		if c.sortKey == active {
-			parts = append(parts, accentStyle.Render(text))
-		} else {
-			parts = append(parts, headerStyle.Render(text))
-		}
-	}
-	return strings.Join(parts, "  ")
-}
 
 func rowStyle(status string, selected bool) lipgloss.Style {
 	s := lipgloss.NewStyle()
@@ -101,6 +48,108 @@ func rowStyle(status string, selected bool) lipgloss.Style {
 	return s
 }
 
+func (m uiModel) paneWidths() (int, int) {
+	inner := m.width - 4
+	if inner < 50 {
+		left := minLeftPane
+		right := inner - left - paneGap
+		if right < 20 {
+			right = 20
+		}
+		return left, right
+	}
+	left := inner * 38 / 100
+	if left < minLeftPane {
+		left = minLeftPane
+	}
+	if left > maxLeftPane {
+		left = maxLeftPane
+	}
+	right := inner - left - paneGap
+	if right < 20 {
+		right = 20
+	}
+	return left, right
+}
+
+func (m uiModel) renderCards(width int, selectedID string) string {
+	if len(m.cards) == 0 {
+		return dimStyle.Render("(no live sessions)")
+	}
+	lines := []string{headerStyle.Render("Sessions")}
+	for _, card := range m.cards {
+		selected := card.SessionID == selectedID
+		lines = append(lines, renderCard(card, width, selected, m.detailFor == card.SessionID, m.detail))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderCard(card sessionview.SessionCard, width int, selected, hasDetail bool, detail sessionview.SessionDetail) string {
+	if width < 10 {
+		width = 10
+	}
+	agent := strings.ToUpper(card.Agent)
+	status := card.Status
+	title := truncate(card.Title, width-cardPadWidth)
+	subtitle := truncate(card.Subtitle, width-cardPadWidth)
+	top := fmt.Sprintf("%-*s %s", max(width-len(status)-1, 1), agent, status)
+	parts := []string{top, title, subtitle}
+	if selected && hasDetail && len(detail.Conversation) > 0 {
+		preview := detail.Conversation[0].Role + ": " + detail.Conversation[0].Text
+		parts = append(parts, truncate(preview, width-cardPadWidth))
+	}
+	body := strings.Join(parts, "\n")
+	return rowStyle(card.Status, selected).Render(body)
+}
+
+func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
+	if detail.SessionID == "" {
+		return dimStyle.Render("select a session")
+	}
+	lines := []string{
+		accentStyle.Render(detail.Title),
+		rowStyle(detail.Status, false).Render(detail.Agent + " " + detail.Status),
+		"",
+		headerStyle.Render("Metadata"),
+	}
+	lines = append(lines, renderMetadata(detail.Metadata, width)...)
+	lines = append(lines, "", headerStyle.Render("Conversation"))
+	if detail.TranscriptError != "" {
+		lines = append(lines, errorStyle.Render("transcript: "+detail.TranscriptError))
+		return strings.Join(lines, "\n")
+	}
+	if len(detail.Conversation) == 0 {
+		lines = append(lines, dimStyle.Render("(no conversation preview)"))
+		return strings.Join(lines, "\n")
+	}
+	for _, msg := range detail.Conversation {
+		label := "User"
+		if msg.Role == "assistant" {
+			label = "AI"
+		}
+		line := fmt.Sprintf("%-4s %s", label, msg.Text)
+		lines = append(lines, truncate(line, width))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderMetadata(fields []sessionview.Field, width int) []string {
+	if len(fields) == 0 {
+		return []string{dimStyle.Render("(no metadata)")}
+	}
+	lines := make([]string, 0, (len(fields)+1)/2)
+	for i := 0; i < len(fields); i += 2 {
+		left := labeledField(fields[i].Label, fields[i].Value)
+		right := ""
+		if i+1 < len(fields) {
+			right = labeledField(fields[i+1].Label, fields[i+1].Value)
+		}
+		line := strings.TrimSpace(left + "   " + right)
+		lines = append(lines, truncate(line, width))
+	}
+	return lines
+}
+
 func (m uiModel) View() string {
 	var head, foot strings.Builder
 
@@ -113,79 +162,25 @@ func (m uiModel) View() string {
 		}
 		head.WriteString(" " + style.Render(dot) + " " + dimStyle.Render(label))
 	}
-	head.WriteString(accentStyle.Render(fmt.Sprintf(", %d session(s)", len(m.sessions))))
+	head.WriteString(accentStyle.Render(fmt.Sprintf(", %d session(s)", len(m.cards))))
 	head.WriteString("\n\n")
 
 	selectedID := m.selectedID
-	if selectedID == "" && len(m.sessions) > 0 {
-		selectedID = m.sessions[0].SessionID
+	if selectedID == "" && len(m.cards) > 0 {
+		selectedID = m.cards[0].SessionID
 	}
 
 	if m.err != nil {
 		head.WriteString(errorStyle.Render("error: " + m.err.Error()))
 	} else {
-		cwdWidth := m.cwdWidth()
-		if len(m.sessions) == 0 {
-			head.WriteString(dimStyle.Render("(no live sessions)"))
-		} else {
-			head.WriteString(renderHeader(m.sort, cwdWidth))
-			maxVer := maxVersionByAgent(m.sessions, m.meta)
-			for _, s := range m.sessions {
-				head.WriteString("\n")
-				meta := m.meta[s.SessionID]
-				ver := meta.Version
-				var behind bool
-				if ver != "" {
-					if mv, ok := maxVer[s.Agent]; ok && compareVersions(ver, mv) < 0 {
-						behind = true
-					}
-				}
-				if ver == "" {
-					ver = "-"
-				}
-				cwd := meta.Cwd
-				if cwd == "" {
-					cwd = "-"
-				} else {
-					cwd = shortPath(cwd, cwdWidth)
-				}
-				note := truncate(collapseWS(m.notes[s.SessionID]), colNote)
-				status := state.DeriveStatus(s)
-				marker := "  "
-				if behind {
-					marker = "! "
-				}
-				waiting := truncate(meta.WaitingFor, colWaiting)
-				rowText := fmt.Sprintf("%-*s  %-*s  %s%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
-					colStatus, status,
-					colAgent, s.Agent,
-					marker,
-					colVersion-2, ver,
-					cwdWidth, cwd,
-					colLastEvent, s.LastEvent,
-					colWaiting, waiting,
-					colTransition, relTime(s.StatusTime),
-					colCreated, absTime(s.FirstSeenTime),
-					colNote, note,
-				)
-				selected := s.SessionID == selectedID
-				head.WriteString(rowStyle(status, selected).Render(rowText))
-			}
-			if selectedID != "" && !m.showConfig {
-				var info source.TranscriptInfo
-				if m.detailFor == selectedID {
-					info = m.detail
-				}
-				var selectedAgent string
-				for _, sess := range m.sessions {
-					if sess.SessionID == selectedID {
-						selectedAgent = sess.Agent
-						break
-					}
-				}
-				foot.WriteString(renderDetail(selectedID, selectedAgent, m.notes[selectedID], info, m.meta[selectedID]))
-			}
+		leftW, rightW := m.paneWidths()
+		left := lipgloss.NewStyle().Width(leftW).Render(m.renderCards(leftW, selectedID))
+		rightDetail := sessionview.SessionDetail{}
+		if m.detailFor == selectedID {
+			rightDetail = m.detail
 		}
+		right := lipgloss.NewStyle().Width(rightW).Render(renderSessionDetail(rightDetail, rightW))
+		head.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", paneGap), right))
 	}
 	if m.showConfig {
 		foot.Reset()
@@ -257,52 +252,4 @@ func (m uiModel) renderConfig() string {
 		labeledField("server", m.serverAddr),
 		labeledField("refresh", m.interval.String()),
 	}, "\n")
-}
-
-func renderDetail(sessionID, agent, note string, info source.TranscriptInfo, meta source.SessionMeta) string {
-	num := func(n int64) string {
-		if n <= 0 {
-			return "-"
-		}
-		return humanTokens(n)
-	}
-	turns := "-"
-	if info.TurnCount > 0 {
-		turns = fmt.Sprintf("%d", info.TurnCount)
-	}
-	cache := "-"
-	if info.CacheReadTokens > 0 || info.CacheCreationTokens > 0 {
-		cache = fmt.Sprintf("%s read / %s create", num(info.CacheReadTokens), num(info.CacheCreationTokens))
-	}
-	prompt := truncate(collapseWS(info.LastUserPrompt), 100)
-	header := accentStyle.Render("Metadata")
-	pid := "-"
-	if meta.PID > 0 {
-		pid = fmt.Sprintf("%d", meta.PID)
-	}
-	identity := strings.Join([]string{
-		labeledField("agent", agent),
-		labeledField("session", state.ShortID(sessionID)),
-		labeledField("pid", pid),
-		labeledField("model", info.Model),
-		labeledField("entrypoint", meta.Entrypoint),
-	}, "   ")
-	stateFields := []string{
-		labeledField("branch", info.GitBranch),
-		labeledField("mode", info.PermissionMode),
-	}
-	if meta.WaitingFor != "" {
-		stateFields = append(stateFields, dimStyle.Render("waiting: ")+waitingStyle.Render(meta.WaitingFor))
-	}
-	stateLine := strings.Join(stateFields, "   ")
-	usage := strings.Join([]string{
-		labeledField("turns", turns),
-		labeledField("in", num(info.InputTokens)),
-		labeledField("out", num(info.OutputTokens)),
-		labeledField("cache", cache),
-	}, "   ")
-	cwd := labeledField("cwd", meta.Cwd)
-	noteLine := labeledField("note", note)
-	last := labeledField("last", prompt)
-	return strings.Join([]string{header, identity, stateLine, usage, cwd, noteLine, last}, "\n")
 }

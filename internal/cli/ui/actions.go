@@ -8,17 +8,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/samling/agent-status/internal/client"
+	"github.com/samling/agent-status/internal/sessionview"
 	"github.com/samling/agent-status/internal/state"
 )
 
 func (m *uiModel) moveSelection(delta int) {
-	if len(m.sessions) == 0 {
+	if len(m.cards) == 0 {
 		m.selectedID = ""
 		return
 	}
 	cur := 0
-	for i, s := range m.sessions {
-		if s.SessionID == m.selectedID {
+	for i, c := range m.cards {
+		if c.SessionID == m.selectedID {
 			cur = i
 			break
 		}
@@ -26,25 +27,25 @@ func (m *uiModel) moveSelection(delta int) {
 	next := cur + delta
 	if next < 0 {
 		next = 0
-	} else if next >= len(m.sessions) {
-		next = len(m.sessions) - 1
+	} else if next >= len(m.cards) {
+		next = len(m.cards) - 1
 	}
-	m.selectedID = m.sessions[next].SessionID
+	m.selectedID = m.cards[next].SessionID
 }
 
 func (m uiModel) activeSelectionID() string {
 	if m.selectedID != "" {
 		return m.selectedID
 	}
-	if len(m.sessions) > 0 {
-		return m.sessions[0].SessionID
+	if len(m.cards) > 0 {
+		return m.cards[0].SessionID
 	}
 	return ""
 }
 
-func sessionsContain(ss []state.Session, id string) bool {
-	for _, s := range ss {
-		if s.SessionID == id {
+func cardsContain(cards []sessionview.SessionCard, id string) bool {
+	for _, c := range cards {
+		if c.SessionID == id {
 			return true
 		}
 	}

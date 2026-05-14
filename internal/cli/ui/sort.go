@@ -3,7 +3,7 @@ package ui
 import (
 	"sort"
 
-	"github.com/samling/agent-status/internal/state"
+	"github.com/samling/agent-status/internal/sessionview"
 )
 
 type sortMode int
@@ -37,23 +37,23 @@ func (m sortMode) next() sortMode {
 	return sortCycle[0]
 }
 
-func sortSessions(ss []state.Session, mode sortMode) {
-	sort.SliceStable(ss, func(i, j int) bool {
-		a, b := ss[i], ss[j]
+func sortCards(cards []sessionview.SessionCard, mode sortMode) {
+	sort.SliceStable(cards, func(i, j int) bool {
+		a, b := cards[i], cards[j]
 		switch mode {
 		case sortCreated:
 			if a.FirstSeenAt != b.FirstSeenAt {
 				return a.FirstSeenAt > b.FirstSeenAt
 			}
 		case sortStatus:
-			ra, rb := statusRank(state.DeriveStatus(a)), statusRank(state.DeriveStatus(b))
+			ra, rb := statusRank(a.Status), statusRank(b.Status)
 			if ra != rb {
 				return ra < rb
 			}
 			if a.FirstSeenAt != b.FirstSeenAt {
 				return a.FirstSeenAt < b.FirstSeenAt
 			}
-		default: // sortActivity
+		default:
 			if a.StatusAt != b.StatusAt {
 				return a.StatusAt > b.StatusAt
 			}
