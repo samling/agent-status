@@ -1,0 +1,217 @@
+package sessionview
+
+import (
+	"context"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"github.com/samling/agent-status/internal/discovery/source"
+	"github.com/samling/agent-status/internal/state"
+)
+
+type MetaProvider interface {
+	LatestMeta() map[string]source.SessionMeta
+	Transcript(sessionID, agent string, meta source.SessionMeta) (source.TranscriptInfo, error)
+}
+
+type Provider struct {
+	Store     *state.Store
+	Meta      MetaProvider
+	NotesPath string
+}
+
+type SessionCard struct {
+	SessionID    string `json:"session_id"`
+	Agent        string `json:"agent"`
+	Status       string `json:"status"`
+	Title        string `json:"title"`
+	Subtitle     string `json:"subtitle"`
+	ActivityTime string `json:"activity_time"`
+	FirstSeenAt  string `json:"first_seen_at"`
+	StatusAt     string `json:"status_at"`
+	Note         string `json:"note,omitempty"`
+}
+
+type Field struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+}
+
+type ConversationMessage struct {
+	Role      string `json:"role"`
+	Text      string `json:"text"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
+type SessionDetail struct {
+	SessionID       string                `json:"session_id"`
+	Agent           string                `json:"agent"`
+	Status          string                `json:"status"`
+	Title           string                `json:"title"`
+	Metadata        []Field               `json:"metadata"`
+	Conversation    []ConversationMessage `json:"conversation"`
+	TranscriptError string                `json:"transcript_error,omitempty"`
+}
+
+func (p Provider) Cards(ctx context.Context) ([]SessionCard, error) {
+	_ = ctx
+	meta := p.latestMeta()
+	notes := p.loadNotes()
+	sessions := p.Store.Sessions()
+	out := make([]SessionCard, 0, len(sessions))
+	for _, sess := range sessions {
+		m := meta[sess.SessionID]
+		out = append(out, SessionCard{
+			SessionID:    sess.SessionID,
+			Agent:        sess.Agent,
+			Status:       state.DeriveStatus(sess),
+			Title:        titleFor(m.Cwd),
+			Subtitle:     subtitleFor(sess, m),
+			ActivityTime: relTime(sess.StatusTime),
+			FirstSeenAt:  sess.FirstSeenAt,
+			StatusAt:     sess.StatusAt,
+			Note:         notes[sess.SessionID],
+		})
+	}
+	return out, nil
+}
+
+func (p Provider) Detail(ctx context.Context, id string) (SessionDetail, error) {
+	_ = ctx
+	sess, ok := p.Store.GetSession(id)
+	if !ok {
+		return SessionDetail{}, state.ErrSessionNotFound
+	}
+	meta := p.latestMeta()
+	m := meta[id]
+	notes := p.loadNotes()
+	info := source.TranscriptInfo{}
+	var transcriptErr error
+	if p.Meta != nil {
+		info, transcriptErr = p.Meta.Transcript(id, sess.Agent, m)
+	}
+
+	detail := SessionDetail{
+		SessionID: sess.SessionID,
+		Agent:     sess.Agent,
+		Status:    state.DeriveStatus(sess),
+		Title:     titleFor(m.Cwd),
+	}
+	if transcriptErr != nil {
+		detail.TranscriptError = transcriptErr.Error()
+	}
+	detail.Metadata = metadataFields(sess, m, info, notes[id])
+	if transcriptErr == nil {
+		detail.Conversation = newestFirst(info.RecentMessages)
+	}
+	return detail, nil
+}
+
+func (p Provider) latestMeta() map[string]source.SessionMeta {
+	if p.Meta == nil {
+		return map[string]source.SessionMeta{}
+	}
+	meta := p.Meta.LatestMeta()
+	if meta == nil {
+		return map[string]source.SessionMeta{}
+	}
+	return meta
+}
+
+func (p Provider) loadNotes() map[string]string {
+	notes, err := state.LoadNotes(p.NotesPath)
+	if err != nil {
+		return map[string]string{}
+	}
+	return notes
+}
+
+func titleFor(cwd string) string {
+	if cwd == "" {
+		return "-"
+	}
+	base := filepath.Base(cwd)
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return cwd
+	}
+	return base
+}
+
+func subtitleFor(sess state.Session, meta source.SessionMeta) string {
+	if meta.WaitingFor != "" {
+		return meta.WaitingFor
+	}
+	if sess.LastEvent != "" {
+		return sess.LastEvent
+	}
+	return "-"
+}
+
+func metadataFields(sess state.Session, meta source.SessionMeta, info source.TranscriptInfo, note string) []Field {
+	model := firstNonEmpty(info.Model, meta.Model)
+	version := firstNonEmpty(info.Version, meta.Version)
+	pid := "-"
+	if meta.PID > 0 {
+		pid = strconv.Itoa(meta.PID)
+	} else if sess.PID > 0 {
+		pid = strconv.Itoa(sess.PID)
+	}
+	return []Field{
+		{Label: "agent", Value: valueOrDash(sess.Agent)},
+		{Label: "model", Value: valueOrDash(model)},
+		{Label: "branch", Value: valueOrDash(info.GitBranch)},
+		{Label: "version", Value: valueOrDash(version)},
+		{Label: "pid", Value: pid},
+		{Label: "cwd", Value: valueOrDash(meta.Cwd)},
+		{Label: "waiting", Value: valueOrDash(meta.WaitingFor)},
+		{Label: "note", Value: valueOrDash(note)},
+	}
+}
+
+func newestFirst(in []source.ConversationMessage) []ConversationMessage {
+	out := make([]ConversationMessage, 0, len(in))
+	for i := len(in) - 1; i >= 0; i-- {
+		out = append(out, ConversationMessage{
+			Role:      in[i].Role,
+			Text:      in[i].Text,
+			Timestamp: in[i].Timestamp,
+		})
+	}
+	return out
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func valueOrDash(v string) string {
+	if v == "" {
+		return "-"
+	}
+	return v
+}
+
+func relTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Second:
+		return "<1s ago"
+	case d < time.Minute:
+		return strconv.Itoa(int(d.Seconds())) + "s ago"
+	case d < time.Hour:
+		return strconv.Itoa(int(d.Minutes())) + "m ago"
+	case d < 24*time.Hour:
+		return strconv.Itoa(int(d.Hours())) + "h ago"
+	default:
+		return strconv.Itoa(int(d.Hours()/24)) + "d ago"
+	}
+}
