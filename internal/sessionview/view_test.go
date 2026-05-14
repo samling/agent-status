@@ -131,6 +131,67 @@ func TestDetailKeepsMetadataWhenTranscriptFails(t *testing.T) {
 	}
 }
 
+func TestDetailReturnsErrSessionNotFound(t *testing.T) {
+	store := seedStore(t)
+	p := Provider{Store: store}
+
+	_, err := p.Detail(context.Background(), "missing")
+	if !errors.Is(err, state.ErrSessionNotFound) {
+		t.Fatalf("Detail() error = %v, want ErrSessionNotFound", err)
+	}
+}
+
+func TestCardsDefaultWithoutMetaOrNotes(t *testing.T) {
+	store := seedStore(t)
+	p := Provider{Store: store}
+
+	cards, err := p.Cards(context.Background())
+	if err != nil {
+		t.Fatalf("Cards() error = %v", err)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("len(Cards()) = %d, want 1", len(cards))
+	}
+	card := cards[0]
+	if card.Title != "-" {
+		t.Fatalf("Title = %q, want -", card.Title)
+	}
+	if card.Subtitle != state.EventUserPromptSubmit {
+		t.Fatalf("Subtitle = %q, want %s", card.Subtitle, state.EventUserPromptSubmit)
+	}
+	if card.Note != "" {
+		t.Fatalf("Note = %q, want empty", card.Note)
+	}
+}
+
+func TestDetailDefaultsWhenMetaProviderReturnsNilAndNotesMissing(t *testing.T) {
+	store := seedStore(t)
+	p := Provider{
+		Store:     store,
+		NotesPath: filepath.Join(t.TempDir(), "missing-notes.json"),
+		Meta:      fakeMeta{},
+	}
+
+	detail, err := p.Detail(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("Detail() error = %v", err)
+	}
+	if detail.Title != "-" {
+		t.Fatalf("Title = %q, want -", detail.Title)
+	}
+	for _, label := range []string{"model", "branch", "version", "cwd", "waiting", "note"} {
+		if got := fieldValue(detail.Metadata, label); got != "-" {
+			t.Fatalf("%s field = %q, want -", label, got)
+		}
+	}
+	if got := fieldValue(detail.Metadata, "pid"); got != "1234" {
+		t.Fatalf("pid field = %q, want 1234", got)
+	}
+	if detail.TranscriptError != "" {
+		t.Fatalf("TranscriptError = %q, want empty", detail.TranscriptError)
+	}
+}
+
 func fieldValue(fields []Field, label string) string {
 	for _, f := range fields {
 		if f.Label == label {
