@@ -31,11 +31,11 @@ func TestViewTruncatesLongCardTitle(t *testing.T) {
 	if strings.Contains(out, longTitle) {
 		t.Fatalf("View() contains untruncated title %q", longTitle)
 	}
-	if !strings.Contains(out, "a...") {
+	if !strings.Contains(out, "a-very-long") || !strings.Contains(out, "...") {
 		t.Fatalf("View() missing truncated title; output:\n%s", out)
 	}
-	if !strings.Contains(out, "UserPromptSubmit") {
-		t.Fatalf("View() should keep subtitle visible; output:\n%s", out)
+	if strings.Contains(out, "UserPromptSubmit") {
+		t.Fatalf("View() should keep event details out of cards; output:\n%s", out)
 	}
 }
 
@@ -188,7 +188,7 @@ func TestRenderCardOmitsMarkerSpaceForLeafSession(t *testing.T) {
 	}
 }
 
-func TestRenderCardRightAlignsSubtitle(t *testing.T) {
+func TestRenderCardOmitsSubtitleDetails(t *testing.T) {
 	card := sessionview.SessionCard{
 		SessionID: "s1",
 		Agent:     "codex",
@@ -198,21 +198,30 @@ func TestRenderCardRightAlignsSubtitle(t *testing.T) {
 	}
 
 	out := renderCard(card, 36, false, false, sessionview.SessionDetail{}, false)
-	found := false
-	for _, line := range strings.Split(out, "\n") {
-		if !strings.Contains(line, "project") {
-			continue
-		}
-		found = true
-		if !strings.Contains(line, "project") || !strings.Contains(line, "Stop │") {
-			t.Fatalf("renderCard() should keep title and subtitle visible; line=%q output:\n%s", line, out)
-		}
-		if strings.Contains(line, "project Stop") {
-			t.Fatalf("renderCard() should right-align subtitle instead of placing it beside title; line=%q output:\n%s", line, out)
-		}
-	}
-	if !found {
+	if !strings.Contains(out, "project") {
 		t.Fatalf("renderCard() missing title line; output:\n%s", out)
+	}
+	if strings.Contains(out, "Stop") {
+		t.Fatalf("renderCard() should omit event details from cards; output:\n%s", out)
+	}
+}
+
+func TestRenderCardColorsStatusLabels(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	for _, status := range []string{"idle", "waiting", "active"} {
+		card := sessionview.SessionCard{
+			SessionID: "s1",
+			Agent:     "codex",
+			Status:    status,
+			Title:     "project",
+		}
+		out := renderCard(card, 36, false, false, sessionview.SessionDetail{}, false)
+		if !strings.Contains(out, statusStyle(status).Render(status)) {
+			t.Fatalf("renderCard() should color %s status; output:\n%q", status, out)
+		}
 	}
 }
 
@@ -306,8 +315,8 @@ func TestRenderCardsKeepsChildCountsOutOfSubtitle(t *testing.T) {
 	}
 
 	out := m.renderCards(36, "parent")
-	if !strings.Contains(out, "Stop") {
-		t.Fatalf("renderCards() should keep the existing subtitle; output:\n%s", out)
+	if strings.Contains(out, "Stop") {
+		t.Fatalf("renderCards() should keep event details out of cards; output:\n%s", out)
 	}
 	for _, noisy := range []string{"17 child", "children", "6 open"} {
 		if strings.Contains(out, noisy) {
@@ -667,8 +676,8 @@ func TestViewKeepsAgentVisibleInNarrowPane(t *testing.T) {
 	if strings.Contains(out, "CLAUDE-CODE") {
 		t.Fatalf("View() should render agent names lowercase; output:\n%s", out)
 	}
-	if !strings.Contains(out, "approve Bash") {
-		t.Fatalf("View() should keep waiting hint visible; output:\n%s", out)
+	if strings.Contains(out, "approve Bash") {
+		t.Fatalf("View() should keep waiting details out of cards; output:\n%s", out)
 	}
 }
 

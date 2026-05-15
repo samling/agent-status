@@ -21,8 +21,6 @@ var (
 
 	connectedStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
 	disconnectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9"))
-
-	selectedBG = lipgloss.Color("237")
 )
 
 func keyHint(key, desc string) string {
@@ -41,18 +39,17 @@ const (
 	roleLabelWidth  = 5
 )
 
-func rowStyle(status string, selected bool) lipgloss.Style {
-	s := lipgloss.NewStyle()
+func statusStyle(status string) lipgloss.Style {
 	switch status {
 	case "active":
-		s = s.Bold(true).Foreground(lipgloss.Color("10"))
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
 	case "waiting":
-		s = s.Bold(true).Foreground(lipgloss.Color("11"))
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11"))
+	case "idle":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	default:
+		return dimStyle
 	}
-	if selected {
-		s = s.Background(selectedBG)
-	}
-	return s
 }
 
 func cardBorderColor(status string, selected bool) lipgloss.Color {
@@ -207,12 +204,13 @@ func renderCard(card sessionview.SessionCard, width int, selected, _ bool, _ ses
 	if card.ChildStatus != "" {
 		status = card.ChildStatus
 	}
-	agentWidth := max(contentWidth-len(status)-1, 1)
+	statusText := statusStyle(status).Render(status)
+	agentWidth := max(contentWidth-lipgloss.Width(statusText)-1, 1)
 	agent = truncate(agent, agentWidth)
-	title := compactCardLine(card.Title, cardSubtitle(card), contentWidth)
-	top := fmt.Sprintf("%-*s %s", agentWidth, agent, status)
+	title := compactCardLine(card.Title, "", contentWidth)
+	top := fmt.Sprintf("%-*s %s", agentWidth, agent, statusText)
 	parts := []string{top, title}
-	style := rowStyle(card.Status, false).
+	style := lipgloss.NewStyle().
 		Width(boxWidth).
 		Padding(0, 1).
 		Border(lipgloss.RoundedBorder()).
@@ -239,13 +237,6 @@ func cardMarker(card sessionview.SessionCard, expanded bool) string {
 	default:
 		return ""
 	}
-}
-
-func cardSubtitle(card sessionview.SessionCard) string {
-	if card.Subtitle == "-" {
-		return ""
-	}
-	return card.Subtitle
 }
 
 func compactCardLine(title, subtitle string, width int) string {
@@ -277,7 +268,7 @@ func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
 	}
 	lines := []string{
 		sessionNameStyle.Render(detail.Title),
-		rowStyle(detail.Status, false).Render(detail.Agent + " " + detail.Status),
+		detail.Agent + " " + statusStyle(detail.Status).Render(detail.Status),
 		sectionDivider(width),
 		headerStyle.Render("Metadata"),
 	}

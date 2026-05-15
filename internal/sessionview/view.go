@@ -81,7 +81,7 @@ func (p Provider) Cards(ctx context.Context) ([]SessionCard, error) {
 			Agent:           sess.Agent,
 			Status:          state.DeriveStatus(sess),
 			Title:           titleFor(m.Name, m.Cwd),
-			Subtitle:        subtitleFor(sess, m),
+			Subtitle:        "",
 			ActivityTime:    relTime(sess.StatusTime),
 			FirstSeenAt:     sess.FirstSeenAt,
 			StatusAt:        sess.StatusAt,
@@ -158,16 +158,6 @@ func titleFor(name, cwd string) string {
 	return base
 }
 
-func subtitleFor(sess state.Session, meta source.SessionMeta) string {
-	if meta.WaitingFor != "" {
-		return meta.WaitingFor
-	}
-	if sess.LastEvent != "" {
-		return sess.LastEvent
-	}
-	return "-"
-}
-
 func metadataFields(sess state.Session, meta source.SessionMeta, info source.TranscriptInfo, note string) []Field {
 	model := firstNonEmpty(info.Model, meta.Model)
 	version := firstNonEmpty(info.Version, meta.Version)
@@ -188,6 +178,7 @@ func metadataFields(sess state.Session, meta source.SessionMeta, info source.Tra
 		{Label: "cwd", Value: valueOrDash(meta.Cwd)},
 		{Label: "parent", Value: valueOrDash(meta.ParentSessionID)},
 		{Label: "children", Value: childCountValue(meta.ChildCount, meta.OpenChildCount)},
+		{Label: "last event", Value: valueOrDash(sess.LastEvent)},
 		{Label: "waiting", Value: valueOrDash(meta.WaitingFor)},
 		{Label: "note", Value: valueOrDash(note)},
 	}

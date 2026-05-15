@@ -82,8 +82,8 @@ func TestCardsIncludeAgentStatusTitleAndHint(t *testing.T) {
 	if card.Title != "Compare lazyagent to agent-status" {
 		t.Fatalf("Title = %q, want Compare lazyagent to agent-status", card.Title)
 	}
-	if card.Subtitle != "approve shell" {
-		t.Fatalf("Subtitle = %q, want approve shell", card.Subtitle)
+	if card.Subtitle != "" {
+		t.Fatalf("Subtitle = %q, want empty", card.Subtitle)
 	}
 }
 
@@ -126,6 +126,10 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 	if got := fieldValue(detail.Metadata, "session id"); got != "session-1" {
 		t.Fatalf("session id field = %q, want session-1", got)
 	}
+	if got := fieldValue(detail.Metadata, "last event"); got != state.EventUserPromptSubmit {
+		t.Fatalf("last event field = %q, want %s", got, state.EventUserPromptSubmit)
+	}
+	assertFieldBefore(t, detail.Metadata, "last event", "waiting")
 	assertFieldOrder(t, detail.Metadata, []string{"agent", "version", "session", "session id", "model", "branch"})
 	if got := fieldValue(detail.Metadata, "branch"); got != "feature/ui" {
 		t.Fatalf("branch field = %q, want feature/ui", got)
@@ -215,8 +219,8 @@ func TestCardsDefaultWithoutMetaOrNotes(t *testing.T) {
 	if card.Title != "-" {
 		t.Fatalf("Title = %q, want -", card.Title)
 	}
-	if card.Subtitle != state.EventUserPromptSubmit {
-		t.Fatalf("Subtitle = %q, want %s", card.Subtitle, state.EventUserPromptSubmit)
+	if card.Subtitle != "" {
+		t.Fatalf("Subtitle = %q, want empty", card.Subtitle)
 	}
 	if card.Note != "" {
 		t.Fatalf("Note = %q, want empty", card.Note)
@@ -269,6 +273,23 @@ func assertFieldOrder(t *testing.T, fields []Field, want []string) {
 		if fields[i].Label != label {
 			t.Fatalf("metadata labels = %#v, want prefix %#v", fieldLabels(fields), want)
 		}
+	}
+}
+
+func assertFieldBefore(t *testing.T, fields []Field, before, after string) {
+	t.Helper()
+	beforeIdx := -1
+	afterIdx := -1
+	for i, field := range fields {
+		switch field.Label {
+		case before:
+			beforeIdx = i
+		case after:
+			afterIdx = i
+		}
+	}
+	if beforeIdx == -1 || afterIdx == -1 || beforeIdx > afterIdx {
+		t.Fatalf("metadata labels = %#v, want %q before %q", fieldLabels(fields), before, after)
 	}
 }
 
