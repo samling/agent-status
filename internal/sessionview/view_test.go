@@ -101,7 +101,11 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 				"session-1": {Name: "Useful session name", Cwd: "/home/test/github/agent-status", Model: "gpt-5.5", Version: "0.128.0", PID: 1234},
 			},
 			transcript: source.TranscriptInfo{
-				GitBranch: "feature/ui",
+				GitBranch:           "feature/ui",
+				InputTokens:         1000,
+				OutputTokens:        250,
+				CacheCreationTokens: 50,
+				CacheReadTokens:     400,
 				RecentMessages: []source.ConversationMessage{
 					{Role: "user", Text: "older", Timestamp: "2026-05-14T10:00:00Z"},
 					{Role: "assistant", Text: "newer", Timestamp: "2026-05-14T10:01:00Z"},
@@ -133,6 +137,18 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 	assertFieldOrder(t, detail.Metadata, []string{"agent", "version", "session", "session id", "model", "branch"})
 	if got := fieldValue(detail.Metadata, "branch"); got != "feature/ui" {
 		t.Fatalf("branch field = %q, want feature/ui", got)
+	}
+	if got := fieldValue(detail.Metadata, "input tokens"); got != "1,000" {
+		t.Fatalf("input tokens field = %q, want 1,000", got)
+	}
+	if got := fieldValue(detail.Metadata, "output tokens"); got != "250" {
+		t.Fatalf("output tokens field = %q, want 250", got)
+	}
+	if got := fieldValue(detail.Metadata, "cache create"); got != "50" {
+		t.Fatalf("cache create field = %q, want 50", got)
+	}
+	if got := fieldValue(detail.Metadata, "cache read"); got != "400" {
+		t.Fatalf("cache read field = %q, want 400", got)
 	}
 	if len(detail.Conversation) != 2 || detail.Conversation[0].Text != "newer" || detail.Conversation[1].Text != "older" {
 		t.Fatalf("conversation order = %#v", detail.Conversation)

@@ -167,21 +167,57 @@ func metadataFields(sess state.Session, meta source.SessionMeta, info source.Tra
 	} else if sess.PID > 0 {
 		pid = strconv.Itoa(sess.PID)
 	}
-	return []Field{
+	fields := []Field{
 		{Label: "agent", Value: valueOrDash(sess.Agent)},
 		{Label: "version", Value: valueOrDash(version)},
 		{Label: "session", Value: valueOrDash(meta.Name)},
 		{Label: "session id", Value: valueOrDash(sess.SessionID)},
 		{Label: "model", Value: valueOrDash(model)},
 		{Label: "branch", Value: valueOrDash(info.GitBranch)},
-		{Label: "pid", Value: pid},
-		{Label: "cwd", Value: valueOrDash(meta.Cwd)},
-		{Label: "parent", Value: valueOrDash(meta.ParentSessionID)},
-		{Label: "children", Value: childCountValue(meta.ChildCount, meta.OpenChildCount)},
-		{Label: "last event", Value: valueOrDash(sess.LastEvent)},
-		{Label: "waiting", Value: valueOrDash(meta.WaitingFor)},
-		{Label: "note", Value: valueOrDash(note)},
 	}
+	if hasTokenStats(info) {
+		fields = append(fields,
+			Field{Label: "input tokens", Value: formatTokenCount(info.InputTokens)},
+			Field{Label: "output tokens", Value: formatTokenCount(info.OutputTokens)},
+			Field{Label: "cache create", Value: formatTokenCount(info.CacheCreationTokens)},
+			Field{Label: "cache read", Value: formatTokenCount(info.CacheReadTokens)},
+		)
+	}
+	fields = append(fields,
+		Field{Label: "pid", Value: pid},
+		Field{Label: "cwd", Value: valueOrDash(meta.Cwd)},
+		Field{Label: "parent", Value: valueOrDash(meta.ParentSessionID)},
+		Field{Label: "children", Value: childCountValue(meta.ChildCount, meta.OpenChildCount)},
+		Field{Label: "last event", Value: valueOrDash(sess.LastEvent)},
+		Field{Label: "waiting", Value: valueOrDash(meta.WaitingFor)},
+		Field{Label: "note", Value: valueOrDash(note)},
+	)
+	return fields
+}
+
+func hasTokenStats(info source.TranscriptInfo) bool {
+	return info.InputTokens > 0 ||
+		info.OutputTokens > 0 ||
+		info.CacheCreationTokens > 0 ||
+		info.CacheReadTokens > 0
+}
+
+func formatTokenCount(n int64) string {
+	if n <= 0 {
+		return "-"
+	}
+	s := strconv.FormatInt(n, 10)
+	var b []byte
+	prefix := len(s) % 3
+	if prefix == 0 {
+		prefix = 3
+	}
+	b = append(b, s[:prefix]...)
+	for i := prefix; i < len(s); i += 3 {
+		b = append(b, ',')
+		b = append(b, s[i:i+3]...)
+	}
+	return string(b)
 }
 
 func childCountValue(total, open int) string {
