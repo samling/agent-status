@@ -34,6 +34,9 @@ func TestParseTranscriptCapturesConversationPreviews(t *testing.T) {
 	if info.LastUserPrompt != "second user message" {
 		t.Fatalf("LastUserPrompt = %q, want second user message", info.LastUserPrompt)
 	}
+	if info.UserMessages != 2 || info.AgentMessages != 1 {
+		t.Fatalf("messages = user:%d agent:%d, want 2/1", info.UserMessages, info.AgentMessages)
+	}
 }
 
 func TestTranscriptUsesMetaPath(t *testing.T) {

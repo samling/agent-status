@@ -102,7 +102,9 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 			},
 			transcript: source.TranscriptInfo{
 				GitBranch:           "feature/ui",
-				InputTokens:         1000,
+				UserMessages:        17,
+				AgentMessages:       5,
+				InputTokens:         100000,
 				OutputTokens:        250,
 				CacheCreationTokens: 50,
 				CacheReadTokens:     400,
@@ -138,8 +140,14 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 	if got := fieldValue(detail.Metadata, "branch"); got != "feature/ui" {
 		t.Fatalf("branch field = %q, want feature/ui", got)
 	}
-	if got := fieldValue(detail.Metadata, "input tokens"); got != "1,000" {
-		t.Fatalf("input tokens field = %q, want 1,000", got)
+	if got := fieldValue(detail.Metadata, "user msgs"); got != "17" {
+		t.Fatalf("user msgs field = %q, want 17", got)
+	}
+	if got := fieldValue(detail.Metadata, "agent msgs"); got != "5" {
+		t.Fatalf("agent msgs field = %q, want 5", got)
+	}
+	if got := fieldValue(detail.Metadata, "input tokens"); got != "100k" {
+		t.Fatalf("input tokens field = %q, want 100k", got)
 	}
 	if got := fieldValue(detail.Metadata, "output tokens"); got != "250" {
 		t.Fatalf("output tokens field = %q, want 250", got)
@@ -185,6 +193,24 @@ func TestCardsExposeChildrenAndDropOrphans(t *testing.T) {
 	}
 	if got := cardByID(cards, "orphan-1"); got.SessionID != "" {
 		t.Fatalf("orphan card should be filtered, got %#v", got)
+	}
+}
+
+func TestMetadataShowsZeroMessageSide(t *testing.T) {
+	fields := metadataFields(state.Session{
+		SessionID: "session-1",
+		Agent:     state.AgentCodex,
+		LastEvent: state.EventDiscovered,
+	}, source.SessionMeta{}, source.TranscriptInfo{
+		UserMessages:  3,
+		AgentMessages: 0,
+	}, "")
+
+	if got := fieldValue(fields, "user msgs"); got != "3" {
+		t.Fatalf("user msgs field = %q, want 3", got)
+	}
+	if got := fieldValue(fields, "agent msgs"); got != "0" {
+		t.Fatalf("agent msgs field = %q, want 0", got)
 	}
 }
 

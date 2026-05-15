@@ -31,6 +31,8 @@ type TranscriptInfo struct {
 	OutputTokens        int64
 	CacheCreationTokens int64
 	CacheReadTokens     int64
+	UserMessages        int
+	AgentMessages       int
 	LastUserPrompt      string // raw text of the most recent user-typed prompt
 	RecentMessages      []ConversationMessage
 }
@@ -68,6 +70,12 @@ func LoadTranscriptPath(path string, parse func(string) (TranscriptInfo, error))
 func AppendConversationMessage(info *TranscriptInfo, msg ConversationMessage) {
 	if info == nil || msg.Role == "" || msg.Text == "" {
 		return
+	}
+	switch msg.Role {
+	case "user":
+		info.UserMessages++
+	case "assistant":
+		info.AgentMessages++
 	}
 	info.RecentMessages = append(info.RecentMessages, msg)
 	if len(info.RecentMessages) > MaxConversationMessages {

@@ -177,10 +177,16 @@ func metadataFields(sess state.Session, meta source.SessionMeta, info source.Tra
 	}
 	if hasTokenStats(info) {
 		fields = append(fields,
-			Field{Label: "input tokens", Value: formatTokenCount(info.InputTokens)},
-			Field{Label: "output tokens", Value: formatTokenCount(info.OutputTokens)},
-			Field{Label: "cache create", Value: formatTokenCount(info.CacheCreationTokens)},
-			Field{Label: "cache read", Value: formatTokenCount(info.CacheReadTokens)},
+			Field{Label: "input tokens", Value: formatCompactCount(info.InputTokens)},
+			Field{Label: "output tokens", Value: formatCompactCount(info.OutputTokens)},
+			Field{Label: "cache create", Value: formatCompactCount(info.CacheCreationTokens)},
+			Field{Label: "cache read", Value: formatCompactCount(info.CacheReadTokens)},
+		)
+	}
+	if hasMessageStats(info) {
+		fields = append(fields,
+			Field{Label: "user msgs", Value: formatMessageCount(info.UserMessages)},
+			Field{Label: "agent msgs", Value: formatMessageCount(info.AgentMessages)},
 		)
 	}
 	fields = append(fields,
@@ -202,22 +208,44 @@ func hasTokenStats(info source.TranscriptInfo) bool {
 		info.CacheReadTokens > 0
 }
 
-func formatTokenCount(n int64) string {
+func hasMessageStats(info source.TranscriptInfo) bool {
+	return info.UserMessages > 0 || info.AgentMessages > 0
+}
+
+func formatCompactCount(n int64) string {
 	if n <= 0 {
 		return "-"
 	}
-	s := strconv.FormatInt(n, 10)
-	var b []byte
-	prefix := len(s) % 3
-	if prefix == 0 {
-		prefix = 3
+	return formatPositiveCompactCount(n)
+}
+
+func formatMessageCount(n int) string {
+	if n <= 0 {
+		return "0"
 	}
-	b = append(b, s[:prefix]...)
-	for i := prefix; i < len(s); i += 3 {
-		b = append(b, ',')
-		b = append(b, s[i:i+3]...)
+	return formatPositiveCompactCount(int64(n))
+}
+
+func formatPositiveCompactCount(n int64) string {
+	units := []struct {
+		value  int64
+		suffix string
+	}{
+		{1_000_000_000, "B"},
+		{1_000_000, "M"},
+		{1_000, "k"},
 	}
-	return string(b)
+	for _, unit := range units {
+		if n >= unit.value {
+			whole := n / unit.value
+			decimal := (n % unit.value) * 10 / unit.value
+			if whole >= 100 || decimal == 0 {
+				return strconv.FormatInt(whole, 10) + unit.suffix
+			}
+			return strconv.FormatInt(whole, 10) + "." + strconv.FormatInt(decimal, 10) + unit.suffix
+		}
+	}
+	return strconv.FormatInt(n, 10)
 }
 
 func childCountValue(total, open int) string {

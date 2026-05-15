@@ -46,6 +46,9 @@ func TestParseTranscript(t *testing.T) {
 	if info.TurnCount != 1 {
 		t.Fatalf("TurnCount = %d, want 1", info.TurnCount)
 	}
+	if info.UserMessages != 1 || info.AgentMessages != 1 {
+		t.Fatalf("messages = user:%d agent:%d, want 1/1", info.UserMessages, info.AgentMessages)
+	}
 	if info.InputTokens != 1000 || info.CacheReadTokens != 400 || info.OutputTokens != 250 {
 		t.Fatalf("tokens = in:%d cache:%d out:%d, want 1000/400/250", info.InputTokens, info.CacheReadTokens, info.OutputTokens)
 	}

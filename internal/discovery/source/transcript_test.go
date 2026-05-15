@@ -25,6 +25,22 @@ func TestAppendConversationMessageCapsRecentMessages(t *testing.T) {
 	if info.RecentMessages[0].Timestamp != "c" {
 		t.Fatalf("oldest retained timestamp = %q, want c", info.RecentMessages[0].Timestamp)
 	}
+	if info.UserMessages != MaxConversationMessages+2 {
+		t.Fatalf("UserMessages = %d, want %d", info.UserMessages, MaxConversationMessages+2)
+	}
+}
+
+func TestAppendConversationMessageCountsRoles(t *testing.T) {
+	var info TranscriptInfo
+	AppendConversationMessage(&info, ConversationMessage{Role: "user", Text: "question"})
+	AppendConversationMessage(&info, ConversationMessage{Role: "assistant", Text: "answer"})
+
+	if info.UserMessages != 1 {
+		t.Fatalf("UserMessages = %d, want 1", info.UserMessages)
+	}
+	if info.AgentMessages != 1 {
+		t.Fatalf("AgentMessages = %d, want 1", info.AgentMessages)
+	}
 }
 
 func TestExtractTextContentSupportsStringAndBlocks(t *testing.T) {
