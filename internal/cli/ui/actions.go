@@ -164,17 +164,7 @@ func (m uiModel) updateNoteDisplay(id, text string) uiModel {
 	if m.detailFor != id || m.detail.SessionID != id {
 		return m
 	}
-	value := text
-	if value == "" {
-		value = "-"
-	}
-	for i := range m.detail.Metadata {
-		if m.detail.Metadata[i].Label == "note" {
-			m.detail.Metadata[i].Value = value
-			return m
-		}
-	}
-	m.detail.Metadata = append(m.detail.Metadata, sessionview.Field{Label: "note", Value: value})
+	m.detail.Metadata.Note = text
 	return m
 }
 

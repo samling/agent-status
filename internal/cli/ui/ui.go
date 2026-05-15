@@ -141,7 +141,7 @@ type uiModel struct {
 }
 
 func (m uiModel) Init() tea.Cmd {
-	return tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
+	return tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort, cardOrder(m.cards)), tickEvery(m.interval))
 }
 
 func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -213,8 +213,9 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selectedID == "" {
 				m.selectedID = m.activeSelectionID()
 			}
+			previousOrder := cardOrder(m.cards)
 			m.sort = m.sort.next()
-			sortCards(m.cards, m.sort)
+			sortCards(m.cards, m.sort, previousOrder)
 			m.keepSelectionVisible()
 		case "n":
 			m = m.beginNote()
@@ -222,13 +223,14 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showConfig = !m.showConfig
 		}
 	case tickMsg:
-		return m, tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort), tickEvery(m.interval))
+		return m, tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort, cardOrder(m.cards)), tickEvery(m.interval))
 	case snapshotMsg:
+		previousOrder := cardOrder(m.cards)
 		m.cards = msg.cards
 		m.serverUp = msg.serverUp
 		m.pruneExpandedParents()
 		if msg.sortedBy != m.sort {
-			sortCards(m.cards, m.sort)
+			sortCards(m.cards, m.sort, previousOrder)
 		}
 		if m.selectedID != "" && !cardsContain(m.cards, m.selectedID) {
 			m.selectedID = ""

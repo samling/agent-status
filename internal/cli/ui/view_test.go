@@ -58,10 +58,10 @@ func TestViewShowsSessionCardsAndRightPaneDetail(t *testing.T) {
 			Agent:     "codex",
 			Status:    "active",
 			Title:     "agent-status",
-			Metadata: []sessionview.Field{
-				{Label: "model", Value: "gpt-5.5"},
-				{Label: "branch", Value: "feature/ui"},
-			},
+			Metadata: detailMetadata(
+				metadataItem{Label: "model", Value: "gpt-5.5"},
+				metadataItem{Label: "branch", Value: "feature/ui"},
+			),
 			Conversation: []sessionview.ConversationMessage{
 				{Role: "user", Text: "newest"},
 				{Role: "assistant", Text: "older"},
@@ -127,6 +127,28 @@ func TestSelectedCardUsesBorderAccentWithoutInnerBackground(t *testing.T) {
 	out := renderCard(card, 36, true, false, sessionview.SessionDetail{}, false)
 	if strings.Contains(out, "48;5;237") {
 		t.Fatalf("selected card should not render an inner background block; output:\n%q", out)
+	}
+}
+
+func TestSelectedCardIncludesSelectionMarker(t *testing.T) {
+	selected := renderCard(sessionview.SessionCard{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "idle",
+		Title:     "selected",
+	}, 36, true, false, sessionview.SessionDetail{}, false)
+	active := renderCard(sessionview.SessionCard{
+		SessionID: "s2",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "active",
+	}, 36, false, false, sessionview.SessionDetail{}, false)
+
+	if !strings.Contains(selected, ">") {
+		t.Fatalf("selected card should include a selection marker; output:\n%s", selected)
+	}
+	if strings.Contains(active, ">") {
+		t.Fatalf("unselected active card should not include a selection marker; output:\n%s", active)
 	}
 }
 
@@ -348,22 +370,49 @@ func TestMoveSelectionUsesVisibleChildren(t *testing.T) {
 	}
 }
 
-func TestRenderSessionDetailUsesSectionDividers(t *testing.T) {
+func TestRenderSessionDetailUsesSectionDividerBetweenSections(t *testing.T) {
 	out := renderSessionDetail(sessionview.SessionDetail{
 		SessionID: "s1",
 		Agent:     "codex",
 		Status:    "active",
 		Title:     "agent-status",
-		Metadata: []sessionview.Field{
-			{Label: "model", Value: "gpt-5.5"},
-		},
+		Metadata: detailMetadata(
+			metadataItem{Label: "model", Value: "gpt-5.5"},
+		),
 		Conversation: []sessionview.ConversationMessage{
 			{Role: "user", Text: "hello"},
 		},
 	}, 40)
 
-	if strings.Count(out, "────────") < 2 {
-		t.Fatalf("renderSessionDetail() missing section dividers; output:\n%s", out)
+	if first := strings.Split(out, "\n")[0]; !strings.Contains(first, "Metadata") {
+		t.Fatalf("renderSessionDetail() should start with Metadata; first line %q output:\n%s", first, out)
+	}
+	count := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "────────") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("renderSessionDetail() divider count = %d, want 1; output:\n%s", count, out)
+	}
+}
+
+func TestRenderSessionDetailOmitsRepeatedHeader(t *testing.T) {
+	out := renderSessionDetail(sessionview.SessionDetail{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "left-pane-session",
+		Metadata: detailMetadata(
+			metadataItem{Label: "model", Value: "gpt-5.5"},
+		),
+	}, 80)
+
+	for _, repeated := range []string{"left-pane-session", "active"} {
+		if strings.Contains(out, repeated) {
+			t.Fatalf("renderSessionDetail() should omit repeated header value %q; output:\n%s", repeated, out)
+		}
 	}
 }
 
@@ -417,29 +466,83 @@ func TestRenderSessionDetailDarkensConversationLabels(t *testing.T) {
 	}
 }
 
-func TestRenderSessionDetailGroupsAgentAndVersion(t *testing.T) {
+func TestRenderSessionDetailGroupsMetadataRows(t *testing.T) {
 	out := renderSessionDetail(sessionview.SessionDetail{
 		SessionID: "s1",
 		Agent:     "codex",
 		Status:    "active",
 		Title:     "agent-status",
-		Metadata: []sessionview.Field{
-			{Label: "agent", Value: "codex"},
-			{Label: "version", Value: "0.128.0"},
-			{Label: "session id", Value: "s1"},
-			{Label: "session", Value: "agent-status"},
-		},
-	}, 80)
+		Metadata: detailMetadata(
+			metadataItem{Label: "agent", Value: "codex"},
+			metadataItem{Label: "version", Value: "0.128.0"},
+			metadataItem{Label: "model", Value: "gpt-5.5"},
+			metadataItem{Label: "session", Value: "agent-status"},
+			metadataItem{Label: "cwd", Value: "/tmp/project"},
+			metadataItem{Label: "branch", Value: "feature/ui"},
+			metadataItem{Label: "pid", Value: "1234"},
+			metadataItem{Label: "parent", Value: "root"},
+			metadataItem{Label: "children", Value: "2, 1 open"},
+		),
+	}, 120)
 
+	assertSameRenderedLine(t, out, "agent: codex", "version: 0.128.0", "model: gpt-5.5")
+	assertSameRenderedLine(t, out, "cwd: /tmp/project", "branch: feature/ui")
+	assertSameRenderedLine(t, out, "pid: 1234", "parent: root", "children: 2 (1 open)")
+}
+
+func assertSameRenderedLine(t *testing.T, out string, parts ...string) {
+	t.Helper()
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "agent: codex") {
-			if !strings.Contains(line, "version: 0.128.0") {
-				t.Fatalf("version should share metadata row with agent; line=%q output:\n%s", line, out)
+		matched := true
+		for _, part := range parts {
+			if !strings.Contains(line, part) {
+				matched = false
+				break
 			}
+		}
+		if matched {
 			return
 		}
 	}
-	t.Fatalf("renderSessionDetail() missing agent metadata row; output:\n%s", out)
+	t.Fatalf("rendered output missing same-line parts %#v; output:\n%s", parts, out)
+}
+
+func detailMetadata(fields ...metadataItem) sessionview.DetailMetadata {
+	var meta sessionview.DetailMetadata
+	for _, field := range fields {
+		switch field.Label {
+		case "agent":
+			meta.Agent = field.Value
+		case "version":
+			meta.Version = field.Value
+		case "model":
+			meta.Model = field.Value
+		case "session":
+			meta.Session = field.Value
+		case "session id":
+			meta.SessionID = field.Value
+		case "cwd":
+			meta.Cwd = field.Value
+		case "branch":
+			meta.Branch = field.Value
+		case "pid":
+			if field.Value == "1234" {
+				meta.PID = 1234
+			}
+		case "parent":
+			meta.ParentSessionID = field.Value
+		case "children":
+			meta.ChildCount = 2
+			meta.OpenChildCount = 1
+		case "last event":
+			meta.LastEvent = field.Value
+		case "waiting":
+			meta.Waiting = field.Value
+		case "note":
+			meta.Note = field.Value
+		}
+	}
+	return meta
 }
 
 func TestViewAddsVerticalPanelDivider(t *testing.T) {
@@ -543,7 +646,7 @@ func TestRenderMetadataKeepsNarrowValuesVisible(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI256)
 	defer lipgloss.SetColorProfile(oldProfile)
 
-	out := strings.Join(renderMetadata([]sessionview.Field{
+	out := strings.Join(renderMetadata([]metadataItem{
 		{Label: "model", Value: "gpt-5.5"},
 		{Label: "branch", Value: "feature/ui"},
 	}, 20), "\n")
@@ -639,9 +742,9 @@ func TestCommitNoteUpdatesVisibleDetailMetadata(t *testing.T) {
 			Agent:     "codex",
 			Status:    "active",
 			Title:     "agent-status",
-			Metadata: []sessionview.Field{
-				{Label: "note", Value: "old note"},
-			},
+			Metadata: detailMetadata(
+				metadataItem{Label: "note", Value: "old note"},
+			),
 		},
 	}
 

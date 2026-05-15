@@ -37,9 +37,27 @@ type SessionCard struct {
 	ChildStatus     string `json:"child_status,omitempty"`
 }
 
-type Field struct {
-	Label string `json:"label"`
-	Value string `json:"value"`
+type DetailMetadata struct {
+	Agent               string `json:"agent"`
+	Version             string `json:"version"`
+	Model               string `json:"model"`
+	Session             string `json:"session"`
+	SessionID           string `json:"session_id"`
+	Cwd                 string `json:"cwd"`
+	Branch              string `json:"branch"`
+	InputTokens         int64  `json:"input_tokens,omitempty"`
+	OutputTokens        int64  `json:"output_tokens,omitempty"`
+	CacheCreationTokens int64  `json:"cache_creation_tokens,omitempty"`
+	CacheReadTokens     int64  `json:"cache_read_tokens,omitempty"`
+	UserMessages        int    `json:"user_messages,omitempty"`
+	AgentMessages       int    `json:"agent_messages,omitempty"`
+	PID                 int    `json:"pid,omitempty"`
+	ParentSessionID     string `json:"parent_session_id,omitempty"`
+	ChildCount          int    `json:"child_count,omitempty"`
+	OpenChildCount      int    `json:"open_child_count,omitempty"`
+	LastEvent           string `json:"last_event"`
+	Waiting             string `json:"waiting"`
+	Note                string `json:"note"`
 }
 
 type ConversationMessage struct {
@@ -53,7 +71,7 @@ type SessionDetail struct {
 	Agent           string                `json:"agent"`
 	Status          string                `json:"status"`
 	Title           string                `json:"title"`
-	Metadata        []Field               `json:"metadata"`
+	Metadata        DetailMetadata        `json:"metadata"`
 	Conversation    []ConversationMessage `json:"conversation"`
 	TranscriptError string                `json:"transcript_error,omitempty"`
 }
@@ -118,7 +136,7 @@ func (p Provider) Detail(ctx context.Context, id string) (SessionDetail, error) 
 	if transcriptErr != nil {
 		detail.TranscriptError = transcriptErr.Error()
 	}
-	detail.Metadata = metadataFields(sess, m, info, notes[id])
+	detail.Metadata = detailMetadata(sess, m, info, notes[id])
 	if transcriptErr == nil {
 		detail.Conversation = newestFirst(info.RecentMessages)
 	}
@@ -158,104 +176,37 @@ func titleFor(name, cwd string) string {
 	return base
 }
 
-func metadataFields(sess state.Session, meta source.SessionMeta, info source.TranscriptInfo, note string) []Field {
+func detailMetadata(sess state.Session, meta source.SessionMeta, info source.TranscriptInfo, note string) DetailMetadata {
 	model := firstNonEmpty(info.Model, meta.Model)
 	version := firstNonEmpty(info.Version, meta.Version)
-	pid := "-"
+	pid := 0
 	if meta.PID > 0 {
-		pid = strconv.Itoa(meta.PID)
+		pid = meta.PID
 	} else if sess.PID > 0 {
-		pid = strconv.Itoa(sess.PID)
+		pid = sess.PID
 	}
-	fields := []Field{
-		{Label: "agent", Value: valueOrDash(sess.Agent)},
-		{Label: "version", Value: valueOrDash(version)},
-		{Label: "session", Value: valueOrDash(meta.Name)},
-		{Label: "session id", Value: valueOrDash(sess.SessionID)},
-		{Label: "model", Value: valueOrDash(model)},
-		{Label: "branch", Value: valueOrDash(info.GitBranch)},
+	return DetailMetadata{
+		Agent:               sess.Agent,
+		Version:             version,
+		Model:               model,
+		Session:             meta.Name,
+		SessionID:           sess.SessionID,
+		Cwd:                 meta.Cwd,
+		Branch:              info.GitBranch,
+		InputTokens:         info.InputTokens,
+		OutputTokens:        info.OutputTokens,
+		CacheCreationTokens: info.CacheCreationTokens,
+		CacheReadTokens:     info.CacheReadTokens,
+		UserMessages:        info.UserMessages,
+		AgentMessages:       info.AgentMessages,
+		PID:                 pid,
+		ParentSessionID:     meta.ParentSessionID,
+		ChildCount:          meta.ChildCount,
+		OpenChildCount:      meta.OpenChildCount,
+		LastEvent:           sess.LastEvent,
+		Waiting:             meta.WaitingFor,
+		Note:                note,
 	}
-	if hasTokenStats(info) {
-		fields = append(fields,
-			Field{Label: "input tokens", Value: formatCompactCount(info.InputTokens)},
-			Field{Label: "output tokens", Value: formatCompactCount(info.OutputTokens)},
-			Field{Label: "cache create", Value: formatCompactCount(info.CacheCreationTokens)},
-			Field{Label: "cache read", Value: formatCompactCount(info.CacheReadTokens)},
-		)
-	}
-	if hasMessageStats(info) {
-		fields = append(fields,
-			Field{Label: "user msgs", Value: formatMessageCount(info.UserMessages)},
-			Field{Label: "agent msgs", Value: formatMessageCount(info.AgentMessages)},
-		)
-	}
-	fields = append(fields,
-		Field{Label: "pid", Value: pid},
-		Field{Label: "cwd", Value: valueOrDash(meta.Cwd)},
-		Field{Label: "parent", Value: valueOrDash(meta.ParentSessionID)},
-		Field{Label: "children", Value: childCountValue(meta.ChildCount, meta.OpenChildCount)},
-		Field{Label: "last event", Value: valueOrDash(sess.LastEvent)},
-		Field{Label: "waiting", Value: valueOrDash(meta.WaitingFor)},
-		Field{Label: "note", Value: valueOrDash(note)},
-	)
-	return fields
-}
-
-func hasTokenStats(info source.TranscriptInfo) bool {
-	return info.InputTokens > 0 ||
-		info.OutputTokens > 0 ||
-		info.CacheCreationTokens > 0 ||
-		info.CacheReadTokens > 0
-}
-
-func hasMessageStats(info source.TranscriptInfo) bool {
-	return info.UserMessages > 0 || info.AgentMessages > 0
-}
-
-func formatCompactCount(n int64) string {
-	if n <= 0 {
-		return "-"
-	}
-	return formatPositiveCompactCount(n)
-}
-
-func formatMessageCount(n int) string {
-	if n <= 0 {
-		return "0"
-	}
-	return formatPositiveCompactCount(int64(n))
-}
-
-func formatPositiveCompactCount(n int64) string {
-	units := []struct {
-		value  int64
-		suffix string
-	}{
-		{1_000_000_000, "B"},
-		{1_000_000, "M"},
-		{1_000, "k"},
-	}
-	for _, unit := range units {
-		if n >= unit.value {
-			whole := n / unit.value
-			decimal := (n % unit.value) * 10 / unit.value
-			if whole >= 100 || decimal == 0 {
-				return strconv.FormatInt(whole, 10) + unit.suffix
-			}
-			return strconv.FormatInt(whole, 10) + "." + strconv.FormatInt(decimal, 10) + unit.suffix
-		}
-	}
-	return strconv.FormatInt(n, 10)
-}
-
-func childCountValue(total, open int) string {
-	if total <= 0 {
-		return "-"
-	}
-	if open > 0 {
-		return strconv.Itoa(total) + " (" + strconv.Itoa(open) + " open)"
-	}
-	return strconv.Itoa(total)
 }
 
 func newestFirst(in []source.ConversationMessage) []ConversationMessage {
@@ -277,13 +228,6 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
-}
-
-func valueOrDash(v string) string {
-	if v == "" {
-		return "-"
-	}
-	return v
 }
 
 func relTime(t time.Time) string {

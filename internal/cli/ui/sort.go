@@ -37,7 +37,7 @@ func (m sortMode) next() sortMode {
 	return sortCycle[0]
 }
 
-func sortCards(cards []sessionview.SessionCard, mode sortMode) {
+func sortCards(cards []sessionview.SessionCard, mode sortMode, previousOrder map[string]int) {
 	sort.SliceStable(cards, func(i, j int) bool {
 		a, b := cards[i], cards[j]
 		switch mode {
@@ -50,6 +50,9 @@ func sortCards(cards []sessionview.SessionCard, mode sortMode) {
 			if ra != rb {
 				return ra < rb
 			}
+			if ai, bi, ok := previousIndexes(previousOrder, a.SessionID, b.SessionID); ok {
+				return ai < bi
+			}
 			if a.FirstSeenAt != b.FirstSeenAt {
 				return a.FirstSeenAt < b.FirstSeenAt
 			}
@@ -60,6 +63,30 @@ func sortCards(cards []sessionview.SessionCard, mode sortMode) {
 		}
 		return a.SessionID < b.SessionID
 	})
+}
+
+func cardOrder(cards []sessionview.SessionCard) map[string]int {
+	out := make(map[string]int, len(cards))
+	for i, card := range cards {
+		out[card.SessionID] = i
+	}
+	return out
+}
+
+func previousIndexes(order map[string]int, a, b string) (int, int, bool) {
+	ai, aok := order[a]
+	bi, bok := order[b]
+	switch {
+	case aok && bok && ai != bi:
+		return ai, bi, true
+	case aok != bok:
+		if aok {
+			return 0, 1, true
+		}
+		return 1, 0, true
+	default:
+		return 0, 0, false
+	}
 }
 
 func statusRank(status string) int {

@@ -31,7 +31,7 @@ func TestLoadSnapshotSelectsFirstCardWhenSelectionIsStale(t *testing.T) {
 	}))
 	defer server.Close()
 
-	msg := loadSnapshot(serverAddr(server), "stale", sortStatus)().(snapshotMsg)
+	msg := loadSnapshot(serverAddr(server), "stale", sortStatus, nil)().(snapshotMsg)
 	if unexpectedPath != "" {
 		t.Fatalf("unexpected request path %q", unexpectedPath)
 	}
@@ -59,7 +59,7 @@ func TestLoadSnapshotDoesNotFetchStaleDetailWhenCardsFail(t *testing.T) {
 	}))
 	defer server.Close()
 
-	msg := loadSnapshot(serverAddr(server), "stale", sortStatus)().(snapshotMsg)
+	msg := loadSnapshot(serverAddr(server), "stale", sortStatus, nil)().(snapshotMsg)
 	if msg.serverUp {
 		t.Fatal("serverUp = true, want false")
 	}
@@ -89,7 +89,7 @@ func TestLoadSnapshotCarriesDetailError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	msg := loadSnapshot(serverAddr(server), "s1", sortStatus)().(snapshotMsg)
+	msg := loadSnapshot(serverAddr(server), "s1", sortStatus, nil)().(snapshotMsg)
 	if msg.detailFor != "s1" {
 		t.Fatalf("detailFor = %q, want s1", msg.detailFor)
 	}
@@ -120,7 +120,7 @@ func TestLoadSnapshotPrefersActiveCardWhenOpening(t *testing.T) {
 	}))
 	defer server.Close()
 
-	msg := loadSnapshot(serverAddr(server), "", sortStatus)().(snapshotMsg)
+	msg := loadSnapshot(serverAddr(server), "", sortStatus, nil)().(snapshotMsg)
 	if msg.detailFor != "active" {
 		t.Fatalf("detailFor = %q, want active", msg.detailFor)
 	}
@@ -129,6 +129,33 @@ func TestLoadSnapshotPrefersActiveCardWhenOpening(t *testing.T) {
 	}
 	if detailPath != "/views/sessions/active" {
 		t.Fatalf("detail path = %q, want /views/sessions/active", detailPath)
+	}
+}
+
+func TestLoadSnapshotPreservesPreviousStatusOrder(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/views/sessions":
+			writeJSON(w, []sessionview.SessionCard{
+				{SessionID: "third", Status: "idle", FirstSeenAt: "2026-05-14T10:00:00Z"},
+				{SessionID: "first", Status: "idle", FirstSeenAt: "2026-05-14T10:02:00Z"},
+				{SessionID: "second", Status: "idle", FirstSeenAt: "2026-05-14T10:01:00Z"},
+			})
+		case "/views/sessions/first":
+			writeJSON(w, sessionview.SessionDetail{SessionID: "first"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	previousOrder := map[string]int{"first": 0, "second": 1, "third": 2}
+	msg := loadSnapshot(serverAddr(server), "first", sortStatus, previousOrder)().(snapshotMsg)
+
+	for i, want := range []string{"first", "second", "third"} {
+		if msg.cards[i].SessionID != want {
+			t.Fatalf("cards[%d] = %q, want %q; cards=%#v", i, msg.cards[i].SessionID, want, msg.cards)
+		}
 	}
 }
 

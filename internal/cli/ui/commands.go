@@ -26,7 +26,7 @@ type detailMsg struct {
 }
 type errMsg struct{ err error }
 
-func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
+func loadSnapshot(serverAddr, selectedID string, mode sortMode, previousOrder map[string]int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -36,7 +36,7 @@ func loadSnapshot(serverAddr, selectedID string, mode sortMode) tea.Cmd {
 		if err != nil {
 			cards = nil
 		}
-		sortCards(cards, mode)
+		sortCards(cards, mode, previousOrder)
 		focus := initialFocusID(cards, selectedID)
 		var detail sessionview.SessionDetail
 		var detailErr error

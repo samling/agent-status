@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -38,6 +39,11 @@ const (
 	childIndentCols = 2
 	roleLabelWidth  = 5
 )
+
+type metadataItem struct {
+	Label string
+	Value string
+}
 
 func statusStyle(status string) lipgloss.Style {
 	switch status {
@@ -205,10 +211,14 @@ func renderCard(card sessionview.SessionCard, width int, selected, _ bool, _ ses
 		status = card.ChildStatus
 	}
 	statusText := statusStyle(status).Render(status)
-	agentWidth := max(contentWidth-lipgloss.Width(statusText)-1, 1)
+	selectionMarker := ""
+	if selected {
+		selectionMarker = accentStyle.Render(">") + " "
+	}
+	agentWidth := max(contentWidth-lipgloss.Width(selectionMarker)-lipgloss.Width(statusText)-1, 1)
 	agent = truncate(agent, agentWidth)
 	title := compactCardLine(card.Title, "", contentWidth)
-	top := fmt.Sprintf("%-*s %s", agentWidth, agent, statusText)
+	top := selectionMarker + fmt.Sprintf("%-*s %s", agentWidth, agent, statusText)
 	parts := []string{top, title}
 	style := lipgloss.NewStyle().
 		Width(boxWidth).
@@ -267,12 +277,9 @@ func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
 		return dimStyle.Render("select a session")
 	}
 	lines := []string{
-		sessionNameStyle.Render(detail.Title),
-		detail.Agent + " " + statusStyle(detail.Status).Render(detail.Status),
-		sectionDivider(width),
 		headerStyle.Render("Metadata"),
 	}
-	lines = append(lines, renderMetadata(detail.Metadata, width)...)
+	lines = append(lines, renderMetadata(metadataFields(detail.Metadata), width)...)
 	lines = append(lines, sectionDivider(width), headerStyle.Render("Conversation"))
 	if detail.TranscriptError != "" {
 		lines = append(lines, errorStyle.Render("transcript: "+detail.TranscriptError))
@@ -323,24 +330,172 @@ func renderDetailUnavailable(err error, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderMetadata(fields []sessionview.Field, width int) []string {
+func renderMetadata(fields []metadataItem, width int) []string {
 	if len(fields) == 0 {
 		return []string{dimStyle.Render("(no metadata)")}
 	}
-	lines := make([]string, 0, (len(fields)+1)/2)
-	for i := 0; i < len(fields); i += 2 {
-		left := metadataField(fields[i], width)
-		if i+1 >= len(fields) {
-			lines = append(lines, left)
+	lines := make([]string, 0, len(fields))
+	for i := 0; i < len(fields); {
+		if groupLen := metadataGroupLen(fields[i:]); groupLen > 0 {
+			lines = append(lines, renderMetadataGroup(fields[i:i+groupLen], width)...)
+			i += groupLen
 			continue
 		}
-		right := metadataField(fields[i+1], width)
-		line := left + "   " + right
-		if lipgloss.Width(line) <= width {
-			lines = append(lines, line)
-		} else {
-			lines = append(lines, left, right)
+		line := metadataField(fields[i], width)
+		i++
+		for i < len(fields) && metadataGroupLen(fields[i:]) == 0 {
+			next := metadataField(fields[i], width)
+			candidate := line + "   " + next
+			if lipgloss.Width(candidate) > width {
+				break
+			}
+			line = candidate
+			i++
 		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func metadataFields(meta sessionview.DetailMetadata) []metadataItem {
+	fields := []metadataItem{
+		{Label: "agent", Value: valueOrDash(meta.Agent)},
+		{Label: "version", Value: valueOrDash(meta.Version)},
+		{Label: "model", Value: valueOrDash(meta.Model)},
+		{Label: "session", Value: valueOrDash(meta.Session)},
+		{Label: "session id", Value: valueOrDash(meta.SessionID)},
+		{Label: "cwd", Value: valueOrDash(meta.Cwd)},
+		{Label: "branch", Value: valueOrDash(meta.Branch)},
+	}
+	if hasTokenStats(meta) {
+		fields = append(fields,
+			metadataItem{Label: "input tokens", Value: formatCompactCount(meta.InputTokens)},
+			metadataItem{Label: "output tokens", Value: formatCompactCount(meta.OutputTokens)},
+			metadataItem{Label: "cache create", Value: formatCompactCount(meta.CacheCreationTokens)},
+			metadataItem{Label: "cache read", Value: formatCompactCount(meta.CacheReadTokens)},
+		)
+	}
+	if hasMessageStats(meta) {
+		fields = append(fields,
+			metadataItem{Label: "user msgs", Value: formatMessageCount(meta.UserMessages)},
+			metadataItem{Label: "agent msgs", Value: formatMessageCount(meta.AgentMessages)},
+		)
+	}
+	fields = append(fields,
+		metadataItem{Label: "pid", Value: pidValue(meta.PID)},
+		metadataItem{Label: "parent", Value: valueOrDash(meta.ParentSessionID)},
+		metadataItem{Label: "children", Value: childCountValue(meta.ChildCount, meta.OpenChildCount)},
+		metadataItem{Label: "last event", Value: valueOrDash(meta.LastEvent)},
+		metadataItem{Label: "waiting", Value: valueOrDash(meta.Waiting)},
+		metadataItem{Label: "note", Value: valueOrDash(meta.Note)},
+	)
+	return fields
+}
+
+func hasTokenStats(meta sessionview.DetailMetadata) bool {
+	return meta.InputTokens > 0 ||
+		meta.OutputTokens > 0 ||
+		meta.CacheCreationTokens > 0 ||
+		meta.CacheReadTokens > 0
+}
+
+func hasMessageStats(meta sessionview.DetailMetadata) bool {
+	return meta.UserMessages > 0 || meta.AgentMessages > 0
+}
+
+func pidValue(pid int) string {
+	if pid <= 0 {
+		return "-"
+	}
+	return strconv.Itoa(pid)
+}
+
+func formatCompactCount(n int64) string {
+	if n <= 0 {
+		return "-"
+	}
+	return formatPositiveCompactCount(n)
+}
+
+func formatMessageCount(n int) string {
+	if n <= 0 {
+		return "0"
+	}
+	return formatPositiveCompactCount(int64(n))
+}
+
+func formatPositiveCompactCount(n int64) string {
+	units := []struct {
+		value  int64
+		suffix string
+	}{
+		{1_000_000_000, "B"},
+		{1_000_000, "M"},
+		{1_000, "k"},
+	}
+	for _, unit := range units {
+		if n >= unit.value {
+			whole := n / unit.value
+			decimal := (n % unit.value) * 10 / unit.value
+			if whole >= 100 || decimal == 0 {
+				return strconv.FormatInt(whole, 10) + unit.suffix
+			}
+			return strconv.FormatInt(whole, 10) + "." + strconv.FormatInt(decimal, 10) + unit.suffix
+		}
+	}
+	return strconv.FormatInt(n, 10)
+}
+
+func childCountValue(total, open int) string {
+	if total <= 0 {
+		return "-"
+	}
+	if open > 0 {
+		return strconv.Itoa(total) + " (" + strconv.Itoa(open) + " open)"
+	}
+	return strconv.Itoa(total)
+}
+
+func valueOrDash(v string) string {
+	if v == "" {
+		return "-"
+	}
+	return v
+}
+
+func metadataGroupLen(fields []metadataItem) int {
+	for _, group := range [][]string{
+		{"agent", "version", "model"},
+		{"cwd", "branch"},
+		{"pid", "parent", "children"},
+	} {
+		if len(fields) < len(group) {
+			continue
+		}
+		matched := true
+		for i, label := range group {
+			if fields[i].Label != label {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return len(group)
+		}
+	}
+	return 0
+}
+
+func renderMetadataGroup(fields []metadataItem, width int) []string {
+	lines := []string{metadataField(fields[0], width)}
+	for _, field := range fields[1:] {
+		next := metadataField(field, width)
+		candidate := lines[len(lines)-1] + "   " + next
+		if lipgloss.Width(candidate) <= width {
+			lines[len(lines)-1] = candidate
+			continue
+		}
+		lines = append(lines, next)
 	}
 	return lines
 }
@@ -356,7 +511,7 @@ func verticalDivider(height int) string {
 	return strings.Join(lines, "\n")
 }
 
-func metadataField(field sessionview.Field, width int) string {
+func metadataField(field metadataItem, width int) string {
 	if width <= 0 {
 		return ""
 	}

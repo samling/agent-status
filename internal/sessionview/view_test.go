@@ -120,43 +120,41 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Detail() error = %v", err)
 	}
-	if got := fieldValue(detail.Metadata, "note"); got != "follow up" {
+	if got := detail.Metadata.Note; got != "follow up" {
 		t.Fatalf("note field = %q, want follow up", got)
 	}
 	if detail.Title != "Useful session name" {
 		t.Fatalf("Title = %q, want Useful session name", detail.Title)
 	}
-	if got := fieldValue(detail.Metadata, "session"); got != "Useful session name" {
+	if got := detail.Metadata.Session; got != "Useful session name" {
 		t.Fatalf("session field = %q, want Useful session name", got)
 	}
-	if got := fieldValue(detail.Metadata, "session id"); got != "session-1" {
+	if got := detail.Metadata.SessionID; got != "session-1" {
 		t.Fatalf("session id field = %q, want session-1", got)
 	}
-	if got := fieldValue(detail.Metadata, "last event"); got != state.EventUserPromptSubmit {
+	if got := detail.Metadata.LastEvent; got != state.EventUserPromptSubmit {
 		t.Fatalf("last event field = %q, want %s", got, state.EventUserPromptSubmit)
 	}
-	assertFieldBefore(t, detail.Metadata, "last event", "waiting")
-	assertFieldOrder(t, detail.Metadata, []string{"agent", "version", "session", "session id", "model", "branch"})
-	if got := fieldValue(detail.Metadata, "branch"); got != "feature/ui" {
+	if got := detail.Metadata.Branch; got != "feature/ui" {
 		t.Fatalf("branch field = %q, want feature/ui", got)
 	}
-	if got := fieldValue(detail.Metadata, "user msgs"); got != "17" {
-		t.Fatalf("user msgs field = %q, want 17", got)
+	if got := detail.Metadata.UserMessages; got != 17 {
+		t.Fatalf("user msgs field = %d, want 17", got)
 	}
-	if got := fieldValue(detail.Metadata, "agent msgs"); got != "5" {
-		t.Fatalf("agent msgs field = %q, want 5", got)
+	if got := detail.Metadata.AgentMessages; got != 5 {
+		t.Fatalf("agent msgs field = %d, want 5", got)
 	}
-	if got := fieldValue(detail.Metadata, "input tokens"); got != "100k" {
-		t.Fatalf("input tokens field = %q, want 100k", got)
+	if got := detail.Metadata.InputTokens; got != 100000 {
+		t.Fatalf("input tokens field = %d, want 100000", got)
 	}
-	if got := fieldValue(detail.Metadata, "output tokens"); got != "250" {
-		t.Fatalf("output tokens field = %q, want 250", got)
+	if got := detail.Metadata.OutputTokens; got != 250 {
+		t.Fatalf("output tokens field = %d, want 250", got)
 	}
-	if got := fieldValue(detail.Metadata, "cache create"); got != "50" {
-		t.Fatalf("cache create field = %q, want 50", got)
+	if got := detail.Metadata.CacheCreationTokens; got != 50 {
+		t.Fatalf("cache create field = %d, want 50", got)
 	}
-	if got := fieldValue(detail.Metadata, "cache read"); got != "400" {
-		t.Fatalf("cache read field = %q, want 400", got)
+	if got := detail.Metadata.CacheReadTokens; got != 400 {
+		t.Fatalf("cache read field = %d, want 400", got)
 	}
 	if len(detail.Conversation) != 2 || detail.Conversation[0].Text != "newer" || detail.Conversation[1].Text != "older" {
 		t.Fatalf("conversation order = %#v", detail.Conversation)
@@ -197,7 +195,7 @@ func TestCardsExposeChildrenAndDropOrphans(t *testing.T) {
 }
 
 func TestMetadataShowsZeroMessageSide(t *testing.T) {
-	fields := metadataFields(state.Session{
+	meta := detailMetadata(state.Session{
 		SessionID: "session-1",
 		Agent:     state.AgentCodex,
 		LastEvent: state.EventDiscovered,
@@ -206,11 +204,11 @@ func TestMetadataShowsZeroMessageSide(t *testing.T) {
 		AgentMessages: 0,
 	}, "")
 
-	if got := fieldValue(fields, "user msgs"); got != "3" {
-		t.Fatalf("user msgs field = %q, want 3", got)
+	if got := meta.UserMessages; got != 3 {
+		t.Fatalf("user msgs field = %d, want 3", got)
 	}
-	if got := fieldValue(fields, "agent msgs"); got != "0" {
-		t.Fatalf("agent msgs field = %q, want 0", got)
+	if got := meta.AgentMessages; got != 0 {
+		t.Fatalf("agent msgs field = %d, want 0", got)
 	}
 }
 
@@ -231,7 +229,7 @@ func TestDetailKeepsMetadataWhenTranscriptFails(t *testing.T) {
 	if detail.TranscriptError == "" {
 		t.Fatalf("TranscriptError was empty")
 	}
-	if got := fieldValue(detail.Metadata, "cwd"); got != "/tmp/project" {
+	if got := detail.Metadata.Cwd; got != "/tmp/project" {
 		t.Fatalf("cwd field = %q, want /tmp/project", got)
 	}
 }
@@ -284,63 +282,24 @@ func TestDetailDefaultsWhenMetaProviderReturnsNilAndNotesMissing(t *testing.T) {
 	if detail.Title != "-" {
 		t.Fatalf("Title = %q, want -", detail.Title)
 	}
-	for _, label := range []string{"model", "branch", "version", "cwd", "waiting", "note"} {
-		if got := fieldValue(detail.Metadata, label); got != "-" {
-			t.Fatalf("%s field = %q, want -", label, got)
+	for label, got := range map[string]string{
+		"model":   detail.Metadata.Model,
+		"branch":  detail.Metadata.Branch,
+		"version": detail.Metadata.Version,
+		"cwd":     detail.Metadata.Cwd,
+		"waiting": detail.Metadata.Waiting,
+		"note":    detail.Metadata.Note,
+	} {
+		if got != "" {
+			t.Fatalf("%s field = %q, want empty", label, got)
 		}
 	}
-	if got := fieldValue(detail.Metadata, "pid"); got != "1234" {
-		t.Fatalf("pid field = %q, want 1234", got)
+	if got := detail.Metadata.PID; got != 1234 {
+		t.Fatalf("pid field = %d, want 1234", got)
 	}
 	if detail.TranscriptError != "" {
 		t.Fatalf("TranscriptError = %q, want empty", detail.TranscriptError)
 	}
-}
-
-func fieldValue(fields []Field, label string) string {
-	for _, f := range fields {
-		if f.Label == label {
-			return f.Value
-		}
-	}
-	return ""
-}
-
-func assertFieldOrder(t *testing.T, fields []Field, want []string) {
-	t.Helper()
-	if len(fields) < len(want) {
-		t.Fatalf("metadata labels = %#v, want prefix %#v", fieldLabels(fields), want)
-	}
-	for i, label := range want {
-		if fields[i].Label != label {
-			t.Fatalf("metadata labels = %#v, want prefix %#v", fieldLabels(fields), want)
-		}
-	}
-}
-
-func assertFieldBefore(t *testing.T, fields []Field, before, after string) {
-	t.Helper()
-	beforeIdx := -1
-	afterIdx := -1
-	for i, field := range fields {
-		switch field.Label {
-		case before:
-			beforeIdx = i
-		case after:
-			afterIdx = i
-		}
-	}
-	if beforeIdx == -1 || afterIdx == -1 || beforeIdx > afterIdx {
-		t.Fatalf("metadata labels = %#v, want %q before %q", fieldLabels(fields), before, after)
-	}
-}
-
-func fieldLabels(fields []Field) []string {
-	out := make([]string, 0, len(fields))
-	for _, field := range fields {
-		out = append(out, field.Label)
-	}
-	return out
 }
 
 func cardByID(cards []SessionCard, id string) SessionCard {
