@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,8 @@ type sessionFile struct {
 	StartedAt  int64  `json:"startedAt"` // Unix milliseconds
 	Entrypoint string `json:"entrypoint"`
 	Cwd        string `json:"cwd"`
+	Name       string `json:"name,omitempty"`
+	Title      string `json:"title,omitempty"`
 	Status     string `json:"status"`               // "idle"|"busy"; absent for non-cli entrypoints
 	Version    string `json:"version"`              // Claude Code version string, e.g. "2.1.128"
 	WaitingFor string `json:"waitingFor,omitempty"` // populated while a permission prompt is open, e.g. "approve Bash"
@@ -49,6 +52,7 @@ func Scan() ([]source.LiveSession, int, error) {
 		if sf.StartedAt > 0 {
 			startedAt = time.UnixMilli(sf.StartedAt)
 		}
+		children := loadSubagentSessions(sf, startedAt)
 		out = append(out, source.LiveSession{
 			Agent:        state.AgentClaudeCode,
 			SessionID:    sf.SessionID,
@@ -57,12 +61,15 @@ func Scan() ([]source.LiveSession, int, error) {
 			EngineStatus: sf.Status,
 			Meta: source.SessionMeta{
 				PID:        sf.PID,
+				Name:       sessionName(sf),
+				ChildCount: len(children),
 				Entrypoint: sf.Entrypoint,
 				Cwd:        sf.Cwd,
 				Version:    sf.Version,
 				WaitingFor: sf.WaitingFor,
 			},
 		})
+		out = append(out, children...)
 	}
 	return out, scanned, nil
 }
@@ -105,6 +112,214 @@ func walkAlive() (alive []sessionFile, scanned int, err error) {
 	}
 	pruneWalkCache(seen)
 	return alive, scanned, nil
+}
+
+func sessionName(sf sessionFile) string {
+	if name := firstNonEmpty(sf.Name, sf.Title); name != "" {
+		return name
+	}
+	if sf.SessionID == "" || sf.Cwd == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	path := filepath.Join(home, ".claude", "projects", encodePath(sf.Cwd), sf.SessionID+".jsonl")
+	return loadTranscriptSessionName(path, sf.SessionID)
+}
+
+type titleLine struct {
+	Type             string `json:"type"`
+	SessionID        string `json:"sessionId"`
+	CustomTitle      string `json:"customTitle"`
+	CustomTitleSnake string `json:"custom_title"`
+	Title            string `json:"title"`
+}
+
+type cachedTranscriptName struct {
+	mtime time.Time
+	size  int64
+	name  string
+}
+
+var (
+	transcriptNameMu    sync.Mutex
+	transcriptNameCache = map[string]cachedTranscriptName{}
+)
+
+func loadTranscriptSessionName(path, sessionID string) string {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	transcriptNameMu.Lock()
+	cached, ok := transcriptNameCache[path]
+	transcriptNameMu.Unlock()
+	if ok && cached.mtime.Equal(fi.ModTime()) && cached.size == fi.Size() {
+		return cached.name
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var name string
+	_ = source.ScanJSONL(f, func(line []byte) bool {
+		var rec titleLine
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return true
+		}
+		if rec.Type != "custom-title" && rec.Type != "custom_title" {
+			return true
+		}
+		if rec.SessionID != "" && rec.SessionID != sessionID {
+			return true
+		}
+		if next := firstNonEmpty(rec.CustomTitle, rec.CustomTitleSnake, rec.Title); next != "" {
+			name = next
+		}
+		return true
+	})
+
+	transcriptNameMu.Lock()
+	transcriptNameCache[path] = cachedTranscriptName{mtime: fi.ModTime(), size: fi.Size(), name: name}
+	transcriptNameMu.Unlock()
+	return name
+}
+
+func loadSubagentSessions(sf sessionFile, parentStartedAt time.Time) []source.LiveSession {
+	if sf.SessionID == "" || sf.Cwd == "" {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	dir := filepath.Join(home, ".claude", "projects", encodePath(sf.Cwd), sf.SessionID, "subagents")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []source.LiveSession
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".jsonl" {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		info, ok := loadSubagentInfo(path)
+		if !ok {
+			continue
+		}
+		if info.AgentID == "" {
+			info.AgentID = strings.TrimPrefix(strings.TrimSuffix(e.Name(), ".jsonl"), "agent-")
+		}
+		if info.AgentID == "" {
+			continue
+		}
+		if info.StartedAt.IsZero() {
+			info.StartedAt = parentStartedAt
+		}
+		if info.UpdatedAt.IsZero() {
+			if fi, err := e.Info(); err == nil {
+				info.UpdatedAt = fi.ModTime()
+			} else {
+				info.UpdatedAt = info.StartedAt
+			}
+		}
+		name := firstNonEmpty(info.Name, "subagent "+info.AgentID)
+		out = append(out, source.LiveSession{
+			Agent:        state.AgentClaudeCode,
+			SessionID:    sf.SessionID + ":" + info.AgentID,
+			StartedAt:    info.StartedAt,
+			Event:        state.EventDiscovered,
+			EventAt:      info.UpdatedAt,
+			EngineStatus: "idle",
+			Meta: source.SessionMeta{
+				PID:             sf.PID,
+				Name:            name,
+				ParentSessionID: sf.SessionID,
+				Entrypoint:      sf.Entrypoint,
+				Cwd:             firstNonEmpty(info.Cwd, sf.Cwd),
+				Version:         firstNonEmpty(info.Version, sf.Version),
+				Model:           info.Model,
+				Path:            path,
+				UpdatedAt:       info.UpdatedAt,
+			},
+		})
+	}
+	return out
+}
+
+type subagentInfo struct {
+	AgentID   string
+	Name      string
+	Cwd       string
+	Version   string
+	Model     string
+	StartedAt time.Time
+	UpdatedAt time.Time
+}
+
+func loadSubagentInfo(path string) (subagentInfo, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return subagentInfo{}, false
+	}
+	defer f.Close()
+
+	var info subagentInfo
+	_ = source.ScanJSONL(f, func(line []byte) bool {
+		var rec struct {
+			Timestamp        string `json:"timestamp"`
+			AgentID          string `json:"agentId"`
+			AttributionAgent string `json:"attributionAgent"`
+			Cwd              string `json:"cwd"`
+			Version          string `json:"version"`
+			Message          struct {
+				Model string `json:"model"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return true
+		}
+		if rec.AgentID != "" {
+			info.AgentID = rec.AgentID
+		}
+		if rec.AttributionAgent != "" {
+			info.Name = rec.AttributionAgent
+		}
+		if rec.Cwd != "" {
+			info.Cwd = rec.Cwd
+		}
+		if rec.Version != "" {
+			info.Version = rec.Version
+		}
+		if rec.Message.Model != "" {
+			info.Model = rec.Message.Model
+		}
+		if ts := parseRFC3339(rec.Timestamp); !ts.IsZero() {
+			if info.StartedAt.IsZero() {
+				info.StartedAt = ts
+			}
+			info.UpdatedAt = ts
+		}
+		return true
+	})
+	return info, true
+}
+
+func parseRFC3339(s string) time.Time {
+	if strings.TrimSpace(s) == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // Apply adapts a scanned source.LiveSession into the claude-specific upsert
@@ -260,4 +475,13 @@ func unixMilli(t time.Time) int64 {
 		return 0
 	}
 	return t.UnixMilli()
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }

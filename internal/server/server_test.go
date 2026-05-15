@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/samling/agent-status/internal/discovery/source"
+	"github.com/samling/agent-status/internal/sessionview"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -21,6 +22,20 @@ type fakeMeta struct {
 func (f fakeMeta) LatestMeta() map[string]source.SessionMeta { return f.meta }
 func (f fakeMeta) Transcript(string, string, source.SessionMeta) (source.TranscriptInfo, error) {
 	return f.transcript, nil
+}
+
+type fakeViews struct {
+	cards  []sessionview.SessionCard
+	detail sessionview.SessionDetail
+	err    error
+}
+
+func (f fakeViews) Cards(context.Context) ([]sessionview.SessionCard, error) {
+	return f.cards, f.err
+}
+
+func (f fakeViews) Detail(context.Context, string) (sessionview.SessionDetail, error) {
+	return f.detail, f.err
 }
 
 func TestHookUsesAgentHeader(t *testing.T) {
@@ -258,6 +273,55 @@ func TestStateOneReturnsSessionWithPID(t *testing.T) {
 	}
 	if got.PID != 4242 {
 		t.Fatalf("PID = %d, want 4242", got.PID)
+	}
+}
+
+func TestViewEndpointsReturnSessionViews(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	views := fakeViews{
+		cards: []sessionview.SessionCard{{
+			SessionID: "session-1",
+			Agent:     state.AgentCodex,
+			Status:    "active",
+			Title:     "agent-status",
+		}},
+		detail: sessionview.SessionDetail{
+			SessionID: "session-1",
+			Agent:     state.AgentCodex,
+			Status:    "active",
+			Title:     "agent-status",
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/views/sessions", nil)
+	rr := httptest.NewRecorder()
+	HandlerWithViews(store, nil, views).ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var cards []sessionview.SessionCard
+	if err := json.Unmarshal(rr.Body.Bytes(), &cards); err != nil {
+		t.Fatal(err)
+	}
+	if len(cards) != 1 || cards[0].Agent != state.AgentCodex {
+		t.Fatalf("cards = %#v", cards)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/views/sessions/session-1", nil)
+	rr = httptest.NewRecorder()
+	HandlerWithViews(store, nil, views).ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var detail sessionview.SessionDetail
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.SessionID != "session-1" {
+		t.Fatalf("detail = %#v", detail)
 	}
 }
 

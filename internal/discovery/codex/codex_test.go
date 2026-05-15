@@ -125,6 +125,88 @@ func TestScanIncludesRecentThreadBeforeProcessLink(t *testing.T) {
 	}
 }
 
+func TestScanUsesCodexSessionIndexName(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	stateDB := openTestDB(t, filepath.Join(dir, "state_5.sqlite"))
+	createThreadsTable(t, stateDB)
+	now := time.Now()
+	insertThread(t, stateDB, "thread-1", filepath.Join(dir, "rollout.jsonl"), now, now, "/tmp/project")
+	stateDB.Close()
+	if err := os.WriteFile(
+		filepath.Join(dir, "session_index.jsonl"),
+		[]byte(`{"id":"thread-1","thread_name":"Compare lazyagent to agent-status"}`+"\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, _, err := Scan()
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(sessions))
+	}
+	if sessions[0].Meta.Name != "Compare lazyagent to agent-status" {
+		t.Fatalf("Meta.Name = %q, want Compare lazyagent to agent-status", sessions[0].Meta.Name)
+	}
+}
+
+func TestScanUsesCodexSpawnEdges(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	stateDB := openTestDB(t, filepath.Join(dir, "state_5.sqlite"))
+	createThreadsTable(t, stateDB)
+	createThreadSpawnEdgesTable(t, stateDB)
+	now := time.Now()
+	insertThread(t, stateDB, "parent", filepath.Join(dir, "parent.jsonl"), now, now, "/tmp/project")
+	insertThread(t, stateDB, "child-open", filepath.Join(dir, "child-open.jsonl"), now, now, "/tmp/project")
+	insertThread(t, stateDB, "child-closed", filepath.Join(dir, "child-closed.jsonl"), now, now, "/tmp/project")
+	execTestSQL(t, stateDB,
+		`insert into thread_spawn_edges (parent_thread_id, child_thread_id, status) values (?, ?, ?)`,
+		"parent",
+		"child-open",
+		"open",
+	)
+	execTestSQL(t, stateDB,
+		`insert into thread_spawn_edges (parent_thread_id, child_thread_id, status) values (?, ?, ?)`,
+		"parent",
+		"child-closed",
+		"closed",
+	)
+	stateDB.Close()
+
+	sessions, _, err := Scan()
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	byID := map[string]string{}
+	childCounts := map[string]int{}
+	openCounts := map[string]int{}
+	childStatus := map[string]string{}
+	for _, sess := range sessions {
+		byID[sess.SessionID] = sess.Meta.ParentSessionID
+		childCounts[sess.SessionID] = sess.Meta.ChildCount
+		openCounts[sess.SessionID] = sess.Meta.OpenChildCount
+		childStatus[sess.SessionID] = sess.Meta.ChildStatus
+	}
+	if byID["child-open"] != "parent" {
+		t.Fatalf("child-open parent = %q, want parent", byID["child-open"])
+	}
+	if childStatus["child-closed"] != "closed" {
+		t.Fatalf("child-closed status = %q, want closed", childStatus["child-closed"])
+	}
+	if childCounts["parent"] != 2 {
+		t.Fatalf("parent child count = %d, want 2", childCounts["parent"])
+	}
+	if openCounts["parent"] != 1 {
+		t.Fatalf("parent open child count = %d, want 1", openCounts["parent"])
+	}
+}
+
 func TestScanLabelsFreshThreadAsSessionStart(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
@@ -181,6 +263,36 @@ func TestScanIncludesRecentRolloutBeforeSQLiteState(t *testing.T) {
 	}
 	if got.Meta.Version != "0.128.0" {
 		t.Fatalf("Meta.Version = %q, want 0.128.0", got.Meta.Version)
+	}
+}
+
+func TestScanMarksTurnAbortAsStop(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	createdAt := mustParseTime(t, "2026-05-06T22:00:00Z")
+	abortedAt := createdAt.Add(10 * time.Second)
+	rolloutPath := writeRollout(t, dir, "thread-1", createdAt, "/tmp/project")
+	appendRolloutLine(t, rolloutPath, fmt.Sprintf(
+		`{"timestamp":%q,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted","completed_at":0,"duration_ms":10000}}`+"\n",
+		abortedAt.UTC().Format(time.RFC3339Nano),
+	))
+
+	sessions, _, err := Scan()
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(sessions))
+	}
+	if sessions[0].Event != state.EventStop {
+		t.Fatalf("Event = %q, want Stop", sessions[0].Event)
+	}
+	if sessions[0].TurnID != "turn-1" {
+		t.Fatalf("TurnID = %q, want turn-1", sessions[0].TurnID)
+	}
+	if !sessions[0].EventAt.Equal(abortedAt) {
+		t.Fatalf("EventAt = %v, want %v", sessions[0].EventAt, abortedAt)
 	}
 }
 
@@ -339,6 +451,16 @@ func createLogsTable(t *testing.T, db *sql.DB) {
 		)`)
 }
 
+func createThreadSpawnEdgesTable(t *testing.T, db *sql.DB) {
+	t.Helper()
+	execTestSQL(t, db, `
+		create table thread_spawn_edges (
+			parent_thread_id text not null,
+			child_thread_id text not null primary key,
+			status text not null
+		)`)
+}
+
 func insertThread(t *testing.T, db *sql.DB, id, rolloutPath string, createdAt, updatedAt time.Time, cwd string) {
 	t.Helper()
 	execTestSQL(t, db, `
@@ -378,6 +500,18 @@ func writeRollout(t *testing.T, dir, id string, createdAt time.Time, cwd string)
 		t.Fatal(err)
 	}
 	return path
+}
+
+func appendRolloutLine(t *testing.T, path, line string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func execTestSQL(t *testing.T, db *sql.DB, query string, args ...any) {

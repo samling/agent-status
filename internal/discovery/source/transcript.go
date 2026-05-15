@@ -6,9 +6,19 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
+
+const MaxConversationMessages = 12
+
+// ConversationMessage is a single transcript message preview.
+type ConversationMessage struct {
+	Role      string `json:"role"`
+	Text      string `json:"text"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
 
 // TranscriptInfo summarizes one agent transcript.
 type TranscriptInfo struct {
@@ -21,7 +31,10 @@ type TranscriptInfo struct {
 	OutputTokens        int64
 	CacheCreationTokens int64
 	CacheReadTokens     int64
+	UserMessages        int
+	AgentMessages       int
 	LastUserPrompt      string // raw text of the most recent user-typed prompt
+	RecentMessages      []ConversationMessage
 }
 
 // LoadTranscriptPath stat-caches a transcript file and runs parse on cache miss.
@@ -52,6 +65,58 @@ func LoadTranscriptPath(path string, parse func(string) (TranscriptInfo, error))
 	transcriptMu.Unlock()
 
 	return info, nil
+}
+
+func AppendConversationMessage(info *TranscriptInfo, msg ConversationMessage) {
+	if info == nil || msg.Role == "" || msg.Text == "" {
+		return
+	}
+	switch msg.Role {
+	case "user":
+		info.UserMessages++
+	case "assistant":
+		info.AgentMessages++
+	}
+	info.RecentMessages = append(info.RecentMessages, msg)
+	if len(info.RecentMessages) > MaxConversationMessages {
+		info.RecentMessages = info.RecentMessages[len(info.RecentMessages)-MaxConversationMessages:]
+	}
+}
+
+func OneLinePreview(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if max <= 0 || len([]rune(s)) <= max {
+		return s
+	}
+	r := []rune(s)
+	if max <= 3 {
+		return string(r[:max])
+	}
+	return string(r[:max-3]) + "..."
+}
+
+func ExtractTextContent(content json.RawMessage) string {
+	if len(content) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(content, &s); err == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &blocks); err == nil {
+		parts := make([]string, 0, len(blocks))
+		for _, b := range blocks {
+			if (b.Type == "text" || b.Type == "input_text" || b.Type == "output_text") && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
 }
 
 type cachedTranscript struct {
@@ -97,21 +162,39 @@ func ExtractUserPrompt(content json.RawMessage) string {
 	if len(content) == 0 {
 		return ""
 	}
-	// Most typed prompts are stored as a plain string.
 	var s string
 	if err := json.Unmarshal(content, &s); err == nil {
-		return s
+		return cleanUserPrompt(s)
 	}
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
 	if err := json.Unmarshal(content, &blocks); err == nil {
+		parts := make([]string, 0, len(blocks))
 		for _, b := range blocks {
 			if (b.Type == "text" || b.Type == "input_text") && b.Text != "" {
-				return b.Text
+				parts = append(parts, b.Text)
 			}
 		}
+		return cleanUserPrompt(strings.Join(parts, "\n"))
 	}
 	return ""
+}
+
+func cleanUserPrompt(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return ""
+	}
+	if !strings.HasPrefix(trimmed, "# Context from my IDE setup:") {
+		return s
+	}
+	lines := strings.Split(trimmed, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "## My request for ") {
+			return strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
+		}
+	}
+	return s
 }

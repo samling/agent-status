@@ -51,6 +51,8 @@ const (
 	AgentUnidentified = "unidentified"
 )
 
+var ErrSessionNotFound = errors.New("session not found")
+
 // Event names normalized into LastEvent. The first group is load-bearing —
 // DeriveStatus and RecordEvent treat these specifically. The second group is
 // passed through from hook payloads and surfaced unchanged.

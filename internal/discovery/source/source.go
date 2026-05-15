@@ -13,6 +13,7 @@ type LiveSession struct {
 	StartedAt    time.Time
 	Event        string
 	EventAt      time.Time
+	TurnID       string
 	EngineStatus string
 	Meta         SessionMeta
 }
@@ -20,12 +21,17 @@ type LiveSession struct {
 // SessionMeta is the UI-facing metadata blob for a live session, sourced
 // from agent-owned files (transcripts, SQLite, JSON session files).
 type SessionMeta struct {
-	PID        int
-	Entrypoint string
-	Cwd        string
-	Version    string
-	Model      string
-	Path       string
-	UpdatedAt  time.Time
-	WaitingFor string // free-form pending-permission label, e.g. "approve Bash"; empty when not waiting
+	PID             int
+	Name            string
+	ParentSessionID string
+	ChildCount      int
+	OpenChildCount  int
+	ChildStatus     string
+	Entrypoint      string
+	Cwd             string
+	Version         string
+	Model           string
+	Path            string
+	UpdatedAt       time.Time
+	WaitingFor      string // free-form pending-permission label, e.g. "approve Bash"; empty when not waiting
 }

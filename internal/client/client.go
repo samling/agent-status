@@ -17,6 +17,7 @@ import (
 
 	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/focus"
+	"github.com/samling/agent-status/internal/sessionview"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -44,6 +45,25 @@ func (c *Client) Sessions(ctx context.Context) ([]state.Session, error) {
 	var out []state.Session
 	if err := c.getJSON(ctx, "/state", &out); err != nil {
 		return nil, err
+	}
+	for i := range out {
+		parseSessionTimes(&out[i])
+	}
+	return out, nil
+}
+
+func (c *Client) SessionCards(ctx context.Context) ([]sessionview.SessionCard, error) {
+	var out []sessionview.SessionCard
+	if err := c.getJSON(ctx, "/views/sessions", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) SessionDetail(ctx context.Context, id string) (sessionview.SessionDetail, error) {
+	var out sessionview.SessionDetail
+	if err := c.getJSON(ctx, "/views/sessions/"+id, &out); err != nil {
+		return sessionview.SessionDetail{}, err
 	}
 	return out, nil
 }
@@ -138,4 +158,9 @@ func (c *Client) getJSON(ctx context.Context, path string, dst any) error {
 		return fmt.Errorf("GET %s: %s: %s", path, resp.Status, string(body))
 	}
 	return json.NewDecoder(resp.Body).Decode(dst)
+}
+
+func parseSessionTimes(sess *state.Session) {
+	sess.FirstSeenTime, _ = time.Parse(time.RFC3339Nano, sess.FirstSeenAt)
+	sess.StatusTime, _ = time.Parse(time.RFC3339Nano, sess.StatusAt)
 }

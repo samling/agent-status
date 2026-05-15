@@ -18,6 +18,7 @@ import (
 	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/notify"
 	"github.com/samling/agent-status/internal/server"
+	"github.com/samling/agent-status/internal/sessionview"
 	"github.com/samling/agent-status/internal/state"
 )
 
@@ -134,6 +135,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	views := sessionview.Provider{
+		Store:     s,
+		Meta:      discoveryMeta{},
+		NotesPath: state.NotesPath(statePath),
+	}
 
 	go s.Run(ctx)
 
@@ -169,7 +175,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.Handler(s, discoveryMeta{}),
+		Handler:           server.HandlerWithViews(s, discoveryMeta{}, views),
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
