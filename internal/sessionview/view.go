@@ -39,6 +39,7 @@ type SessionCard struct {
 
 type DetailMetadata struct {
 	Agent               string `json:"agent"`
+	Entrypoint          string `json:"entrypoint"`
 	Version             string `json:"version"`
 	Model               string `json:"model"`
 	Session             string `json:"session"`
@@ -187,6 +188,7 @@ func detailMetadata(sess state.Session, meta source.SessionMeta, info source.Tra
 	}
 	return DetailMetadata{
 		Agent:               sess.Agent,
+		Entrypoint:          meta.Entrypoint,
 		Version:             version,
 		Model:               model,
 		Session:             meta.Name,

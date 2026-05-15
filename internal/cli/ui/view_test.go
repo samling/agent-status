@@ -210,6 +210,21 @@ func TestRenderCardOmitsMarkerSpaceForLeafSession(t *testing.T) {
 	}
 }
 
+func TestRenderCardShowsParentChildCountInAgentLine(t *testing.T) {
+	card := sessionview.SessionCard{
+		SessionID:  "parent",
+		Agent:      "codex",
+		Status:     "idle",
+		Title:      "project",
+		ChildCount: 16,
+	}
+
+	out := renderCard(card, 44, false, false, sessionview.SessionDetail{}, false)
+	if !strings.Contains(out, "+ codex (16 children)") {
+		t.Fatalf("renderCard() missing parent child count; output:\n%s", out)
+	}
+}
+
 func TestRenderCardOmitsSubtitleDetails(t *testing.T) {
 	card := sessionview.SessionCard{
 		SessionID: "s1",
@@ -318,7 +333,7 @@ func TestRenderCardsIndentsExpandedChildren(t *testing.T) {
 	}
 }
 
-func TestRenderCardsKeepsChildCountsOutOfSubtitle(t *testing.T) {
+func TestRenderCardsKeepsOpenChildCountOutOfSubtitle(t *testing.T) {
 	m := uiModel{
 		width:  90,
 		height: 24,
@@ -340,7 +355,10 @@ func TestRenderCardsKeepsChildCountsOutOfSubtitle(t *testing.T) {
 	if strings.Contains(out, "Stop") {
 		t.Fatalf("renderCards() should keep event details out of cards; output:\n%s", out)
 	}
-	for _, noisy := range []string{"17 child", "children", "6 open"} {
+	if !strings.Contains(out, "(17 children)") {
+		t.Fatalf("renderCards() should show total children in the agent line; output:\n%s", out)
+	}
+	for _, noisy := range []string{"6 open"} {
 		if strings.Contains(out, noisy) {
 			t.Fatalf("renderCards() should not append child counts to subtitle; found %q in:\n%s", noisy, out)
 		}
@@ -474,6 +492,7 @@ func TestRenderSessionDetailGroupsMetadataRows(t *testing.T) {
 		Title:     "agent-status",
 		Metadata: detailMetadata(
 			metadataItem{Label: "agent", Value: "codex"},
+			metadataItem{Label: "entrypoint", Value: "vscode"},
 			metadataItem{Label: "version", Value: "0.128.0"},
 			metadataItem{Label: "model", Value: "gpt-5.5"},
 			metadataItem{Label: "session", Value: "agent-status"},
@@ -485,7 +504,8 @@ func TestRenderSessionDetailGroupsMetadataRows(t *testing.T) {
 		),
 	}, 120)
 
-	assertSameRenderedLine(t, out, "agent: codex", "version: 0.128.0", "model: gpt-5.5")
+	assertSameRenderedLine(t, out, "agent: codex", "entrypoint: vscode", "version: 0.128.0")
+	assertSameRenderedLine(t, out, "model: gpt-5.5")
 	assertSameRenderedLine(t, out, "cwd: /tmp/project", "branch: feature/ui")
 	assertSameRenderedLine(t, out, "pid: 1234", "parent: root", "children: 2 (1 open)")
 }
@@ -513,6 +533,8 @@ func detailMetadata(fields ...metadataItem) sessionview.DetailMetadata {
 		switch field.Label {
 		case "agent":
 			meta.Agent = field.Value
+		case "entrypoint":
+			meta.Entrypoint = field.Value
 		case "version":
 			meta.Version = field.Value
 		case "model":
@@ -638,6 +660,28 @@ func TestMoveSelectionScrollsSelectedCardIntoView(t *testing.T) {
 	}
 	if !strings.Contains(out, "10/12") {
 		t.Fatalf("View() missing position hint; output:\n%s", out)
+	}
+}
+
+func TestViewSummarizesParentAndChildSessionCounts(t *testing.T) {
+	m := uiModel{
+		width:  90,
+		height: 20,
+		cards: []sessionview.SessionCard{
+			{SessionID: "parent-1", Agent: "codex", Status: "idle", Title: "parent 1", ChildCount: 2},
+			{SessionID: "child-1", ParentSessionID: "parent-1", Agent: "codex", Status: "idle", Title: "child 1"},
+			{SessionID: "child-2", ParentSessionID: "parent-1", Agent: "codex", Status: "idle", Title: "child 2"},
+			{SessionID: "parent-2", Agent: "claude-code", Status: "active", Title: "parent 2"},
+		},
+		selectedID: "parent-1",
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "2 sessions, 2 children") {
+		t.Fatalf("View() missing parent/child count summary; output:\n%s", out)
+	}
+	if strings.Contains(out, "4 session(s)") {
+		t.Fatalf("View() should not count children as top-level sessions; output:\n%s", out)
 	}
 }
 

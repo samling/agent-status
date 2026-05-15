@@ -98,7 +98,7 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 		NotesPath: notesPath,
 		Meta: fakeMeta{
 			meta: map[string]source.SessionMeta{
-				"session-1": {Name: "Useful session name", Cwd: "/home/test/github/agent-status", Model: "gpt-5.5", Version: "0.128.0", PID: 1234},
+				"session-1": {Name: "Useful session name", Entrypoint: "vscode", Cwd: "/home/test/github/agent-status", Model: "gpt-5.5", Version: "0.128.0", PID: 1234},
 			},
 			transcript: source.TranscriptInfo{
 				GitBranch:           "feature/ui",
@@ -131,6 +131,9 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 	}
 	if got := detail.Metadata.SessionID; got != "session-1" {
 		t.Fatalf("session id field = %q, want session-1", got)
+	}
+	if got := detail.Metadata.Entrypoint; got != "vscode" {
+		t.Fatalf("entrypoint field = %q, want vscode", got)
 	}
 	if got := detail.Metadata.LastEvent; got != state.EventUserPromptSubmit {
 		t.Fatalf("last event field = %q, want %s", got, state.EventUserPromptSubmit)

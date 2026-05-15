@@ -230,6 +230,9 @@ func renderCard(card sessionview.SessionCard, width int, selected, _ bool, _ ses
 
 func cardAgent(card sessionview.SessionCard, expanded bool) string {
 	agent := strings.ToLower(card.Agent)
+	if card.ParentSessionID == "" && card.ChildCount > 0 {
+		agent += " (" + strconv.Itoa(card.ChildCount) + " " + plural(card.ChildCount, "child", "children") + ")"
+	}
 	if marker := cardMarker(card, expanded); marker != "" {
 		return marker + " " + agent
 	}
@@ -360,6 +363,7 @@ func renderMetadata(fields []metadataItem, width int) []string {
 func metadataFields(meta sessionview.DetailMetadata) []metadataItem {
 	fields := []metadataItem{
 		{Label: "agent", Value: valueOrDash(meta.Agent)},
+		{Label: "entrypoint", Value: valueOrDash(meta.Entrypoint)},
 		{Label: "version", Value: valueOrDash(meta.Version)},
 		{Label: "model", Value: valueOrDash(meta.Model)},
 		{Label: "session", Value: valueOrDash(meta.Session)},
@@ -463,9 +467,27 @@ func valueOrDash(v string) string {
 	return v
 }
 
+func plural(n int, singular, plural string) string {
+	if n == 1 {
+		return singular
+	}
+	return plural
+}
+
+func sessionCounts(cards []sessionview.SessionCard) (parents, children int) {
+	for _, card := range cards {
+		if card.ParentSessionID == "" {
+			parents++
+		} else {
+			children++
+		}
+	}
+	return parents, children
+}
+
 func metadataGroupLen(fields []metadataItem) int {
 	for _, group := range [][]string{
-		{"agent", "version", "model"},
+		{"agent", "entrypoint", "version", "model"},
 		{"cwd", "branch"},
 		{"pid", "parent", "children"},
 	} {
@@ -539,7 +561,12 @@ func (m uiModel) View() string {
 		}
 		head.WriteString(" " + style.Render(dot) + " " + dimStyle.Render(label))
 	}
-	head.WriteString(accentStyle.Render(fmt.Sprintf(", %d session(s)", len(m.cards))))
+	parents, children := sessionCounts(m.cards)
+	summary := fmt.Sprintf(", %d %s", parents, plural(parents, "session", "sessions"))
+	if children > 0 {
+		summary += fmt.Sprintf(", %d %s", children, plural(children, "child", "children"))
+	}
+	head.WriteString(accentStyle.Render(summary))
 	head.WriteString("\n\n")
 
 	selectedID := m.selectedID
