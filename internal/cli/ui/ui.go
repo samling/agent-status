@@ -114,31 +114,52 @@ func runUI(_ *cobra.Command, _ []string) error {
 }
 
 type uiModel struct {
-	statePath       string
-	notesPath       string
-	configPath      string
-	interval        time.Duration
-	cards           []sessionview.SessionCard
-	notes           map[string]string
-	selectedID      string
-	scrollOffset    int
-	expandedParents map[string]bool
-	sort            sortMode
-	width           int
-	height          int
-	detail          sessionview.SessionDetail
-	detailFor       string // session id that detail belongs to
-	detailErr       error
-	inputMode       bool
-	inputBuf        string
-	inputForID      string
-	showConfig      bool
-	quitAfterFocus  bool
-	serverAddr      string
-	serverUp        bool
-	status          string
-	err             error
+	statePath         string
+	notesPath         string
+	configPath        string
+	interval          time.Duration
+	cards             []sessionview.SessionCard
+	notes             map[string]string
+	selectedID        string
+	scrollOffset      int
+	expandedParents   map[string]bool
+	sort              sortMode
+	width             int
+	height            int
+	detail            sessionview.SessionDetail
+	detailFor         string // session id that detail belongs to
+	detailErr         error
+	focusMode         focusMode
+	messageList       sessionview.MessageList
+	messageListFor    string
+	messageListErr    error
+	messageIndex      int
+	showExtraMessages bool
+	messageSearchMode bool
+	messageQuery      string
+	messageDetail     sessionview.MessageDetail
+	messageDetailFor  string
+	messageDetailErr  error
+	messageScroll     int
+	messageRaw        bool
+	inputMode         bool
+	inputBuf          string
+	inputForID        string
+	showConfig        bool
+	quitAfterFocus    bool
+	serverAddr        string
+	serverUp          bool
+	status            string
+	err               error
 }
+
+type focusMode int
+
+const (
+	focusCards focusMode = iota
+	focusMessages
+	focusMessageBody
+)
 
 func (m uiModel) Init() tea.Cmd {
 	return tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort, cardOrder(m.cards)), tickEvery(m.interval))
@@ -172,30 +193,143 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.messageSearchMode {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "enter":
+				m.messageSearchMode = false
+			case "esc":
+				m.messageSearchMode = false
+				m.messageQuery = ""
+				m.messageIndex = 0
+			case "backspace":
+				if r := []rune(m.messageQuery); len(r) > 0 {
+					m.messageQuery = string(r[:len(r)-1])
+					m.messageIndex = 0
+				}
+			default:
+				if len(msg.Runes) > 0 {
+					m.messageQuery += string(msg.Runes)
+					m.messageIndex = 0
+				}
+			}
+			m.clampMessageSelection()
+			return m, nil
+		}
 		switch msg.String() {
-		case "q", "ctrl+c", "esc":
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			if m.focusMode == focusMessages && m.messageQuery != "" {
+				m.messageSearchMode = false
+				m.messageQuery = ""
+				m.messageIndex = 0
+				m.clampMessageSelection()
+				return m, nil
+			}
+			if m.focusMode == focusMessageBody {
+				m.focusMode = focusMessages
+				m.messageScroll = 0
+				return m, nil
+			}
+			if m.focusMode == focusMessages {
+				m.focusMode = focusCards
+				m.messageSearchMode = false
+				m.messageQuery = ""
+				return m, nil
+			}
 			return m, tea.Quit
 		case "up", "k":
+			if m.focusMode == focusMessages {
+				m.moveMessageSelection(-1)
+				return m, nil
+			}
+			if m.focusMode == focusMessageBody {
+				m.scrollMessage(-1)
+				return m, nil
+			}
 			prev := m.selectedID
 			m.moveSelection(-1)
 			if m.selectedID != "" && m.selectedID != prev {
 				return m, loadDetail(m.serverAddr, m.selectedID)
 			}
 		case "down", "j":
+			if m.focusMode == focusMessages {
+				m.moveMessageSelection(+1)
+				return m, nil
+			}
+			if m.focusMode == focusMessageBody {
+				m.scrollMessage(+1)
+				return m, nil
+			}
 			prev := m.selectedID
 			m.moveSelection(+1)
 			if m.selectedID != "" && m.selectedID != prev {
 				return m, loadDetail(m.serverAddr, m.selectedID)
 			}
+		case "ctrl+u":
+			if m.focusMode == focusMessages {
+				m.moveMessageSelection(-halfPage)
+				return m, nil
+			}
+			if m.focusMode == focusMessageBody {
+				m.scrollMessage(-halfPage)
+				return m, nil
+			}
+		case "ctrl+d":
+			if m.focusMode == focusMessages {
+				m.moveMessageSelection(halfPage)
+				return m, nil
+			}
+			if m.focusMode == focusMessageBody {
+				m.scrollMessage(halfPage)
+				return m, nil
+			}
+		case "t":
+			switch m.focusMode {
+			case focusCards:
+				id := m.activeSelectionID()
+				if id == "" {
+					m.status = "no session selected"
+					return m, nil
+				}
+				m.selectedID = id
+				m.showExtraMessages = !m.showExtraMessages
+				if m.showExtraMessages {
+					return m, m.messageListRefreshCmd()
+				}
+				return m, nil
+			case focusMessages:
+				m.showExtraMessages = !m.showExtraMessages
+				m.clampMessageSelection()
+				if m.showExtraMessages {
+					return m, m.messageListRefreshCmd()
+				}
+				return m, nil
+			case focusMessageBody:
+				m.messageRaw = !m.messageRaw
+				m.messageScroll = 0
+				return m, nil
+			}
 		case " ":
+			if m.focusMode != focusCards {
+				return m, nil
+			}
 			if m.toggleExpanded(m.selectedID) {
 				return m, nil
 			}
 		case "right", "l":
+			if m.focusMode != focusCards {
+				return m, nil
+			}
 			if m.expandSelected() {
 				return m, nil
 			}
 		case "left", "h":
+			if m.focusMode != focusCards {
+				return m, nil
+			}
 			prev := m.selectedID
 			if m.collapseSelected() {
 				if m.selectedID != "" && m.selectedID != prev {
@@ -204,12 +338,46 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "enter":
-			var cmd tea.Cmd
-			m, cmd = m.focusSelected()
-			if cmd != nil {
-				return m, cmd
+			if m.focusMode == focusCards {
+				var cmd tea.Cmd
+				m, cmd = m.focusSelected()
+				if cmd != nil {
+					return m, cmd
+				}
+				return m, nil
+			}
+			if m.focusMode == focusMessages {
+				return m.openSelectedMessage()
+			}
+		case "tab", "shift+tab":
+			switch m.focusMode {
+			case focusCards:
+				id := m.activeSelectionID()
+				if id == "" {
+					m.status = "no session selected"
+					return m, nil
+				}
+				m.selectedID = id
+				m.enterMessageList(id)
+				return m, loadMessages(m.serverAddr, id)
+			case focusMessages, focusMessageBody:
+				m.focusMode = focusCards
+				m.messageSearchMode = false
+				m.messageScroll = 0
+				m.messageRaw = false
+				return m, nil
+			}
+		case "/":
+			if m.focusMode == focusMessages {
+				m.messageSearchMode = true
+				m.messageQuery = ""
+				m.messageIndex = 0
+				return m, nil
 			}
 		case "s":
+			if m.focusMode != focusCards {
+				return m, nil
+			}
 			if m.selectedID == "" {
 				m.selectedID = m.activeSelectionID()
 			}
@@ -218,12 +386,15 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			sortCards(m.cards, m.sort, previousOrder)
 			m.keepSelectionVisible()
 		case "n":
+			if m.focusMode != focusCards {
+				return m, nil
+			}
 			m = m.beginNote()
 		case "?":
 			m.showConfig = !m.showConfig
 		}
 	case tickMsg:
-		return m, tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort, cardOrder(m.cards)), tickEvery(m.interval))
+		return m, tea.Batch(loadSnapshot(m.serverAddr, m.selectedID, m.sort, cardOrder(m.cards)), tickEvery(m.interval), m.messageListRefreshCmd())
 	case snapshotMsg:
 		previousOrder := cardOrder(m.cards)
 		m.cards = msg.cards
@@ -234,12 +405,15 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.selectedID != "" && !cardsContain(m.cards, m.selectedID) {
 			m.selectedID = ""
+			m.resetMessageState()
 		}
 		if m.selectedID != "" && !cardsContain(m.visibleCards(), m.selectedID) {
 			if parentID := parentIDFor(m.cards, m.selectedID); parentID != "" {
 				m.selectedID = parentID
+				m.resetMessageState()
 			} else {
 				m.selectedID = ""
+				m.resetMessageState()
 			}
 		}
 		adoptedFocus := m.selectedID == "" && msg.detailFor != ""
@@ -265,6 +439,20 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detail = msg.detail
 			m.detailFor = msg.detailFor
 			m.detailErr = msg.detailErr
+		}
+	case messageListMsg:
+		if msg.sessionID == m.selectedID {
+			m.messageList = msg.messages
+			m.messageListFor = msg.sessionID
+			m.messageListErr = msg.err
+			m.clampMessageSelection()
+		}
+	case messageDetailMsg:
+		if msg.sessionID == m.selectedID && msg.messageID == m.messageDetailFor {
+			m.messageDetail = msg.detail
+			m.messageDetailFor = msg.messageID
+			m.messageDetailErr = msg.err
+			m.messageScroll = 0
 		}
 	case errMsg:
 		m.err = msg.err

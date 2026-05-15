@@ -3,6 +3,7 @@ package codex
 import (
 	"encoding/json"
 	"os"
+	"strings"
 
 	"github.com/samling/agent-status/internal/discovery/source"
 )
@@ -21,6 +22,39 @@ func Transcript(sessionID string, meta source.SessionMeta) (source.TranscriptInf
 		info.Version = meta.Version
 	}
 	return info, err
+}
+
+func TranscriptMessages(sessionID string, meta source.SessionMeta) ([]source.TranscriptMessageSummary, error) {
+	_ = sessionID
+	if meta.Path == "" {
+		return nil, nil
+	}
+	details, err := parseMessages(meta.Path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]source.TranscriptMessageSummary, 0, len(details))
+	for _, detail := range details {
+		out = append(out, source.TranscriptMessageSummaryFromDetail(detail))
+	}
+	return out, nil
+}
+
+func TranscriptMessage(sessionID string, meta source.SessionMeta, id string) (source.TranscriptMessageDetail, error) {
+	_ = sessionID
+	if meta.Path == "" {
+		return source.TranscriptMessageDetail{}, source.ErrTranscriptMessageNotFound
+	}
+	details, err := parseMessages(meta.Path)
+	if err != nil {
+		return source.TranscriptMessageDetail{}, err
+	}
+	for _, detail := range details {
+		if detail.ID == id {
+			return detail, nil
+		}
+	}
+	return source.TranscriptMessageDetail{}, source.ErrTranscriptMessageNotFound
 }
 
 func parseTranscript(path string) (source.TranscriptInfo, error) {
@@ -96,14 +130,78 @@ func parseTranscript(path string) (source.TranscriptInfo, error) {
 	return info, nil
 }
 
+func parseMessages(path string) ([]source.TranscriptMessageDetail, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var out []source.TranscriptMessageDetail
+	lineNumber := 0
+	if err := source.ScanJSONL(f, func(buf []byte) bool {
+		lineNumber++
+		var line transcriptLine
+		if err := json.Unmarshal(buf, &line); err != nil || line.Type != "response_item" {
+			return true
+		}
+		var payload responseItem
+		if err := json.Unmarshal(line.Payload, &payload); err != nil {
+			return true
+		}
+		if detail, ok := responseItemMessage(lineNumber, line.Timestamp, payload, string(buf)); ok {
+			out = append(out, detail)
+		}
+		return true
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func responseItemMessage(lineNumber int, timestamp string, payload responseItem, raw string) (source.TranscriptMessageDetail, bool) {
+	switch payload.Type {
+	case "message":
+		role := source.MessageContentRole(payload.Role, payload.Content)
+		return source.NewTranscriptMessageWithRaw(lineNumber, role, timestamp, source.ExtractMessageContent(payload.Content), raw)
+	case "function_call":
+		parts := make([]string, 0, 2)
+		if payload.Name != "" {
+			parts = append(parts, "Tool call: "+payload.Name)
+		}
+		if payload.Arguments != "" {
+			parts = append(parts, payload.Arguments)
+		}
+		return source.NewTranscriptMessageWithRaw(lineNumber, "tool_call", timestamp, strings.Join(parts, "\n"), raw)
+	case "function_call_output":
+		return source.NewTranscriptMessageWithRaw(lineNumber, "tool_result", timestamp, rawResponseText(payload.Output), raw)
+	default:
+		return source.TranscriptMessageDetail{}, false
+	}
+}
+
+func rawResponseText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
+}
+
 type turnContext struct {
 	Model string `json:"model"`
 }
 
 type responseItem struct {
-	Type    string          `json:"type"`
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Type      string          `json:"type"`
+	Role      string          `json:"role"`
+	Name      string          `json:"name"`
+	Arguments string          `json:"arguments"`
+	Output    json.RawMessage `json:"output"`
+	Content   json.RawMessage `json:"content"`
 }
 
 type eventMsg struct {

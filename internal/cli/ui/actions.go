@@ -12,6 +12,8 @@ import (
 	"github.com/samling/agent-status/internal/state"
 )
 
+const halfPage = 8
+
 func (m *uiModel) moveSelection(delta int) {
 	visible := m.visibleCards()
 	if len(visible) == 0 {
@@ -188,6 +190,181 @@ func (m uiModel) focusSelected() (uiModel, tea.Cmd) {
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+func (m *uiModel) enterMessageList(id string) {
+	m.focusMode = focusMessages
+	m.messageList = sessionview.MessageList{}
+	m.messageListFor = ""
+	m.messageListErr = nil
+	m.messageIndex = 0
+	m.showExtraMessages = false
+	m.messageSearchMode = false
+	m.messageQuery = ""
+	m.messageDetail = sessionview.MessageDetail{}
+	m.messageDetailFor = ""
+	m.messageDetailErr = nil
+	m.messageScroll = 0
+	m.messageRaw = false
+}
+
+func (m *uiModel) resetMessageState() {
+	m.focusMode = focusCards
+	m.messageList = sessionview.MessageList{}
+	m.messageListFor = ""
+	m.messageListErr = nil
+	m.messageIndex = 0
+	m.showExtraMessages = false
+	m.messageSearchMode = false
+	m.messageQuery = ""
+	m.messageDetail = sessionview.MessageDetail{}
+	m.messageDetailFor = ""
+	m.messageDetailErr = nil
+	m.messageScroll = 0
+	m.messageRaw = false
+}
+
+func (m *uiModel) moveMessageSelection(delta int) {
+	m.messageIndex += delta
+	m.clampMessageSelection()
+}
+
+func (m *uiModel) clampMessageSelection() {
+	matches := m.visibleMessages()
+	if len(matches) == 0 {
+		m.messageIndex = 0
+		return
+	}
+	if m.messageIndex < 0 {
+		m.messageIndex = 0
+	}
+	if m.messageIndex >= len(matches) {
+		m.messageIndex = len(matches) - 1
+	}
+}
+
+func (m uiModel) visibleMessages() []sessionview.MessageSummary {
+	messages := m.previewMessages()
+	if m.messageQuery == "" {
+		return messages
+	}
+	out := make([]sessionview.MessageSummary, 0, len(messages))
+	for _, msg := range messages {
+		if fuzzyMatch(m.messageQuery, msg.Role+" "+msg.Preview) {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+func (m uiModel) previewMessages() []sessionview.MessageSummary {
+	if m.showExtraMessages && m.messageListFor == m.selectedID {
+		return m.messageList.Messages
+	}
+	if len(m.detail.Conversation) > 0 {
+		return conversationMessageSummaries(m.detail.Conversation)
+	}
+	return userAgentMessages(m.messageList.Messages)
+}
+
+func conversationMessageSummaries(in []sessionview.ConversationMessage) []sessionview.MessageSummary {
+	out := make([]sessionview.MessageSummary, 0, len(in))
+	for i, msg := range in {
+		out = append(out, sessionview.MessageSummary{
+			Index:     i,
+			Role:      msg.Role,
+			Preview:   msg.Text,
+			Timestamp: msg.Timestamp,
+		})
+	}
+	return out
+}
+
+func userAgentMessages(in []sessionview.MessageSummary) []sessionview.MessageSummary {
+	out := make([]sessionview.MessageSummary, 0, len(in))
+	for _, msg := range in {
+		if msg.Role == "user" || msg.Role == "assistant" {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+func fuzzyMatch(query, text string) bool {
+	query = strings.ToLower(query)
+	text = strings.ToLower(text)
+	if query == "" {
+		return true
+	}
+	pos := 0
+	for _, r := range text {
+		if pos < len(query) && rune(query[pos]) == r {
+			pos++
+		}
+	}
+	return pos == len(query)
+}
+
+func (m uiModel) openSelectedMessage() (uiModel, tea.Cmd) {
+	messages := m.expandableMessages()
+	if len(messages) == 0 || m.messageIndex < 0 || m.messageIndex >= len(messages) {
+		m.status = "message detail still loading"
+		return m, nil
+	}
+	msg := messages[m.messageIndex]
+	if msg.ID == "" {
+		m.status = "message detail still loading"
+		return m, nil
+	}
+	m.focusMode = focusMessageBody
+	m.messageDetail = sessionview.MessageDetail{}
+	m.messageDetailFor = msg.ID
+	m.messageDetailErr = nil
+	m.messageScroll = 0
+	m.messageRaw = false
+	return m, loadMessage(m.serverAddr, m.selectedID, msg.ID)
+}
+
+func (m uiModel) messageListRefreshCmd() tea.Cmd {
+	if m.selectedID == "" || !m.showExtraMessages {
+		return nil
+	}
+	if m.focusMode != focusCards && m.focusMode != focusMessages && m.focusMode != focusMessageBody {
+		return nil
+	}
+	return loadMessages(m.serverAddr, m.selectedID)
+}
+
+func (m uiModel) expandableMessages() []sessionview.MessageSummary {
+	if m.messageListFor != m.selectedID {
+		return nil
+	}
+	messages := m.messageList.Messages
+	if !m.showExtraMessages {
+		messages = userAgentMessages(messages)
+	}
+	if m.messageQuery == "" {
+		return messages
+	}
+	out := make([]sessionview.MessageSummary, 0, len(messages))
+	for _, msg := range messages {
+		if fuzzyMatch(m.messageQuery, msg.Role+" "+msg.Preview) {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+func (m *uiModel) scrollMessage(delta int) {
+	lines := m.messageBodyLines(m.messageBodyWidth())
+	maxScroll := max(len(lines)-1, 0)
+	m.messageScroll += delta
+	if m.messageScroll < 0 {
+		m.messageScroll = 0
+	}
+	if m.messageScroll > maxScroll {
+		m.messageScroll = maxScroll
+	}
 }
 
 func (m uiModel) visibleCards() []sessionview.SessionCard {

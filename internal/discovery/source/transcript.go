@@ -2,22 +2,49 @@ package source
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-const MaxConversationMessages = 12
+const (
+	MaxConversationMessages       = 200
+	MaxTranscriptMessageTextRunes = 16000
+)
+
+var ErrTranscriptMessageNotFound = errors.New("transcript message not found")
 
 // ConversationMessage is a single transcript message preview.
 type ConversationMessage struct {
 	Role      string `json:"role"`
 	Text      string `json:"text"`
 	Timestamp string `json:"timestamp,omitempty"`
+}
+
+type TranscriptMessageSummary struct {
+	ID        string `json:"id"`
+	Index     int    `json:"index"`
+	Role      string `json:"role"`
+	Preview   string `json:"preview"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
+type TranscriptMessageDetail struct {
+	ID           string `json:"id"`
+	Index        int    `json:"index"`
+	Role         string `json:"role"`
+	Preview      string `json:"preview"`
+	Text         string `json:"text"`
+	RawText      string `json:"raw_text,omitempty"`
+	Timestamp    string `json:"timestamp,omitempty"`
+	Truncated    bool   `json:"truncated,omitempty"`
+	RawTruncated bool   `json:"raw_truncated,omitempty"`
 }
 
 // TranscriptInfo summarizes one agent transcript.
@@ -83,6 +110,94 @@ func AppendConversationMessage(info *TranscriptInfo, msg ConversationMessage) {
 	}
 }
 
+func NewTranscriptMessage(lineNumber int, role, timestamp, text string) (TranscriptMessageDetail, bool) {
+	return NewTranscriptMessageWithRaw(lineNumber, role, timestamp, text, "")
+}
+
+func NewTranscriptMessageWithRaw(lineNumber int, role, timestamp, text, raw string) (TranscriptMessageDetail, bool) {
+	text = strings.TrimSpace(text)
+	if lineNumber <= 0 || role == "" || text == "" {
+		return TranscriptMessageDetail{}, false
+	}
+	text = prettyJSONObjectsOrArrays(text)
+	capped, truncated := truncateRunes(text, MaxTranscriptMessageTextRunes)
+	detail := TranscriptMessageDetail{
+		ID:        strconv.Itoa(lineNumber),
+		Index:     lineNumber,
+		Role:      role,
+		Preview:   OneLinePreview(text, 120),
+		Text:      capped,
+		Timestamp: timestamp,
+		Truncated: truncated,
+	}
+	raw = strings.TrimSpace(raw)
+	if raw != "" {
+		raw = prettyJSONObjectOrArray(raw)
+		detail.RawText, detail.RawTruncated = truncateRunes(raw, MaxTranscriptMessageTextRunes)
+	}
+	return detail, true
+}
+
+func prettyJSONObjectOrArray(s string) string {
+	if s == "" || (s[0] != '{' && s[0] != '[') {
+		return s
+	}
+	var b bytes.Buffer
+	if err := json.Indent(&b, []byte(s), "", "  "); err != nil {
+		return s
+	}
+	return b.String()
+}
+
+func prettyJSONObjectsOrArrays(s string) string {
+	if pretty := prettyJSONObjectOrArray(s); pretty != s {
+		return pretty
+	}
+	lines := strings.Split(s, "\n")
+	changed := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		pretty := prettyJSONObjectOrArray(trimmed)
+		if pretty == trimmed {
+			continue
+		}
+		lines[i] = prefixLines(leadingWhitespace(line), pretty)
+		changed = true
+	}
+	if !changed {
+		return s
+	}
+	return strings.Join(lines, "\n")
+}
+
+func leadingWhitespace(s string) string {
+	return s[:len(s)-len(strings.TrimLeft(s, " \t"))]
+}
+
+func prefixLines(prefix, s string) string {
+	if prefix == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func TranscriptMessageSummaryFromDetail(detail TranscriptMessageDetail) TranscriptMessageSummary {
+	return TranscriptMessageSummary{
+		ID:        detail.ID,
+		Index:     detail.Index,
+		Role:      detail.Role,
+		Preview:   detail.Preview,
+		Timestamp: detail.Timestamp,
+	}
+}
+
 func OneLinePreview(s string, max int) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if max <= 0 || len([]rune(s)) <= max {
@@ -117,6 +232,103 @@ func ExtractTextContent(content json.RawMessage) string {
 		return strings.Join(parts, "\n")
 	}
 	return ""
+}
+
+func ExtractMessageContent(content json.RawMessage) string {
+	if len(content) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(content, &s); err == nil {
+		return s
+	}
+	var blocks []struct {
+		Type    string          `json:"type"`
+		Text    string          `json:"text"`
+		Name    string          `json:"name"`
+		Input   json.RawMessage `json:"input"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(content, &blocks); err == nil {
+		parts := make([]string, 0, len(blocks))
+		for _, b := range blocks {
+			switch b.Type {
+			case "text", "input_text", "output_text":
+				if b.Text != "" {
+					parts = append(parts, b.Text)
+				}
+			case "tool_use":
+				if b.Name != "" {
+					parts = append(parts, "Tool use: "+b.Name)
+				}
+				if text := rawJSONText(b.Input); text != "" {
+					parts = append(parts, "Input: "+text)
+				}
+			case "tool_result":
+				if text := rawJSONText(b.Content); text != "" {
+					parts = append(parts, "Tool result: "+text)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return rawJSONText(content)
+}
+
+func MessageContentRole(base string, content json.RawMessage) string {
+	var blocks []struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(content, &blocks); err != nil || len(blocks) == 0 {
+		return base
+	}
+	allToolUse := true
+	allToolResult := true
+	for _, b := range blocks {
+		allToolUse = allToolUse && b.Type == "tool_use"
+		allToolResult = allToolResult && b.Type == "tool_result"
+	}
+	switch {
+	case allToolUse:
+		return "tool_call"
+	case allToolResult:
+		return "tool_result"
+	default:
+		return base
+	}
+}
+
+func rawJSONText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	if text := ExtractTextContent(raw); text != "" {
+		return text
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return string(raw)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return string(raw)
+	}
+	return string(b)
+}
+
+func truncateRunes(s string, max int) (string, bool) {
+	if max <= 0 {
+		return "", s != ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s, false
+	}
+	return string(r[:max]), true
 }
 
 type cachedTranscript struct {

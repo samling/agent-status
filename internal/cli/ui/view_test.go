@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -83,6 +84,453 @@ func TestViewShowsSessionCardsAndRightPaneDetail(t *testing.T) {
 	}
 }
 
+func TestViewShowsFocusedMessageList(t *testing.T) {
+	m := uiModel{
+		width:      100,
+		height:     28,
+		selectedID: "s1",
+		focusMode:  focusMessages,
+		cards: []sessionview.SessionCard{{
+			SessionID: "s1",
+			Agent:     "codex",
+			Status:    "active",
+			Title:     "agent-status",
+		}},
+		detailFor: "s1",
+		detail: sessionview.SessionDetail{
+			SessionID: "s1",
+			Metadata:  detailMetadata(metadataItem{Label: "model", Value: "gpt-5.5"}),
+			Conversation: []sessionview.ConversationMessage{
+				{Role: "assistant", Text: "newer message"},
+				{Role: "user", Text: "older message"},
+			},
+		},
+		messageListFor: "s1",
+		messageList: sessionview.MessageList{
+			SessionID: "s1",
+			Messages: []sessionview.MessageSummary{
+				{ID: "new", Role: "assistant", Preview: "newer message"},
+				{ID: "tool", Role: "tool_call", Preview: "Bash"},
+				{ID: "result", Role: "tool_result", Preview: "tests passed"},
+				{ID: "old", Role: "user", Preview: "older message"},
+			},
+		},
+	}
+
+	out := m.View()
+	if strings.Contains(out, "›") {
+		t.Fatalf("View() should highlight selection without a cursor marker; output:\n%s", out)
+	}
+	for _, want := range []string{"Conversation", "Agent", "newer message"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("View() missing %q; output:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Messages") {
+		t.Fatalf("View() should keep the conversation section label; output:\n%s", out)
+	}
+	for _, hidden := range []string{"Tool", "Result", "Bash", "tests passed"} {
+		if strings.Contains(out, hidden) {
+			t.Fatalf("View() should hide %q from the preview; output:\n%s", hidden, out)
+		}
+	}
+	if strings.Contains(out, "(no conversation preview)") {
+		t.Fatalf("View() should render focused messages, output:\n%s", out)
+	}
+}
+
+func TestMessageListToggleShowsToolAndResultRows(t *testing.T) {
+	m := uiModel{
+		width:             100,
+		height:            28,
+		selectedID:        "s1",
+		focusMode:         focusMessages,
+		showExtraMessages: true,
+		cards:             []sessionview.SessionCard{{SessionID: "s1"}},
+		detailFor:         "s1",
+		detail: sessionview.SessionDetail{
+			SessionID: "s1",
+			Conversation: []sessionview.ConversationMessage{
+				{Role: "assistant", Text: "newer message"},
+				{Role: "user", Text: "older message"},
+			},
+		},
+		messageListFor: "s1",
+		messageList: sessionview.MessageList{
+			SessionID: "s1",
+			Messages: []sessionview.MessageSummary{
+				{ID: "new", Role: "assistant", Preview: "newer message"},
+				{ID: "tool", Role: "tool_call", Preview: "Bash"},
+				{ID: "result", Role: "tool_result", Preview: "tests passed"},
+				{ID: "old", Role: "user", Preview: "older message"},
+			},
+		},
+	}
+
+	out := m.View()
+	for _, want := range []string{"Tool", "Bash", "Result", "tests passed"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("View() missing toggled extra row %q; output:\n%s", want, out)
+		}
+	}
+}
+
+func TestSessionListToggleShowsToolAndResultRows(t *testing.T) {
+	m := uiModel{
+		width:             100,
+		height:            28,
+		selectedID:        "s1",
+		focusMode:         focusCards,
+		showExtraMessages: true,
+		cards:             []sessionview.SessionCard{{SessionID: "s1"}},
+		detailFor:         "s1",
+		detail: sessionview.SessionDetail{
+			SessionID: "s1",
+			Conversation: []sessionview.ConversationMessage{
+				{Role: "assistant", Text: "newer message"},
+				{Role: "user", Text: "older message"},
+			},
+		},
+		messageListFor: "s1",
+		messageList: sessionview.MessageList{
+			SessionID: "s1",
+			Messages: []sessionview.MessageSummary{
+				{ID: "new", Role: "assistant", Preview: "newer message"},
+				{ID: "tool", Role: "tool_call", Preview: "Bash"},
+				{ID: "result", Role: "tool_result", Preview: "tests passed"},
+				{ID: "old", Role: "user", Preview: "older message"},
+			},
+		},
+	}
+
+	out := m.View()
+	for _, want := range []string{"Tool", "Bash", "Result", "tests passed"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("View() missing toggled extra row %q; output:\n%s", want, out)
+		}
+	}
+}
+
+func TestExpandedMessageToggleShowsRawPayload(t *testing.T) {
+	m := uiModel{
+		width:      100,
+		height:     28,
+		selectedID: "s1",
+		focusMode:  focusMessageBody,
+		cards:      []sessionview.SessionCard{{SessionID: "s1"}},
+		detailFor:  "s1",
+		detail:     sessionview.SessionDetail{SessionID: "s1"},
+		messageDetail: sessionview.MessageDetail{
+			ID:      "7",
+			Text:    "filtered body",
+			RawText: "{\n  \"content\": \"raw body\"\n}",
+		},
+	}
+
+	filtered := m.View()
+	if !strings.Contains(filtered, "filtered body") || strings.Contains(filtered, "raw body") {
+		t.Fatalf("filtered view mismatch; output:\n%s", filtered)
+	}
+	m.messageRaw = true
+	raw := m.View()
+	if !strings.Contains(raw, "Message (raw)") || !strings.Contains(raw, "\"content\": \"raw body\"") || strings.Contains(raw, "filtered body") {
+		t.Fatalf("raw view mismatch; output:\n%s", raw)
+	}
+}
+
+func TestRenderMessageBodyWrapsLongLines(t *testing.T) {
+	m := uiModel{
+		messageDetail: sessionview.MessageDetail{
+			ID:   "7",
+			Text: "abcdefghijklmnopqrstuvwxyz",
+		},
+	}
+
+	got := m.renderMessageBody(10, 4)
+	want := []string{"abcdefghij", "klmnopqrst", "uvwxyz"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("renderMessageBody() = %#v, want %#v", got, want)
+	}
+}
+
+func TestRenderSelectedMessageSummaryHighlightsWholeLineGray(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	out := renderMessageSummaryLine(sessionview.MessageSummary{
+		Role:    "assistant",
+		Preview: "newer message",
+	}, 32, true)
+
+	if !regexp.MustCompile(`\x1b\[[0-9;]*48;5;240[0-9;]*mnewer message`).MatchString(out) {
+		t.Fatalf("selected message text should use gray background; output:\n%q", out)
+	}
+	if strings.Contains(out, "\x1b[48;5;11m") || strings.Contains(out, "\x1b[43m") {
+		t.Fatalf("selected message should not use yellow background; output:\n%q", out)
+	}
+}
+
+func TestViewShowsSelectedEntryRailWhenDetailPaneIsActive(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	m := uiModel{
+		width:      100,
+		height:     18,
+		selectedID: "s1",
+		focusMode:  focusMessages,
+		cards:      []sessionview.SessionCard{{SessionID: "s1", Agent: "codex", Status: "active", Title: "agent-status"}},
+		detailFor:  "s1",
+		detail:     sessionview.SessionDetail{SessionID: "s1"},
+	}
+
+	out := m.View()
+	selectedRail := statusStyle("active").Render("▌")
+	if got, want := strings.Count(out, selectedRail), 2; got != want {
+		t.Fatalf("selected entry rail height = %d lines, want %d; output:\n%q", got, want, out)
+	}
+	if !strings.Contains(out, selectedRail+" codex") ||
+		!strings.Contains(out, selectedRail+" "+sessionNameStyle.Render("agent-status")) {
+		t.Fatalf("selected entry rail should attach to the selected card; output:\n%q", out)
+	}
+	if strings.Contains(out, selectedRail+" "+headerStyle.Render("Metadata")) {
+		t.Fatalf("selected entry rail should not attach to the detail pane; output:\n%q", out)
+	}
+	if got, want := strings.Count(out, accentStyle.Render("│")), m.cardPaneHeight()-2; got != want {
+		t.Fatalf("detail pane divider rail height = %d lines, want %d; output:\n%q", got, want, out)
+	}
+	for _, want := range []string{accentStyle.Render("╭"), accentStyle.Render("╰")} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("detail pane divider rail missing %q; output:\n%q", want, out)
+		}
+	}
+}
+
+func TestViewShowsLeftPaneActiveRail(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	m := uiModel{
+		width:      100,
+		height:     18,
+		selectedID: "s1",
+		focusMode:  focusCards,
+		cards:      []sessionview.SessionCard{{SessionID: "s1"}},
+		detailFor:  "s1",
+		detail:     sessionview.SessionDetail{SessionID: "s1"},
+	}
+
+	out := m.View()
+	if strings.Contains(out, accentStyle.Render("╭")) || strings.Contains(out, accentStyle.Render("╰")) {
+		t.Fatalf("left pane active rail should not render left-edge corners; output:\n%q", out)
+	}
+	for _, want := range []string{accentStyle.Render("╮"), accentStyle.Render("╯")} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("left pane active rail missing %q; output:\n%q", want, out)
+		}
+	}
+	if got, want := strings.Count(out, accentStyle.Render("│")), m.cardPaneHeight()-2; got != want {
+		t.Fatalf("left pane active rail height = %d lines, want %d; output:\n%q", got, want, out)
+	}
+	if !strings.Contains(out, accentStyle.Render("╮")+"  "+headerStyle.Render("Metadata")) {
+		t.Fatalf("metadata pane should have padding after the active rail; output:\n%q", out)
+	}
+	if strings.Contains(out, dividerStyle.Render("│")) {
+		t.Fatalf("left pane active state should not render a separate dim divider; output:\n%q", out)
+	}
+}
+
+func TestDefaultAndFocusedConversationPreviewMatch(t *testing.T) {
+	base := uiModel{
+		width:      100,
+		height:     28,
+		selectedID: "s1",
+		cards:      []sessionview.SessionCard{{SessionID: "s1"}},
+		detailFor:  "s1",
+		detail: sessionview.SessionDetail{
+			SessionID: "s1",
+			Conversation: []sessionview.ConversationMessage{
+				{Role: "assistant", Text: "newer message"},
+				{Role: "user", Text: "older message"},
+			},
+		},
+		messageListFor: "s1",
+		messageList: sessionview.MessageList{
+			SessionID: "s1",
+			Messages: []sessionview.MessageSummary{
+				{ID: "new", Role: "assistant", Preview: "newer message"},
+				{ID: "tool", Role: "tool_call", Preview: "Bash"},
+				{ID: "result", Role: "tool_result", Preview: "tests passed"},
+				{ID: "old", Role: "user", Preview: "older message"},
+			},
+		},
+	}
+	focused := base
+	focused.focusMode = focusMessages
+
+	defaultOut := base.View()
+	focusedOut := focused.View()
+	for _, want := range []string{"Conversation", "newer message", "older message"} {
+		if !strings.Contains(defaultOut, want) || !strings.Contains(focusedOut, want) {
+			t.Fatalf("default/focused outputs should both contain %q\ndefault:\n%s\nfocused:\n%s", want, defaultOut, focusedOut)
+		}
+	}
+	for _, hidden := range []string{"Bash", "tests passed"} {
+		if strings.Contains(defaultOut, hidden) || strings.Contains(focusedOut, hidden) {
+			t.Fatalf("preview should hide %q in both states\ndefault:\n%s\nfocused:\n%s", hidden, defaultOut, focusedOut)
+		}
+	}
+}
+
+func TestViewFocusedMessageListKeepsPreviewWhileLoading(t *testing.T) {
+	m := uiModel{
+		width:      100,
+		height:     28,
+		selectedID: "s1",
+		focusMode:  focusMessages,
+		cards:      []sessionview.SessionCard{{SessionID: "s1"}},
+		detailFor:  "s1",
+		detail: sessionview.SessionDetail{
+			SessionID: "s1",
+			Conversation: []sessionview.ConversationMessage{
+				{Role: "user", Text: "newest preview"},
+				{Role: "assistant", Text: "older preview"},
+			},
+		},
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "Conversation") || !strings.Contains(out, "newest preview") {
+		t.Fatalf("View() should keep the existing preview while loading; output:\n%s", out)
+	}
+	if strings.Contains(out, "(loading messages)") || strings.Contains(out, "Messages") {
+		t.Fatalf("View() should not replace the pane during focus entry; output:\n%s", out)
+	}
+}
+
+func TestViewFocusedMessageListIsHeightBounded(t *testing.T) {
+	conversation := make([]sessionview.ConversationMessage, 0, 20)
+	messages := make([]sessionview.MessageSummary, 0, 20)
+	for i := 0; i < 20; i++ {
+		conversation = append(conversation, sessionview.ConversationMessage{Role: "user", Text: fmt.Sprintf("message %02d", i)})
+		messages = append(messages, sessionview.MessageSummary{ID: fmt.Sprintf("%d", i), Role: "user", Preview: fmt.Sprintf("message %02d", i)})
+	}
+	m := uiModel{
+		width:          100,
+		height:         18,
+		selectedID:     "s1",
+		focusMode:      focusMessages,
+		messageIndex:   12,
+		messageListFor: "s1",
+		cards:          []sessionview.SessionCard{{SessionID: "s1"}},
+		detailFor:      "s1",
+		detail: sessionview.SessionDetail{
+			SessionID:    "s1",
+			Conversation: conversation,
+		},
+		messageList: sessionview.MessageList{
+			SessionID: "s1",
+			Messages:  messages,
+		},
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "message 12") {
+		t.Fatalf("View() missing selected message; output:\n%s", out)
+	}
+	if strings.Contains(out, "message 19") {
+		t.Fatalf("View() should clip the message list to pane height; output:\n%s", out)
+	}
+}
+
+func TestDefaultConversationPreviewIsHeightBounded(t *testing.T) {
+	conversation := make([]sessionview.ConversationMessage, 0, 20)
+	for i := 0; i < 20; i++ {
+		conversation = append(conversation, sessionview.ConversationMessage{Role: "user", Text: fmt.Sprintf("message %02d", i)})
+	}
+	m := uiModel{
+		width:      100,
+		height:     18,
+		selectedID: "s1",
+		cards:      []sessionview.SessionCard{{SessionID: "s1"}},
+		detailFor:  "s1",
+		detail: sessionview.SessionDetail{
+			SessionID:    "s1",
+			Conversation: conversation,
+		},
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "message 00") {
+		t.Fatalf("View() missing first preview message; output:\n%s", out)
+	}
+	if strings.Contains(out, "message 19") {
+		t.Fatalf("View() should clip default conversation preview to pane height; output:\n%s", out)
+	}
+}
+
+func TestViewShowsFocusedMessageBody(t *testing.T) {
+	m := uiModel{
+		width:      100,
+		height:     28,
+		selectedID: "s1",
+		focusMode:  focusMessageBody,
+		cards:      []sessionview.SessionCard{{SessionID: "s1"}},
+		detailFor:  "s1",
+		detail: sessionview.SessionDetail{
+			SessionID: "s1",
+			Metadata:  detailMetadata(metadataItem{Label: "model", Value: "gpt-5.5"}),
+		},
+		messageDetailFor: "7",
+		messageDetail: sessionview.MessageDetail{
+			ID:   "7",
+			Role: "tool_result",
+			Text: "full message body",
+		},
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "Message") || !strings.Contains(out, "full message body") {
+		t.Fatalf("View() missing message body; output:\n%s", out)
+	}
+	if strings.Contains(out, "(no conversation preview)") {
+		t.Fatalf("View() should replace conversation preview; output:\n%s", out)
+	}
+}
+
+func TestViewKeymapUsesFForFocus(t *testing.T) {
+	m := uiModel{width: 80, height: 20}
+
+	out := m.View()
+	if !strings.Contains(out, "enter") || !strings.Contains(out, "focus") {
+		t.Fatalf("View() missing enter focus key; output:\n%s", out)
+	}
+	if !strings.Contains(out, "tab") || !strings.Contains(out, "detail") {
+		t.Fatalf("View() missing tab detail key; output:\n%s", out)
+	}
+	if strings.Contains(out, "f focus") {
+		t.Fatalf("View() should not show f focus; output:\n%s", out)
+	}
+}
+
+func TestViewKeymapNamesToolToggleState(t *testing.T) {
+	m := uiModel{width: 100, height: 24, focusMode: focusMessages}
+
+	out := m.View()
+	if !strings.Contains(out, "show tools") {
+		t.Fatalf("View() missing show tools hint; output:\n%s", out)
+	}
+
+	m.showExtraMessages = true
+	out = m.View()
+	if !strings.Contains(out, "hide tools") {
+		t.Fatalf("View() missing hide tools hint; output:\n%s", out)
+	}
+}
+
 func TestSelectedCardKeepsFixedHeightAndOmitsPreview(t *testing.T) {
 	card := sessionview.SessionCard{
 		SessionID: "s1",
@@ -106,12 +554,12 @@ func TestSelectedCardKeepsFixedHeightAndOmitsPreview(t *testing.T) {
 	if lipgloss.Height(selected) != lipgloss.Height(plain) {
 		t.Fatalf("selected card height = %d, plain height = %d", lipgloss.Height(selected), lipgloss.Height(plain))
 	}
-	if lipgloss.Height(selected) != 4 {
-		t.Fatalf("selected card height = %d, want 4", lipgloss.Height(selected))
+	if lipgloss.Height(selected) != 2 {
+		t.Fatalf("selected card height = %d, want 2", lipgloss.Height(selected))
 	}
 }
 
-func TestSelectedCardUsesBorderAccentWithoutInnerBackground(t *testing.T) {
+func TestSelectedCardOutsideSessionListDoesNotUseBackground(t *testing.T) {
 	oldProfile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.ANSI256)
 	defer lipgloss.SetColorProfile(oldProfile)
@@ -126,8 +574,126 @@ func TestSelectedCardUsesBorderAccentWithoutInnerBackground(t *testing.T) {
 
 	out := renderCard(card, 36, true, false, sessionview.SessionDetail{}, false)
 	if strings.Contains(out, "48;5;237") {
-		t.Fatalf("selected card should not render an inner background block; output:\n%q", out)
+		t.Fatalf("selected card should not render a background outside the session list; output:\n%q", out)
 	}
+}
+
+func TestRenderCardsFillsSelectedCardWhenSessionListIsActive(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	m := uiModel{
+		width:      90,
+		height:     24,
+		focusMode:  focusCards,
+		selectedID: "selected",
+		cards: []sessionview.SessionCard{
+			{SessionID: "selected", Agent: "codex", Status: "idle", Title: "selected", Age: "5h"},
+			{SessionID: "active", Agent: "codex", Status: "active", Title: "active"},
+		},
+	}
+
+	out := m.renderCards(36, "selected")
+	fill := string(cardAccentColor("idle", true))
+	normalPrefix := ansiPrefix(lipgloss.NewStyle().
+		Foreground(lipgloss.Color("0")).
+		Background(lipgloss.Color(fill)))
+	titlePrefix := ansiPrefix(lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("0")).
+		Background(lipgloss.Color(fill)))
+	for _, text := range []string{"codex", "idle", "5h"} {
+		if !regexp.MustCompile(regexp.QuoteMeta(normalPrefix) + `[^\n]*` + regexp.QuoteMeta(text)).MatchString(out) {
+			t.Fatalf("selected card text %q should keep selected background; output:\n%q", text, out)
+		}
+	}
+	if !strings.Contains(out, normalPrefix+" > codex") {
+		t.Fatalf("selected card should include left padding inside the fill; output:\n%q", out)
+	}
+	if !regexp.MustCompile(regexp.QuoteMeta(normalPrefix) + ` > codex[^\n]*idle \x1b\[0m`).MatchString(out) {
+		t.Fatalf("selected card should include right padding inside the fill; output:\n%q", out)
+	}
+	if !regexp.MustCompile(regexp.QuoteMeta(titlePrefix) + regexp.QuoteMeta("selected")).MatchString(out) {
+		t.Fatalf("selected card title should remain bold on selected background; output:\n%q", out)
+	}
+	if strings.Contains(out, titlePrefix+"codex") || strings.Contains(out, titlePrefix+"idle") || strings.Contains(out, titlePrefix+"5h") {
+		t.Fatalf("selected card should not bold all text; output:\n%q", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "codex") || strings.Contains(line, "selected") {
+			if strings.ContainsAny(line, "╭╮╰╯│") {
+				t.Fatalf("selected card should not render card borders; output:\n%q", out)
+			}
+		}
+	}
+	if strings.Contains(out, statusStyle("idle").Render("idle")) ||
+		strings.Contains(out, sessionNameStyle.Render("selected")) {
+		t.Fatalf("selected card should not use status or session-name foreground colors; output:\n%q", out)
+	}
+	activePrefix := ansiPrefix(lipgloss.NewStyle().Background(cardAccentColor("active", false)))
+	if strings.Contains(out, activePrefix) {
+		t.Fatalf("unselected active card should not use an activity background; output:\n%q", out)
+	}
+}
+
+func TestRenderCardsFillsSelectedActiveCardWithActiveAccentColor(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	m := uiModel{
+		width:      90,
+		height:     24,
+		focusMode:  focusCards,
+		selectedID: "active",
+		cards: []sessionview.SessionCard{
+			{SessionID: "active", Agent: "codex", Status: "active", Title: "active", Age: "5h"},
+		},
+	}
+
+	out := m.renderCards(36, "active")
+	fill := cardAccentColor("active", true)
+	selectedPrefix := ansiPrefix(lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("0")).
+		Background(fill))
+	if !strings.Contains(out, selectedPrefix) {
+		t.Fatalf("selected active card should use active accent color as fill; output:\n%q", out)
+	}
+	if strings.ContainsAny(out, "╭╮╰╯│") {
+		t.Fatalf("selected active card should not render card borders; output:\n%q", out)
+	}
+}
+
+func TestRenderCardsLeavesCardsUnfilledWhenSessionPaneIsActive(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	m := uiModel{
+		width:      90,
+		height:     24,
+		focusMode:  focusMessages,
+		selectedID: "selected",
+		cards: []sessionview.SessionCard{
+			{SessionID: "selected", Agent: "codex", Status: "idle", Title: "selected"},
+			{SessionID: "active", Agent: "codex", Status: "active", Title: "active"},
+		},
+	}
+
+	out := m.renderCards(36, "selected")
+	selectedPrefix := ansiPrefix(lipgloss.NewStyle().Background(cardAccentColor("idle", true)))
+	activePrefix := ansiPrefix(lipgloss.NewStyle().Background(cardAccentColor("active", false)))
+	if strings.Contains(out, selectedPrefix) || strings.Contains(out, activePrefix) {
+		t.Fatalf("cards should be unfilled outside the session list; output:\n%q", out)
+	}
+}
+
+func ansiPrefix(style lipgloss.Style) string {
+	rendered := style.Render("x")
+	parts := strings.SplitN(rendered, "x", 2)
+	return parts[0]
 }
 
 func TestSelectedCardIncludesSelectionMarker(t *testing.T) {
@@ -136,7 +702,7 @@ func TestSelectedCardIncludesSelectionMarker(t *testing.T) {
 		Agent:     "codex",
 		Status:    "idle",
 		Title:     "selected",
-	}, 36, true, false, sessionview.SessionDetail{}, false)
+	}, 36, true, true, sessionview.SessionDetail{}, false)
 	active := renderCard(sessionview.SessionCard{
 		SessionID: "s2",
 		Agent:     "codex",
@@ -149,6 +715,54 @@ func TestSelectedCardIncludesSelectionMarker(t *testing.T) {
 	}
 	if strings.Contains(active, ">") {
 		t.Fatalf("unselected active card should not include a selection marker; output:\n%s", active)
+	}
+}
+
+func TestSelectedCardUsesRailOutsideSessionListFocus(t *testing.T) {
+	selected := renderCard(sessionview.SessionCard{
+		SessionID: "s1",
+		Agent:     "codex",
+		Status:    "active",
+		Title:     "selected",
+	}, 36, true, false, sessionview.SessionDetail{}, false)
+
+	if got, want := strings.Count(selected, statusStyle("active").Render("▌")), 2; got != want {
+		t.Fatalf("selected card rail height = %d lines, want %d; output:\n%s", got, want, selected)
+	}
+	if strings.Contains(selected, ">") {
+		t.Fatalf("selected card should use a rail instead of a marker outside list focus; output:\n%s", selected)
+	}
+}
+
+func TestSelectedCardRailMatchesEffectiveStatus(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	for _, tc := range []struct {
+		name        string
+		status      string
+		childStatus string
+		wantStatus  string
+	}{
+		{name: "active", status: "active", wantStatus: "active"},
+		{name: "waiting", status: "waiting", wantStatus: "waiting"},
+		{name: "idle", status: "idle", wantStatus: "idle"},
+		{name: "child waiting", status: "idle", childStatus: "waiting", wantStatus: "waiting"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := renderCard(sessionview.SessionCard{
+				SessionID:   "s1",
+				Agent:       "codex",
+				Status:      tc.status,
+				ChildStatus: tc.childStatus,
+				Title:       "selected",
+			}, 36, true, false, sessionview.SessionDetail{}, false)
+
+			if got, want := strings.Count(out, statusStyle(tc.wantStatus).Render("▌")), 2; got != want {
+				t.Fatalf("selected card rail count = %d, want %d; output:\n%q", got, want, out)
+			}
+		})
 	}
 }
 
@@ -170,7 +784,7 @@ func TestRenderCardStylesSessionName(t *testing.T) {
 	}
 }
 
-func TestRenderCardsAddsCompactBorders(t *testing.T) {
+func TestRenderCardsUsesCompactRows(t *testing.T) {
 	m := uiModel{
 		width:  90,
 		height: 24,
@@ -182,14 +796,14 @@ func TestRenderCardsAddsCompactBorders(t *testing.T) {
 	}
 
 	out := m.renderCards(36, "s1")
-	if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") {
-		t.Fatalf("renderCards() missing card borders; output:\n%s", out)
+	if strings.ContainsAny(out, "╭╮╰╯│") {
+		t.Fatalf("renderCards() should not render card borders; output:\n%s", out)
 	}
-	if strings.Contains(out, "╯\n\n╭") {
-		t.Fatalf("renderCards() has too much space between cards; output:\n%s", out)
+	if !strings.Contains(out, "\n\n") {
+		t.Fatalf("renderCards() should add a blank line between cards; output:\n%s", out)
 	}
-	if !strings.Contains(out, "╯\n╭") {
-		t.Fatalf("renderCards() should keep cards compactly stacked; output:\n%s", out)
+	if lipgloss.Height(out) != 6 {
+		t.Fatalf("renderCards() height = %d, want 6; output:\n%s", lipgloss.Height(out), out)
 	}
 }
 
@@ -202,10 +816,10 @@ func TestRenderCardOmitsMarkerSpaceForLeafSession(t *testing.T) {
 	}
 
 	out := renderCard(card, 36, false, false, sessionview.SessionDetail{}, false)
-	if !strings.Contains(out, "│ codex") {
-		t.Fatalf("renderCard() should start leaf agent without marker padding; output:\n%s", out)
+	if !strings.HasPrefix(out, " codex") {
+		t.Fatalf("renderCard() should start leaf agent after left padding; output:\n%s", out)
 	}
-	if strings.Contains(out, "│   codex") {
+	if strings.Contains(out, "   codex") {
 		t.Fatalf("renderCard() should not reserve marker space for leaf sessions; output:\n%s", out)
 	}
 }
@@ -259,6 +873,34 @@ func TestRenderCardColorsStatusLabels(t *testing.T) {
 		if !strings.Contains(out, statusStyle(status).Render(status)) {
 			t.Fatalf("renderCard() should color %s status; output:\n%q", status, out)
 		}
+	}
+}
+
+func TestRenderCardShowsSessionAgeWithoutTimestamps(t *testing.T) {
+	card := sessionview.SessionCard{
+		SessionID:    "s1",
+		Agent:        "codex",
+		Status:       "active",
+		Title:        "project",
+		Age:          "2h",
+		FirstSeenAt:  "2026-05-15T11:21:19Z",
+		StatusAt:     "2026-05-15T11:23:00Z",
+		ActivityTime: "2m ago",
+	}
+
+	out := renderCard(card, 42, false, false, sessionview.SessionDetail{}, false)
+	for _, want := range []string{"active", "2h"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("renderCard() missing %q; output:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"created", "updated", "2026-05-15"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("renderCard() should keep full timestamps out of cards; output:\n%s", out)
+		}
+	}
+	if strings.Index(out, "active") > strings.Index(out, "2h") {
+		t.Fatalf("renderCard() should place age under the status; output:\n%s", out)
 	}
 }
 
@@ -605,7 +1247,7 @@ func TestViewAddsVerticalPanelDivider(t *testing.T) {
 	}
 }
 
-func TestViewPanelDividerUsesRuleStyleAndFullPaneHeight(t *testing.T) {
+func TestViewPanelRailUsesAccentStyleAndFullPaneHeight(t *testing.T) {
 	oldProfile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.ANSI256)
 	defer lipgloss.SetColorProfile(oldProfile)
@@ -630,15 +1272,21 @@ func TestViewPanelDividerUsesRuleStyleAndFullPaneHeight(t *testing.T) {
 	}
 
 	out := m.View()
-	styledPipe := dividerStyle.Render("│")
-	if got := strings.Count(out, styledPipe); got != m.cardPaneHeight() {
-		t.Fatalf("styled divider height = %d, want %d; output:\n%q", got, m.cardPaneHeight(), out)
+	activePipe := accentStyle.Render("│")
+	if got, want := strings.Count(out, activePipe), m.cardPaneHeight()-2; got != want {
+		t.Fatalf("active rail height = %d, want %d; output:\n%q", got, want, out)
 	}
-	if strings.Contains(out, dimStyle.Render("│")) {
-		t.Fatalf("divider should use divider style, not general dim style; output:\n%q", out)
+	if got := strings.Count(out, accentStyle.Render("╮")); got != 1 {
+		t.Fatalf("active rail top corner count = %d, want 1; output:\n%q", got, out)
+	}
+	if got := strings.Count(out, accentStyle.Render("╯")); got != 1 {
+		t.Fatalf("active rail bottom corner count = %d, want 1; output:\n%q", got, out)
+	}
+	if strings.Contains(out, dividerStyle.Render("│")) {
+		t.Fatalf("active rail should replace the dim divider; output:\n%q", out)
 	}
 	if strings.Contains(out, " │ ") {
-		t.Fatalf("divider should be styled, not plain; output:\n%q", out)
+		t.Fatalf("active rail should be styled, not plain; output:\n%q", out)
 	}
 }
 

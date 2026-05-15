@@ -3,6 +3,7 @@ package claudecode
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/samling/agent-status/internal/discovery/source"
@@ -52,5 +53,41 @@ func TestTranscriptUsesMetaPath(t *testing.T) {
 	}
 	if info.LastUserPrompt != "child prompt" {
 		t.Fatalf("LastUserPrompt = %q, want child prompt", info.LastUserPrompt)
+	}
+}
+
+func TestTranscriptMessagesIncludesToolResultBlocks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	data := `{"type":"assistant","timestamp":"2026-05-14T10:00:10Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"go test ./..."}}]}}
+{"type":"user","timestamp":"2026-05-14T10:00:20Z","message":{"content":[{"type":"tool_result","content":"tests passed"}]}}
+{"type":"assistant","timestamp":"2026-05-14T10:00:30Z","message":{"content":[{"type":"text","text":"done"}]}}
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := TranscriptMessages("s1", source.SessionMeta{Path: path})
+	if err != nil {
+		t.Fatalf("TranscriptMessages() error = %v", err)
+	}
+	if len(messages) != 3 {
+		t.Fatalf("len(messages) = %d, want 3", len(messages))
+	}
+	if messages[0].ID != "1" || messages[0].Role != "tool_call" || !strings.Contains(messages[0].Preview, "Bash") {
+		t.Fatalf("messages[0] = %#v, want tool call preview", messages[0])
+	}
+	if messages[1].ID != "2" || messages[1].Role != "tool_result" || !strings.Contains(messages[1].Preview, "tests passed") {
+		t.Fatalf("messages[1] = %#v, want tool result preview", messages[1])
+	}
+
+	detail, err := TranscriptMessage("s1", source.SessionMeta{Path: path}, "1")
+	if err != nil {
+		t.Fatalf("TranscriptMessage() error = %v", err)
+	}
+	if !strings.Contains(detail.Text, "go test ./...") {
+		t.Fatalf("detail.Text = %q, want tool input", detail.Text)
+	}
+	if !strings.Contains(detail.RawText, `"type": "assistant"`) || !strings.Contains(detail.RawText, "tool_use") {
+		t.Fatalf("detail.RawText = %q, want raw assistant line", detail.RawText)
 	}
 }

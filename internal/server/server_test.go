@@ -25,9 +25,11 @@ func (f fakeMeta) Transcript(string, string, source.SessionMeta) (source.Transcr
 }
 
 type fakeViews struct {
-	cards  []sessionview.SessionCard
-	detail sessionview.SessionDetail
-	err    error
+	cards         []sessionview.SessionCard
+	detail        sessionview.SessionDetail
+	messages      sessionview.MessageList
+	messageDetail sessionview.MessageDetail
+	err           error
 }
 
 func (f fakeViews) Cards(context.Context) ([]sessionview.SessionCard, error) {
@@ -36,6 +38,14 @@ func (f fakeViews) Cards(context.Context) ([]sessionview.SessionCard, error) {
 
 func (f fakeViews) Detail(context.Context, string) (sessionview.SessionDetail, error) {
 	return f.detail, f.err
+}
+
+func (f fakeViews) Messages(context.Context, string) (sessionview.MessageList, error) {
+	return f.messages, f.err
+}
+
+func (f fakeViews) Message(context.Context, string, string) (sessionview.MessageDetail, error) {
+	return f.messageDetail, f.err
 }
 
 func TestHookUsesAgentHeader(t *testing.T) {
@@ -321,6 +331,56 @@ func TestViewEndpointsReturnSessionViews(t *testing.T) {
 		t.Fatal(err)
 	}
 	if detail.SessionID != "session-1" {
+		t.Fatalf("detail = %#v", detail)
+	}
+}
+
+func TestViewMessageEndpointsReturnLazyMessages(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	views := fakeViews{
+		messages: sessionview.MessageList{
+			SessionID: "session-1",
+			Messages: []sessionview.MessageSummary{{
+				ID:      "7",
+				Role:    "tool_result",
+				Preview: "tests passed",
+			}},
+		},
+		messageDetail: sessionview.MessageDetail{
+			ID:   "7",
+			Role: "tool_result",
+			Text: "tests passed in detail",
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/views/sessions/session-1/messages", nil)
+	rr := httptest.NewRecorder()
+	HandlerWithViews(store, nil, views).ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("messages status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var messages sessionview.MessageList
+	if err := json.Unmarshal(rr.Body.Bytes(), &messages); err != nil {
+		t.Fatal(err)
+	}
+	if len(messages.Messages) != 1 || messages.Messages[0].ID != "7" {
+		t.Fatalf("messages = %#v", messages)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/views/sessions/session-1/messages/7", nil)
+	rr = httptest.NewRecorder()
+	HandlerWithViews(store, nil, views).ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("message detail status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var detail sessionview.MessageDetail
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.ID != "7" || detail.Text != "tests passed in detail" {
 		t.Fatalf("detail = %#v", detail)
 	}
 }

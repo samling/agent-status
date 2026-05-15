@@ -24,6 +24,17 @@ type detailMsg struct {
 	detailFor string
 	detailErr error
 }
+type messageListMsg struct {
+	messages  sessionview.MessageList
+	sessionID string
+	err       error
+}
+type messageDetailMsg struct {
+	detail    sessionview.MessageDetail
+	sessionID string
+	messageID string
+	err       error
+}
 type errMsg struct{ err error }
 
 func loadSnapshot(serverAddr, selectedID string, mode sortMode, previousOrder map[string]int) tea.Cmd {
@@ -85,6 +96,39 @@ func loadDetail(serverAddr, id string) tea.Cmd {
 			detail:    detail,
 			detailFor: id,
 			detailErr: err,
+		}
+	}
+}
+
+func loadMessages(serverAddr, id string) tea.Cmd {
+	return func() tea.Msg {
+		if id == "" {
+			return messageListMsg{}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		messages, err := client.New(serverAddr).SessionMessages(ctx, id)
+		return messageListMsg{
+			messages:  messages,
+			sessionID: id,
+			err:       err,
+		}
+	}
+}
+
+func loadMessage(serverAddr, sessionID, messageID string) tea.Cmd {
+	return func() tea.Msg {
+		if sessionID == "" || messageID == "" {
+			return messageDetailMsg{}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		detail, err := client.New(serverAddr).SessionMessage(ctx, sessionID, messageID)
+		return messageDetailMsg{
+			detail:    detail,
+			sessionID: sessionID,
+			messageID: messageID,
+			err:       err,
 		}
 	}
 }
