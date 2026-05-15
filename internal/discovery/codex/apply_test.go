@@ -125,6 +125,92 @@ func TestApplyRefineNoClobberAfterHookProgress(t *testing.T) {
 	}
 }
 
+func TestApplyTurnAbortTransitionsActiveSessionIdle(t *testing.T) {
+	store := mustOpenStore(t)
+	created := mustParseTime(t, "2026-05-06T22:00:00Z")
+	promptAt := "2026-05-06T22:00:05Z"
+	abortAt := mustParseTime(t, "2026-05-06T22:00:10Z")
+
+	Apply(context.Background(), store, source.LiveSession{
+		Agent:     state.AgentCodex,
+		SessionID: "session-1",
+		StartedAt: created,
+		Event:     state.EventSessionStart,
+	})
+	if _, err := store.RecordEvent(context.Background(), state.HookEvent{
+		Agent:      state.AgentCodex,
+		SessionID:  "session-1",
+		Event:      state.EventUserPromptSubmit,
+		TurnID:     "turn-1",
+		ReceivedAt: promptAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !Apply(context.Background(), store, source.LiveSession{
+		Agent:     state.AgentCodex,
+		SessionID: "session-1",
+		StartedAt: created,
+		Event:     state.EventStop,
+		EventAt:   abortAt,
+		TurnID:    "turn-1",
+	}) {
+		t.Fatal("Apply returned false for turn abort")
+	}
+
+	sessions := store.Sessions()
+	if sessions[0].LastEvent != state.EventStop {
+		t.Fatalf("LastEvent = %q, want Stop", sessions[0].LastEvent)
+	}
+	if sessions[0].TurnID != "turn-1" {
+		t.Fatalf("TurnID = %q, want turn-1", sessions[0].TurnID)
+	}
+	if sessions[0].StatusAt != abortAt.UTC().Format(time.RFC3339Nano) {
+		t.Fatalf("StatusAt = %q, want abort timestamp", sessions[0].StatusAt)
+	}
+	if got := state.DeriveStatus(sessions[0]); got != "idle" {
+		t.Fatalf("DeriveStatus = %q, want idle", got)
+	}
+}
+
+func TestApplyIgnoresOlderTurnAbortAfterNewPrompt(t *testing.T) {
+	store := mustOpenStore(t)
+	created := mustParseTime(t, "2026-05-06T22:00:00Z")
+
+	Apply(context.Background(), store, source.LiveSession{
+		Agent:     state.AgentCodex,
+		SessionID: "session-1",
+		StartedAt: created,
+		Event:     state.EventSessionStart,
+	})
+	if _, err := store.RecordEvent(context.Background(), state.HookEvent{
+		Agent:      state.AgentCodex,
+		SessionID:  "session-1",
+		Event:      state.EventUserPromptSubmit,
+		TurnID:     "turn-2",
+		ReceivedAt: "2026-05-06T22:00:20Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	Apply(context.Background(), store, source.LiveSession{
+		Agent:     state.AgentCodex,
+		SessionID: "session-1",
+		StartedAt: created,
+		Event:     state.EventStop,
+		EventAt:   mustParseTime(t, "2026-05-06T22:00:10Z"),
+		TurnID:    "turn-1",
+	})
+
+	sessions := store.Sessions()
+	if sessions[0].LastEvent != state.EventUserPromptSubmit {
+		t.Fatalf("LastEvent = %q, want UserPromptSubmit", sessions[0].LastEvent)
+	}
+	if got := state.DeriveStatus(sessions[0]); got != "active" {
+		t.Fatalf("DeriveStatus = %q, want active", got)
+	}
+}
+
 // Hook with AgentUnidentified must not downgrade a concrete agent label that
 // was already stamped (whether by an earlier hook with a real header, or by
 // discovery winning the first-sight race).

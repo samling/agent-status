@@ -16,6 +16,7 @@ var (
 	sessionNameStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
 	headerStyle      = lipgloss.NewStyle().Bold(true)
 	dimStyle         = lipgloss.NewStyle().Faint(true)
+	dividerStyle     = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("240"))
 	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	borderStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 	roleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
@@ -322,7 +323,7 @@ func sectionDivider(width int) string {
 	if width < 8 {
 		width = 8
 	}
-	return dimStyle.Render(strings.Repeat("─", width))
+	return dividerStyle.Render(strings.Repeat("─", width))
 }
 
 func renderDetailUnavailable(err error, width int) string {
@@ -528,7 +529,7 @@ func verticalDivider(height int) string {
 	}
 	lines := make([]string, height)
 	for i := range lines {
-		lines[i] = dimStyle.Render("│")
+		lines[i] = dividerStyle.Render("│")
 	}
 	return strings.Join(lines, "\n")
 }

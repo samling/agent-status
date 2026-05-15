@@ -416,6 +416,18 @@ func TestRenderSessionDetailUsesSectionDividerBetweenSections(t *testing.T) {
 	}
 }
 
+func TestSectionDividerUsesDividerStyle(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	out := sectionDivider(12)
+	want := dividerStyle.Render(strings.Repeat("─", 12))
+	if out != want {
+		t.Fatalf("sectionDivider() = %q, want %q", out, want)
+	}
+}
+
 func TestRenderSessionDetailOmitsRepeatedHeader(t *testing.T) {
 	out := renderSessionDetail(sessionview.SessionDetail{
 		SessionID: "s1",
@@ -618,9 +630,12 @@ func TestViewPanelDividerUsesRuleStyleAndFullPaneHeight(t *testing.T) {
 	}
 
 	out := m.View()
-	styledPipe := dimStyle.Render("│")
+	styledPipe := dividerStyle.Render("│")
 	if got := strings.Count(out, styledPipe); got != m.cardPaneHeight() {
 		t.Fatalf("styled divider height = %d, want %d; output:\n%q", got, m.cardPaneHeight(), out)
+	}
+	if strings.Contains(out, dimStyle.Render("│")) {
+		t.Fatalf("divider should use divider style, not general dim style; output:\n%q", out)
 	}
 	if strings.Contains(out, " │ ") {
 		t.Fatalf("divider should be styled, not plain; output:\n%q", out)

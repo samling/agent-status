@@ -38,6 +38,8 @@ type thread struct {
 	RolloutPath     string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	AbortAt         time.Time
+	AbortTurnID     string
 	Name            string
 	ParentSessionID string
 	ChildCount      int
@@ -150,10 +152,16 @@ func Scan() ([]source.LiveSession, int, error) {
 		}
 		event := state.EventDiscovered
 		eventAt := updatedAt
+		turnID := ""
 		// ReconcileDiscovered only honors SessionStart on first insert.
 		if !th.CreatedAt.IsZero() && now.Sub(th.CreatedAt) < freshSessionWindow {
 			event = state.EventSessionStart
 			eventAt = th.CreatedAt
+		}
+		if !th.AbortAt.IsZero() {
+			event = state.EventStop
+			eventAt = th.AbortAt
+			turnID = th.AbortTurnID
 		}
 		out = append(out, source.LiveSession{
 			Agent:     state.AgentCodex,
@@ -161,6 +169,7 @@ func Scan() ([]source.LiveSession, int, error) {
 			StartedAt: th.CreatedAt,
 			Event:     event,
 			EventAt:   eventAt,
+			TurnID:    turnID,
 			Meta: source.SessionMeta{
 				PID:             proc.PID,
 				Name:            firstNonEmpty(th.Name, names[th.ID]),
@@ -203,6 +212,11 @@ func Apply(ctx context.Context, s *state.Store, sess source.LiveSession) bool {
 		createdAt = time.Now()
 	}
 	ts := createdAt.UTC().Format(time.RFC3339Nano)
+	eventAt := sess.EventAt
+	if eventAt.IsZero() {
+		eventAt = createdAt
+	}
+	eventTS := eventAt.UTC().Format(time.RFC3339Nano)
 	insertEvent := sess.Event
 	if insertEvent == "" {
 		insertEvent = state.EventDiscovered
@@ -214,8 +228,9 @@ func Apply(ctx context.Context, s *state.Store, sess source.LiveSession) bool {
 		PID:         sess.Meta.PID,
 		FirstSeenAt: ts,
 		LastEvent:   insertEvent,
-		LastEventAt: ts,
-		StatusAt:    ts,
+		LastEventAt: eventTS,
+		TurnID:      sess.TurnID,
+		StatusAt:    eventTS,
 	})
 	if err != nil {
 		slog.WarnContext(ctx, "discovery: codex insert failed",
@@ -257,6 +272,18 @@ func Apply(ctx context.Context, s *state.Store, sess source.LiveSession) bool {
 			stored.StatusAt = stored.LastEventAt
 			if stored.StatusAt == "" {
 				stored.StatusAt = ts
+			}
+			changed = true
+		}
+		if sess.Event == state.EventStop && eventAfter(eventAt, stored.LastEventAt) {
+			prevStatus := state.DeriveStatus(*stored)
+			stored.LastEvent = sess.Event
+			stored.LastEventAt = eventTS
+			if sess.TurnID != "" {
+				stored.TurnID = sess.TurnID
+			}
+			if state.DeriveStatus(*stored) != prevStatus {
+				stored.StatusAt = eventTS
 			}
 			changed = true
 		}
@@ -310,6 +337,10 @@ func mergeThread(a, b thread) thread {
 	}
 	if b.UpdatedAt.After(a.UpdatedAt) {
 		a.UpdatedAt = b.UpdatedAt
+	}
+	if b.AbortAt.After(a.AbortAt) {
+		a.AbortAt = b.AbortAt
+		a.AbortTurnID = b.AbortTurnID
 	}
 	if a.Source == "" {
 		a.Source = b.Source
@@ -465,39 +496,57 @@ func loadRolloutThread(path string, modTime time.Time) (thread, bool) {
 	)
 	_ = source.ScanJSONL(f, func(buf []byte) bool {
 		var line transcriptLine
-		if err := json.Unmarshal(buf, &line); err != nil || line.Type != "session_meta" {
+		if err := json.Unmarshal(buf, &line); err != nil {
 			return true
 		}
-		var payload sessionMeta
-		if err := json.Unmarshal(line.Payload, &payload); err != nil {
-			parseErr = true
-			return false
+		switch line.Type {
+		case "session_meta":
+			var payload sessionMeta
+			if err := json.Unmarshal(line.Payload, &payload); err != nil {
+				parseErr = true
+				return false
+			}
+			id := payload.ID
+			if id == "" {
+				id = threadIDFromRolloutPath(path)
+			}
+			if id == "" {
+				parseErr = true
+				return false
+			}
+			createdAt := parseTimestamp(payload.Timestamp)
+			if createdAt.IsZero() {
+				createdAt = modTime
+			}
+			abortAt := found.AbortAt
+			abortTurnID := found.AbortTurnID
+			found = thread{
+				ID:          id,
+				RolloutPath: path,
+				CreatedAt:   createdAt,
+				UpdatedAt:   modTime,
+				AbortAt:     abortAt,
+				AbortTurnID: abortTurnID,
+				Source:      payload.Source,
+				Cwd:         payload.Cwd,
+				Version:     payload.CLIVersion,
+				Model:       payload.Model,
+				GitBranch:   payload.Git.Branch,
+			}
+			ok = true
+		case "event_msg":
+			var payload rolloutEventMsg
+			if err := json.Unmarshal(line.Payload, &payload); err != nil || payload.Type != "turn_aborted" {
+				return true
+			}
+			abortAt := parseTimestamp(line.Timestamp)
+			if abortAt.IsZero() || !abortAt.After(found.AbortAt) {
+				return true
+			}
+			found.AbortAt = abortAt
+			found.AbortTurnID = payload.TurnID
 		}
-		id := payload.ID
-		if id == "" {
-			id = threadIDFromRolloutPath(path)
-		}
-		if id == "" {
-			parseErr = true
-			return false
-		}
-		createdAt := parseTimestamp(payload.Timestamp)
-		if createdAt.IsZero() {
-			createdAt = modTime
-		}
-		found = thread{
-			ID:          id,
-			RolloutPath: path,
-			CreatedAt:   createdAt,
-			UpdatedAt:   modTime,
-			Source:      payload.Source,
-			Cwd:         payload.Cwd,
-			Version:     payload.CLIVersion,
-			Model:       payload.Model,
-			GitBranch:   payload.Git.Branch,
-		}
-		ok = true
-		return false
+		return true
 	})
 	if parseErr {
 		return thread{}, false
@@ -545,6 +594,14 @@ func parseTimestamp(s string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+func eventAfter(candidate time.Time, current string) bool {
+	if candidate.IsZero() {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339Nano, current)
+	return err != nil || candidate.After(t)
 }
 
 func homeDir() (string, error) {
@@ -835,4 +892,9 @@ type sessionMeta struct {
 	Git        struct {
 		Branch string `json:"branch"`
 	} `json:"git"`
+}
+
+type rolloutEventMsg struct {
+	Type   string `json:"type"`
+	TurnID string `json:"turn_id"`
 }

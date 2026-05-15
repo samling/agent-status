@@ -266,6 +266,36 @@ func TestScanIncludesRecentRolloutBeforeSQLiteState(t *testing.T) {
 	}
 }
 
+func TestScanMarksTurnAbortAsStop(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	createdAt := mustParseTime(t, "2026-05-06T22:00:00Z")
+	abortedAt := createdAt.Add(10 * time.Second)
+	rolloutPath := writeRollout(t, dir, "thread-1", createdAt, "/tmp/project")
+	appendRolloutLine(t, rolloutPath, fmt.Sprintf(
+		`{"timestamp":%q,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted","completed_at":0,"duration_ms":10000}}`+"\n",
+		abortedAt.UTC().Format(time.RFC3339Nano),
+	))
+
+	sessions, _, err := Scan()
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(sessions))
+	}
+	if sessions[0].Event != state.EventStop {
+		t.Fatalf("Event = %q, want Stop", sessions[0].Event)
+	}
+	if sessions[0].TurnID != "turn-1" {
+		t.Fatalf("TurnID = %q, want turn-1", sessions[0].TurnID)
+	}
+	if !sessions[0].EventAt.Equal(abortedAt) {
+		t.Fatalf("EventAt = %v, want %v", sessions[0].EventAt, abortedAt)
+	}
+}
+
 func TestScanSkipsOldThreadWithoutProcessLink(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
@@ -470,6 +500,18 @@ func writeRollout(t *testing.T, dir, id string, createdAt time.Time, cwd string)
 		t.Fatal(err)
 	}
 	return path
+}
+
+func appendRolloutLine(t *testing.T, path, line string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func execTestSQL(t *testing.T, db *sql.DB, query string, args ...any) {

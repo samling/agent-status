@@ -13,6 +13,7 @@ type LiveSession struct {
 	StartedAt    time.Time
 	Event        string
 	EventAt      time.Time
+	TurnID       string
 	EngineStatus string
 	Meta         SessionMeta
 }
