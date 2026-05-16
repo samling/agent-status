@@ -376,7 +376,7 @@ func detailMetadata(sess state.Session, meta source.SessionMeta, info source.Tra
 		ChildCount:          meta.ChildCount,
 		OpenChildCount:      meta.OpenChildCount,
 		LastEvent:           sess.LastEvent,
-		Waiting:             meta.WaitingFor,
+		Waiting:             firstNonEmpty(meta.WaitingFor, sess.WaitingFor),
 		Note:                note,
 	}
 }

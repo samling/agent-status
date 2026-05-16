@@ -75,6 +75,19 @@ func cardAccentColor(status string, selected bool) lipgloss.Color {
 	return lipgloss.Color("240")
 }
 
+func cardStatusRailColor(status string) lipgloss.Color {
+	switch status {
+	case "active":
+		return lipgloss.Color("10")
+	case "waiting":
+		return lipgloss.Color("11")
+	case "idle":
+		return lipgloss.Color("8")
+	default:
+		return lipgloss.Color("240")
+	}
+}
+
 func (m uiModel) paneWidths() (int, int) {
 	inner := m.width - 4
 	separatorWidth := paneGap*2 + paneDividerCols
@@ -222,47 +235,43 @@ func renderCard(card sessionview.SessionCard, width int, selected, filled bool, 
 	fillSelected := filled && selected
 	statusText := statusStyle(status).Render(status)
 	if fillSelected {
-		statusText = status
+		statusText = selectedStatusTextStyle(status).Render(status)
 	}
 	selectionMarker := ""
-	if fillSelected {
-		selectionMarker = "> "
-	}
 	agentWidth := max(contentWidth-lipgloss.Width(selectionMarker)-lipgloss.Width(statusText)-1, 1)
 	agent = truncate(agent, agentWidth)
 	top := selectionMarker + fmt.Sprintf("%-*s %s", agentWidth, agent, statusText)
 	if fillSelected {
-		return renderFilledSelectedCard(card, top, contentWidth, width)
+		return renderFilledSelectedCard(card, status, top, contentWidth, width)
 	}
 	title := compactCardLine(card.Title, cardAge(card), contentWidth)
 	if railSelected {
 		return renderRailSelectedCard(top, title, status)
 	}
-	pad := strings.Repeat(" ", cardLeftPadding)
-	return strings.Join([]string{pad + top, pad + title}, "\n")
+	return renderRailSelectedCard(top, title, status)
 }
 
-func renderFilledSelectedCard(card sessionview.SessionCard, top string, contentWidth, width int) string {
-	fill := selectedCardFillColor(card)
+func renderFilledSelectedCard(card sessionview.SessionCard, status, top string, contentWidth, width int) string {
+	fill := selectedSessionFillColor()
 	lines := []string{
-		selectedPlainCardLine(top, width, fill),
-		selectedTitleCardLine(card.Title, cardAge(card), contentWidth, width, fill),
+		selectedPlainCardLine(top, width, fill, status),
+		selectedTitleCardLine(card.Title, cardAge(card), contentWidth, width, fill, status),
 	}
 	return strings.Join(lines, "\n")
 }
 
-func selectedPlainCardLine(line string, width int, fill lipgloss.Color) string {
+func selectedPlainCardLine(line string, width int, fill lipgloss.Color, status string) string {
 	visible := strings.Repeat(" ", cardLeftPadding) + line
-	return selectedCardTextStyle(fill, false).Render(rightPad(visible, width))
+	return statusRail(status) + selectedCardTextStyle(fill, false).Render(rightPad(visible, width-1))
 }
 
-func selectedTitleCardLine(title, subtitle string, contentWidth, width int, fill lipgloss.Color) string {
+func selectedTitleCardLine(title, subtitle string, contentWidth, width int, fill lipgloss.Color, status string) string {
 	titlePart, rest := plainCardLineParts(title, subtitle, contentWidth)
 	pad := strings.Repeat(" ", cardLeftPadding)
 	visible := pad + titlePart + rest
-	rest += strings.Repeat(" ", max(width-len([]rune(visible)), 0))
-	return selectedCardTextStyle(fill, false).Render(pad) +
-		selectedCardTextStyle(fill, true).Render(titlePart) +
+	rest += strings.Repeat(" ", max(width-1-len([]rune(visible)), 0))
+	return statusRail(status) + selectedCardTextStyle(fill, false).Render(pad) +
+		selectedSessionNameStyle().Render(titlePart) +
 		selectedCardTextStyle(fill, false).Render(rest)
 }
 
@@ -274,14 +283,38 @@ func renderRailSelectedCard(top, title, status string) string {
 }
 
 func railSelectedCardLine(line, status string) string {
-	return statusStyle(status).Render("▌") + strings.Repeat(" ", cardLeftPadding) + line
+	return statusRail(status) + strings.Repeat(" ", cardLeftPadding) + line
+}
+
+func statusRail(status string) string {
+	return lipgloss.NewStyle().Foreground(cardStatusRailColor(status)).Render("▌")
 }
 
 func selectedCardTextStyle(fill lipgloss.Color, bold bool) lipgloss.Style {
 	return lipgloss.NewStyle().
 		Bold(bold).
-		Foreground(lipgloss.Color("0")).
+		Foreground(lipgloss.Color("252")).
 		Background(fill).
+		ColorWhitespace(true)
+}
+
+func selectedSessionFillColor() lipgloss.Color {
+	return lipgloss.Color("238")
+}
+
+func selectedStatusTextStyle(status string) lipgloss.Style {
+	return lipgloss.NewStyle().
+		Bold(true).
+		Foreground(cardStatusRailColor(status)).
+		Background(selectedSessionFillColor()).
+		ColorWhitespace(true)
+}
+
+func selectedSessionNameStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("14")).
+		Background(selectedSessionFillColor()).
 		ColorWhitespace(true)
 }
 

@@ -30,17 +30,19 @@ For the higher-level picture, see [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md).
      backend's `Scan` to enumerate the full alive set. Catches every
      change eventually, but only at tick granularity.
    - **The fast path (per-agent)**: a long-lived goroutine that
-     watches an agent-specific event source and pushes updates
-     directly into the store as they happen. For claude-code the
-     fast path is `claudecode.Watch`, an fsnotify watcher on
-     `~/.claude/sessions/`. For codex the fast path is `codex.Watch`,
-     an fsnotify watcher on `~/.codex/shell_snapshots/`; codex drops
-     a snapshot file at session open before any turns, so a
-     synthetic SessionStart shows up in the store within
-     milliseconds instead of waiting up to 2 s for the next poll.
+      watches an agent-specific event source and pushes updates
+      directly into the store as they happen. For claude-code the
+      fast path is `claudecode.Watch`, an fsnotify watcher on
+      `~/.claude/sessions/`. For codex the fast path is `codex.Watch`,
+      an fsnotify watcher on `~/.codex/shell_snapshots/`; codex drops
+      a snapshot file at session open before any turns, so a
+      synthetic SessionStart shows up in the store within
+      milliseconds instead of waiting up to 2 s for the next poll. For
+      opencode the fast path is `opencode.Watch`, an fsnotify watcher
+      on `$XDG_DATA_HOME/opencode/opencode.db` and its WAL/SHM files.
 
    Correctness never depends on the fast path; the poll is the
-   backstop for both backends.
+   backstop for all backends.
 
    Concretely:
 
@@ -48,8 +50,8 @@ For the higher-level picture, see [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md).
       get the registered backends. Each `liveSource` carries a
       required `scan` (driven by the 2 s poll) and an optional
       `watch` (the fast path), plus per-agent `apply` and
-      `transcript` callbacks. Today both claudecode and codex set
-      `watch` to a non-nil function.
+      `transcript` callbacks. Today claudecode, codex, and opencode
+      set `watch` to a non-nil function.
    2. For each source with a non-nil `watch`, spawns a goroutine
       that runs `src.watch(ctx, store)` for the lifetime of the
       server. Errors from a fast path are logged but never block
@@ -62,12 +64,16 @@ For the higher-level picture, see [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md).
          claudecode reads `~/.claude/sessions/*.json`; codex merges
          the newest `state_*.sqlite` thread table, recent rollout
          JSONLs (30 min grace), and `shell_snapshots/`, then joins
-         against `logs_*.sqlite` to map `thread_id -> pid`. Both
-         filter by `source.PIDAlive(pid)`.
+         against `logs_*.sqlite` to map `thread_id -> pid`; opencode
+         reads unarchived session rows from
+         `$XDG_DATA_HOME/opencode/opencode.db` (default
+         `~/.local/share/opencode/opencode.db`). Claude Code and
+         Codex filter by `source.PIDAlive(pid)`.
       2. For each successful scan, applies the alive sessions via
          the per-agent upsert (`claudecode.Apply` in
          `internal/discovery/claudecode/claudecode.go`,
-         `codex.Apply` in `internal/discovery/codex/codex.go`).
+         `codex.Apply` in `internal/discovery/codex/codex.go`,
+         `opencode.Apply` in `internal/discovery/opencode/opencode.go`).
       3. Calls `store.ReapAbsentForAgent(ctx, src.agent, aliveSet)`
          per source: the inline reap. Per-agent so a transient
          scan error from one source can never drop another
@@ -227,7 +233,21 @@ Codex does not emit a `SessionEnd` hook. Exit looks like this:
 3. The inline `ReapAbsentForAgent(ctx, "codex", aliveSet)` inside
    `syncDiscovered` drops the row.
 
-## 7. Read paths
+## 7. opencode lifecycle
+
+opencode stores sessions and messages in
+`$XDG_DATA_HOME/opencode/opencode.db` (default
+`~/.local/share/opencode/opencode.db`). Discovery scans unarchived
+`session` rows into `source.LiveSession`, then reads `message` and
+`part` rows for transcript previews and lazy transcript details. The
+fast path watches `opencode.db`, `opencode.db-wal`, and
+`opencode.db-shm`, debounces writes, then scans and applies discovered
+sessions; the 2 s poll remains the correctness backstop. The
+bootstrapped opencode plugin posts normalized session, message, tool,
+and permission activity to `/hook` with `X-Agent: opencode`, using the
+same endpoint resolution order as the shared shell forwarder.
+
+## 8. Read paths
 
 All external readers go through the HTTP client library at
 `internal/client`. The server is the single source of truth: it owns
@@ -251,10 +271,13 @@ loading its own state at startup (`internal/state/state.go`).
    sorted by status change recency.
 3. The TUI additionally calls
    `discovery.LoadTranscript(sessionID, agent, meta)` for the
-   focused row to render the detail panel; the per-agent loaders
-   (`claudecode.Transcript`, `codex.Transcript`) go through
-   `source.LoadTranscriptPath`, which stat-caches the parsed
-   `TranscriptInfo` by path/mtime/size.
+   focused row to render the detail panel; discovery dispatches to the
+   registered per-agent transcript loaders (`claudecode.Transcript`,
+   `codex.Transcript`, or `opencode.Transcript`). Claude Code and Codex
+   go through `source.LoadTranscriptPath`, which stat-caches the parsed
+   `TranscriptInfo` by path/mtime/size. opencode also registers
+   `opencode.TranscriptMessages` and `opencode.TranscriptMessage` for
+   lazy message-list and message-detail reads from `opencode.db`.
 
 ### Connectivity indicator
 
@@ -284,7 +307,7 @@ the window, which is always the client.
    window to the foreground.
 4. Optionally drills into a tmux pane via `findAndFocusTmuxPane`.
 
-## 8. Notify watcher (when enabled)
+## 9. Notify watcher (when enabled)
 
 Runs in its own goroutine alongside `discovery.Watch`
 (`internal/notify/watcher.go::(*Watcher).Run`):
@@ -306,7 +329,7 @@ Runs in its own goroutine alongside `discovery.Watch`
    machine).
 5. On `1+ -> 0`, stops both timers.
 
-## 9. Cross-cutting: logging
+## 10. Cross-cutting: logging
 
 - `logging.Setup` (`internal/logging/logging.go`) installs `log/slog`
   as the default logger using the resolved `log.level` and

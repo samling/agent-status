@@ -73,6 +73,31 @@ func TestHookUsesAgentHeader(t *testing.T) {
 	}
 }
 
+func TestHookUsesOpencodeAgentHeader(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"session_id":"session-1","hook_event_name":"SessionStart"}`
+	req := httptest.NewRequest(http.MethodPost, "/hook", strings.NewReader(body))
+	req.Header.Set("X-Agent", "opencode")
+	rr := httptest.NewRecorder()
+
+	Handler(store, nil).ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
+	}
+
+	sessions := store.Sessions()
+	if len(sessions) != 1 {
+		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
+	}
+	if sessions[0].Agent != state.AgentOpencode {
+		t.Fatalf("Agent = %q, want %q", sessions[0].Agent, state.AgentOpencode)
+	}
+}
+
 func TestHookMissingHeaderIsUnidentified(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
@@ -170,6 +195,55 @@ func TestHookAcceptsClaudeAgentFields(t *testing.T) {
 	}
 	if sessions[0].LastEvent != state.EventPreToolUse {
 		t.Fatalf("LastEvent = %q, want PreToolUse", sessions[0].LastEvent)
+	}
+}
+
+func TestHookRecordsPermissionWaitingLabel(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{
+		"session_id": "session-1",
+		"hook_event_name": "PermissionRequest",
+		"tool_name": "Bash"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/hook", strings.NewReader(body))
+	req.Header.Set("X-Agent", "opencode")
+	rr := httptest.NewRecorder()
+
+	Handler(store, nil).ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
+	}
+	sessions := store.Sessions()
+	if len(sessions) != 1 {
+		t.Fatalf("len(Sessions()) = %d, want 1", len(sessions))
+	}
+	if got := sessions[0].WaitingFor; got != "approve Bash" {
+		t.Fatalf("WaitingFor = %q, want approve Bash", got)
+	}
+	if got := state.DeriveStatus(sessions[0]); got != "waiting" {
+		t.Fatalf("DeriveStatus = %q, want waiting", got)
+	}
+
+	body = `{
+		"session_id": "session-1",
+		"hook_event_name": "PreToolUse",
+		"tool_name": "Bash"
+	}`
+	req = httptest.NewRequest(http.MethodPost, "/hook", strings.NewReader(body))
+	req.Header.Set("X-Agent", "opencode")
+	rr = httptest.NewRecorder()
+
+	Handler(store, nil).ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
+	}
+	sessions = store.Sessions()
+	if got := sessions[0].WaitingFor; got != "" {
+		t.Fatalf("WaitingFor after PreToolUse = %q, want empty", got)
 	}
 }
 

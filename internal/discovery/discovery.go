@@ -8,6 +8,7 @@ import (
 
 	"github.com/samling/agent-status/internal/discovery/claudecode"
 	"github.com/samling/agent-status/internal/discovery/codex"
+	"github.com/samling/agent-status/internal/discovery/opencode"
 	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/state"
 )
@@ -43,6 +44,15 @@ var sources = []liveSource{
 		transcript: codex.Transcript,
 		messages:   codex.TranscriptMessages,
 		message:    codex.TranscriptMessage,
+	},
+	{
+		agent:      state.AgentOpencode,
+		scan:       opencode.Scan,
+		watch:      opencode.Watch,
+		apply:      opencode.Apply,
+		transcript: opencode.Transcript,
+		messages:   opencode.TranscriptMessages,
+		message:    opencode.TranscriptMessage,
 	},
 }
 

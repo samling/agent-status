@@ -1,5 +1,5 @@
 // Package bootstrap installs the agent-status forwarder script and hook
-// configuration into Claude Code's and Codex's config directories. It is
+// configuration into Claude Code's, Codex's, and opencode's config directories. It is
 // the Go replacement for the previous scripts/bootstrap.sh.
 package bootstrap
 
@@ -18,23 +18,24 @@ import (
 	"time"
 )
 
-//go:embed assets/post-agent-status.sh assets/claude-code.json assets/codex.json
+//go:embed assets/post-agent-status.sh assets/claude-code.json assets/codex.json assets/opencode-agent-status-plugin.js
 var assets embed.FS
 
 const (
 	placeholder = "path-to-post-agent-status"
 
-	agentClaude = "claude"
-	agentCodex  = "codex"
+	agentClaude   = "claude"
+	agentCodex    = "codex"
+	agentOpencode = "opencode"
 )
 
 // KnownAgents returns the agent identifiers BuildPlan accepts, in
 // presentation order. Exposed so the CLI can mention them in help text.
 func KnownAgents() []string {
-	return []string{agentClaude, agentCodex}
+	return []string{agentClaude, agentCodex, agentOpencode}
 }
 
-// Agent describes one bootstrap target (Claude Code or Codex).
+// Agent describes one bootstrap target.
 type Agent struct {
 	// ID is the short identifier used by --agents (e.g. "claude").
 	ID string
@@ -49,15 +50,17 @@ type Agent struct {
 }
 
 // Options controls which agents to configure and where their files live.
-// An empty ClaudeDir / CodexDir falls back to the standard environment
-// (CLAUDE_CONFIG_DIR / CODEX_HOME) or ~/.claude / ~/.codex. An empty
+// An empty ClaudeDir / CodexDir / OpencodeDir falls back to the standard
+// environment (CLAUDE_CONFIG_DIR / CODEX_HOME / OPENCODE_CONFIG_DIR) or
+// ~/.claude / ~/.codex / ~/.config/opencode. An empty
 // BootstrapDir falls back to $XDG_CONFIG_HOME/agent-status (or
 // ~/.config/agent-status).
 type Options struct {
-	Agents        []string
-	ClaudeDir     string
-	CodexDir      string
-	BootstrapDir  string
+	Agents       []string
+	ClaudeDir    string
+	CodexDir     string
+	OpencodeDir  string
+	BootstrapDir string
 }
 
 // Plan describes the work bootstrap will perform.
@@ -98,6 +101,10 @@ func BuildPlan(opts Options) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
+	opencodeDir, err := resolveOpencodeDir(opts.OpencodeDir)
+	if err != nil {
+		return Plan{}, err
+	}
 
 	plan := Plan{
 		ScriptPath: filepath.Join(bootstrapDir, "post-agent-status.sh"),
@@ -132,8 +139,20 @@ func BuildPlan(opts Options) (Plan, error) {
 				HooksTarget: filepath.Join(codexDir, "hooks.json"),
 				hooksAsset:  "assets/codex.json",
 			}
+		case agentOpencode:
+			target, err := opencodeConfigTarget(opencodeDir)
+			if err != nil {
+				return Plan{}, err
+			}
+			a = Agent{
+				ID:          agentOpencode,
+				Label:       "opencode",
+				ConfigDir:   opencodeDir,
+				HooksTarget: target,
+				hooksAsset:  "assets/opencode-agent-status-plugin.js",
+			}
 		default:
-			return Plan{}, fmt.Errorf("unknown agent %q (known: claude, codex)", raw)
+			return Plan{}, fmt.Errorf("unknown agent %q (known: %s)", raw, strings.Join(KnownAgents(), ", "))
 		}
 
 		exists, err := fileExists(a.HooksTarget)
@@ -213,6 +232,10 @@ func (p Plan) Execute(dryRun bool, w io.Writer) error {
 }
 
 func executeAgent(scriptPath string, ap AgentPlan, dryRun bool, w io.Writer) error {
+	if ap.Agent.ID == agentOpencode {
+		return executeOpencode(scriptPath, ap, dryRun, w)
+	}
+
 	hookTmpl, err := assets.ReadFile(ap.Agent.hooksAsset)
 	if err != nil {
 		return err
@@ -241,6 +264,54 @@ func executeAgent(scriptPath string, ap AgentPlan, dryRun bool, w io.Writer) err
 			return err
 		}
 		fmt.Fprintf(w, "merged %s hooks into %s (backup at %s)\n", ap.Agent.Label, ap.Agent.HooksTarget, backup)
+		return nil
+	}
+
+	if err := writeFile(ap.Agent.HooksTarget, rendered, 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "wrote %s\n", ap.Agent.HooksTarget)
+	return nil
+}
+
+func executeOpencode(scriptPath string, ap AgentPlan, dryRun bool, w io.Writer) error {
+	pluginPath := filepath.Join(filepath.Dir(scriptPath), "opencode-agent-status-plugin.js")
+	plugin, err := assets.ReadFile(ap.Agent.hooksAsset)
+	if err != nil {
+		return err
+	}
+	if dryRun {
+		previewFile(w, pluginPath, plugin, false)
+	} else {
+		if err := writeFile(pluginPath, plugin, 0o644); err != nil {
+			return fmt.Errorf("install plugin: %w", err)
+		}
+		fmt.Fprintf(w, "installed opencode plugin to %s\n", pluginPath)
+	}
+
+	rendered, err := renderOpencodeConfig(pluginPath)
+	if err != nil {
+		return err
+	}
+	if dryRun {
+		if !ap.TargetExists {
+			previewFile(w, ap.Agent.HooksTarget, rendered, false)
+			return nil
+		}
+		existing, merged, err := computeMergedOpencodeConfig(ap.Agent.HooksTarget, pluginPath)
+		if err != nil {
+			return err
+		}
+		previewMerge(w, ap.Agent.HooksTarget, existing, merged)
+		return nil
+	}
+
+	if ap.TargetExists {
+		backup, err := mergeOpencodePluginFile(ap.Agent.HooksTarget, pluginPath)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "merged opencode plugin into %s (backup at %s)\n", ap.Agent.HooksTarget, backup)
 		return nil
 	}
 
@@ -346,6 +417,28 @@ func computeMerged(target string, rendered []byte) ([]byte, []byte, error) {
 	return existing, out, nil
 }
 
+func computeMergedOpencodeConfig(target, pluginPath string) ([]byte, []byte, error) {
+	existing, err := os.ReadFile(target)
+	if err != nil {
+		return nil, nil, err
+	}
+	var base map[string]any
+	if err := json.Unmarshal(stripJSONCComments(existing), &base); err != nil {
+		return nil, nil, fmt.Errorf("parse %s: %w", target, err)
+	}
+	merged := mergeOpencodePlugin(base, pluginPath)
+	out, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return nil, nil, err
+	}
+	return existing, out, nil
+}
+
+func renderOpencodeConfig(pluginPath string) ([]byte, error) {
+	merged := mergeOpencodePlugin(map[string]any{}, pluginPath)
+	return json.MarshalIndent(merged, "", "  ")
+}
+
 // canonicalizeJSON round-trips raw through map[string]any so it matches
 // the exact byte layout mergeHooksFile would later write. This keeps
 // fresh-install + re-run idempotent (the on-disk format never differs
@@ -411,6 +504,21 @@ func writeFile(path string, contents []byte, mode os.FileMode) error {
 // backing up the original first. Returns the backup path.
 func mergeHooksFile(target string, rendered []byte) (string, error) {
 	_, merged, err := computeMerged(target, rendered)
+	if err != nil {
+		return "", err
+	}
+	backup, err := backupFile(target)
+	if err != nil {
+		return "", err
+	}
+	if err := writeFile(target, merged, 0o644); err != nil {
+		return "", err
+	}
+	return backup, nil
+}
+
+func mergeOpencodePluginFile(target, pluginPath string) (string, error) {
+	_, merged, err := computeMergedOpencodeConfig(target, pluginPath)
 	if err != nil {
 		return "", err
 	}
@@ -499,6 +607,124 @@ func mergeHooks(base, add map[string]any) map[string]any {
 	}
 	out["hooks"] = merged
 	return out
+}
+
+func mergeOpencodePlugin(base map[string]any, pluginPath string) map[string]any {
+	if base == nil {
+		base = map[string]any{}
+	}
+	out := map[string]any{}
+	for k, v := range base {
+		out[k] = v
+	}
+	plugins := make([]any, 0, len(listOrEmpty(base["plugin"]))+1)
+	for _, entry := range listOrEmpty(base["plugin"]) {
+		path, ok := entry.(string)
+		if ok && strings.Contains(path, "opencode-agent-status-plugin.js") {
+			continue
+		}
+		plugins = append(plugins, entry)
+	}
+	plugins = append(plugins, pluginPath)
+	out["plugin"] = plugins
+	return out
+}
+
+func stripJSONCTrailingCommas(in []byte) []byte {
+	out := make([]byte, 0, len(in))
+	inString := false
+	escaped := false
+	for i := 0; i < len(in); i++ {
+		c := in[i]
+		if inString {
+			out = append(out, c)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			out = append(out, c)
+			continue
+		}
+		if c == ',' {
+			j := i + 1
+			for j < len(in) && (in[j] == ' ' || in[j] == '\t' || in[j] == '\r' || in[j] == '\n') {
+				j++
+			}
+			if j < len(in) && (in[j] == '}' || in[j] == ']') {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func stripJSONCComments(in []byte) []byte {
+	out := make([]byte, 0, len(in))
+	inString := false
+	escaped := false
+	for i := 0; i < len(in); i++ {
+		c := in[i]
+		if inString {
+			out = append(out, c)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			out = append(out, c)
+			continue
+		}
+		if c == '/' && i+1 < len(in) {
+			switch in[i+1] {
+			case '/':
+				i += 2
+				for i < len(in) && in[i] != '\n' {
+					i++
+				}
+				if i < len(in) {
+					out = append(out, in[i])
+				}
+				continue
+			case '*':
+				i += 2
+				for i < len(in)-1 {
+					if in[i] == '\n' {
+						out = append(out, '\n')
+					}
+					if in[i] == '*' && in[i+1] == '/' {
+						i++
+						break
+					}
+					i++
+				}
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return stripJSONCTrailingCommas(out)
 }
 
 // stripStaleHookEntries returns a shallow copy of m with any hook entry
@@ -643,4 +869,35 @@ func resolveCodexDir(override string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".codex"), nil
+}
+
+func resolveOpencodeDir(override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	if v := os.Getenv("OPENCODE_CONFIG_DIR"); v != "" {
+		return v, nil
+	}
+	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
+		return filepath.Join(v, "opencode"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "opencode"), nil
+}
+
+func opencodeConfigTarget(dir string) (string, error) {
+	for _, name := range []string{"opencode.jsonc", "opencode.json", "config.json"} {
+		path := filepath.Join(dir, name)
+		exists, err := fileExists(path)
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return path, nil
+		}
+	}
+	return filepath.Join(dir, "opencode.json"), nil
 }

@@ -2,6 +2,8 @@ package bootstrap
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,6 +16,199 @@ func mustJSON(t *testing.T, s string) map[string]any {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	return m
+}
+
+func TestKnownAgentsIncludesOpencode(t *testing.T) {
+	want := []string{"claude", "codex", "opencode"}
+	if got := KnownAgents(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("KnownAgents() = %#v, want %#v", got, want)
+	}
+}
+
+func TestMergeOpencodePluginAddsAndDedupesAgentStatusPlugin(t *testing.T) {
+	base := mustJSON(t, `{"plugin":["existing","/old/agent-status/opencode-agent-status-plugin.js"]}`)
+	pluginPath := "/home/u/.config/agent-status/opencode-agent-status-plugin.js"
+
+	got := mergeOpencodePlugin(base, pluginPath)
+	plugins, ok := got["plugin"].([]any)
+	if !ok {
+		t.Fatalf("plugin = %#v, want array", got["plugin"])
+	}
+	want := []any{"existing", pluginPath}
+	if !reflect.DeepEqual(plugins, want) {
+		t.Fatalf("plugin = %#v, want %#v", plugins, want)
+	}
+}
+
+func TestComputeMergedOpencodeConfigAcceptsJSONCCommentsAndTrailingCommas(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "opencode.jsonc")
+	if err := os.WriteFile(target, []byte(`{
+		// Keep this plugin.
+		"plugin": [
+			"existing//not-a-comment/*also-not*/",
+		],
+		/* Keep unrelated string content unchanged. */
+		"note": "text, // not comment, /* not block */",
+	}`), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	_, merged, err := computeMergedOpencodeConfig(target, "/home/u/.config/agent-status/opencode-agent-status-plugin.js")
+	if err != nil {
+		t.Fatalf("computeMergedOpencodeConfig: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(merged, &got); err != nil {
+		t.Fatalf("unmarshal merged: %v", err)
+	}
+	plugins := got["plugin"].([]any)
+	wantPlugins := []any{"existing//not-a-comment/*also-not*/", "/home/u/.config/agent-status/opencode-agent-status-plugin.js"}
+	if !reflect.DeepEqual(plugins, wantPlugins) {
+		t.Fatalf("plugin = %#v, want %#v", plugins, wantPlugins)
+	}
+	if got["note"] != "text, // not comment, /* not block */" {
+		t.Fatalf("note = %#v", got["note"])
+	}
+}
+
+func TestBuildPlanIncludesOpencode(t *testing.T) {
+	dir := t.TempDir()
+	plan, err := BuildPlan(Options{
+		Agents:       []string{"opencode"},
+		OpencodeDir:  dir,
+		BootstrapDir: filepath.Join(dir, "agent-status"),
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Agents) != 1 {
+		t.Fatalf("len(plan.Agents) = %d, want 1", len(plan.Agents))
+	}
+	if got := plan.Agents[0].Agent.ID; got != "opencode" {
+		t.Fatalf("agent ID = %q, want opencode", got)
+	}
+}
+
+func TestOpencodePluginNormalizesBareEndpointAsset(t *testing.T) {
+	plugin, err := assets.ReadFile("assets/opencode-agent-status-plugin.js")
+	if err != nil {
+		t.Fatalf("read plugin asset: %v", err)
+	}
+	contents := string(plugin)
+	for _, want := range []string{
+		"function normalizeEndpoint(value)",
+		"return `http://${trimmed}`",
+		"new URL(\"/hook\", normalizeEndpoint(endpoint))",
+	} {
+		if !strings.Contains(contents, want) {
+			t.Fatalf("plugin asset missing %q", want)
+		}
+	}
+}
+
+func TestOpencodePluginSendsTopLevelHookEnvelopeFields(t *testing.T) {
+	plugin, err := assets.ReadFile("assets/opencode-agent-status-plugin.js")
+	if err != nil {
+		t.Fatalf("read plugin asset: %v", err)
+	}
+	contents := string(plugin)
+	for _, want := range []string{
+		"function sessionID(input)",
+		"input?.sessionID",
+		"input?.event?.properties?.sessionID",
+		"input?.event?.properties?.info?.id",
+		"input?.event?.properties?.info?.sessionID",
+		"input?.event?.sessionID",
+		"input?.message?.sessionID",
+		"function turnID(input)",
+		"input?.messageID",
+		"input?.callID",
+		"function toolName(input)",
+		"input?.tool",
+		"input?.event?.properties?.tool",
+		"input?.event?.properties?.info?.tool",
+		"session_id: session",
+		"hook_event_name: eventName",
+		"turn_id: turnID(event)",
+		"tool_name: toolName(event)",
+	} {
+		if !strings.Contains(contents, want) {
+			t.Fatalf("plugin asset missing %q", want)
+		}
+	}
+}
+
+func TestOpencodePluginClassifiesMessageRoleAsset(t *testing.T) {
+	plugin, err := assets.ReadFile("assets/opencode-agent-status-plugin.js")
+	if err != nil {
+		t.Fatalf("read plugin asset: %v", err)
+	}
+	contents := string(plugin)
+	for _, want := range []string{
+		"function messageRole(input)",
+		"function messageComplete(input)",
+		"if (name === \"chat.message\" || name === \"message.updated\")",
+		"if (role === \"assistant\" && messageComplete(event))",
+		"return \"Stop\"",
+		"if (role === \"user\")",
+		"return \"UserPromptSubmit\"",
+		"return name === \"chat.message\" ? \"UserPromptSubmit\" : \"\"",
+	} {
+		if !strings.Contains(contents, want) {
+			t.Fatalf("plugin asset missing %q", want)
+		}
+	}
+}
+
+func TestOpencodePluginReturnsHooksObjectAsset(t *testing.T) {
+	plugin, err := assets.ReadFile("assets/opencode-agent-status-plugin.js")
+	if err != nil {
+		t.Fatalf("read plugin asset: %v", err)
+	}
+	contents := string(plugin)
+	for _, want := range []string{
+		"export default async function agentStatusPlugin()",
+		"return {",
+		"async event(input)",
+		"\"chat.message\": async function",
+		"\"tool.execute.before\": async function",
+		"\"tool.execute.after\": async function",
+		"\"permission.ask\": async function",
+		"session.created",
+		"message.updated",
+		"name === \"SessionStart\"",
+		"return \"Stop\"",
+	} {
+		if !strings.Contains(contents, want) {
+			t.Fatalf("plugin asset missing %q", want)
+		}
+	}
+	for _, dontWant := range []string{"session.updated", "name?.startsWith(\"session.\")", "\"session.update\"", "\"message.update\"", "app.on("} {
+		if strings.Contains(contents, dontWant) {
+			t.Fatalf("plugin asset should not contain %q", dontWant)
+		}
+	}
+}
+
+func TestOpencodePluginGuardsSessionAndUsesTimeoutAsset(t *testing.T) {
+	plugin, err := assets.ReadFile("assets/opencode-agent-status-plugin.js")
+	if err != nil {
+		t.Fatalf("read plugin asset: %v", err)
+	}
+	contents := string(plugin)
+	for _, want := range []string{
+		"const session = sessionID(event)",
+		"const eventName = hookName(event)",
+		"if (!session || !eventName)",
+		"return",
+		"session_id: session",
+		"hook_event_name: eventName",
+		"signal: AbortSignal.timeout(1000)",
+	} {
+		if !strings.Contains(contents, want) {
+			t.Fatalf("plugin asset missing %q", want)
+		}
+	}
 }
 
 func TestMergeHooks_PreservesUnrelatedTopLevelKeys(t *testing.T) {

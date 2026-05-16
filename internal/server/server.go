@@ -352,6 +352,7 @@ func makeHookHandler(s *state.Store) http.HandlerFunc {
 			SessionID:  env.SessionID,
 			Event:      env.HookEventName,
 			TurnID:     env.TurnID,
+			ToolName:   env.ToolName,
 			ReceivedAt: receivedAt,
 		})
 		if err != nil {
