@@ -99,3 +99,51 @@ func TestSessionDetailDecodesViewEndpoint(t *testing.T) {
 		t.Fatalf("detail = %#v", detail)
 	}
 }
+
+func TestSessionMessagesDecodesViewEndpoint(t *testing.T) {
+	c := &Client{
+		endpoint: "collector.test",
+		http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != "/views/sessions/s1/messages" {
+				t.Fatalf("unexpected path %s", r.URL.Path)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"session_id":"s1","messages":[{"id":"7","role":"tool_result","preview":"tests passed"}]}`)),
+			}, nil
+		})},
+	}
+
+	messages, err := c.SessionMessages(context.Background(), "s1")
+	if err != nil {
+		t.Fatalf("SessionMessages() error = %v", err)
+	}
+	if len(messages.Messages) != 1 || messages.Messages[0].ID != "7" {
+		t.Fatalf("messages = %#v", messages)
+	}
+}
+
+func TestSessionMessageDecodesViewEndpoint(t *testing.T) {
+	c := &Client{
+		endpoint: "collector.test",
+		http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != "/views/sessions/s1/messages/7" {
+				t.Fatalf("unexpected path %s", r.URL.Path)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"id":"7","role":"tool_result","text":"tests passed in detail"}`)),
+			}, nil
+		})},
+	}
+
+	detail, err := c.SessionMessage(context.Background(), "s1", "7")
+	if err != nil {
+		t.Fatalf("SessionMessage() error = %v", err)
+	}
+	if detail.ID != "7" || detail.Text != "tests passed in detail" {
+		t.Fatalf("detail = %#v", detail)
+	}
+}

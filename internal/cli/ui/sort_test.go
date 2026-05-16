@@ -27,3 +27,26 @@ func TestStatusSortPreservesPreviousOrderWithinSameStatus(t *testing.T) {
 	}
 }
 
+func TestDefaultSortModeIsActivity(t *testing.T) {
+	var mode sortMode
+
+	if mode != sortActivity {
+		t.Fatalf("default sortMode = %v, want sortActivity", mode)
+	}
+}
+
+func TestActivitySortRanksLiveStatusBeforeIdleThenActivity(t *testing.T) {
+	cards := []sessionview.SessionCard{
+		{SessionID: "idle-new", Status: "idle", StatusAt: "2026-05-14T10:03:00Z"},
+		{SessionID: "active-old", Status: "active", StatusAt: "2026-05-14T10:01:00Z"},
+		{SessionID: "active-new", Status: "active", StatusAt: "2026-05-14T10:02:00Z"},
+	}
+
+	sortCards(cards, sortActivity, nil)
+
+	for i, want := range []string{"active-new", "active-old", "idle-new"} {
+		if cards[i].SessionID != want {
+			t.Fatalf("cards[%d] = %q, want %q; cards=%#v", i, cards[i].SessionID, want, cards)
+		}
+	}
+}

@@ -36,6 +36,14 @@ func (discoveryMeta) Transcript(sessionID, agent string, meta source.SessionMeta
 	return discovery.LoadTranscript(sessionID, agent, meta)
 }
 
+func (discoveryMeta) TranscriptMessages(sessionID, agent string, meta source.SessionMeta) ([]source.TranscriptMessageSummary, error) {
+	return discovery.LoadTranscriptMessages(sessionID, agent, meta)
+}
+
+func (discoveryMeta) TranscriptMessage(sessionID, agent string, meta source.SessionMeta, id string) (source.TranscriptMessageDetail, error) {
+	return discovery.LoadTranscriptMessage(sessionID, agent, meta, id)
+}
+
 var serverCmd = &cobra.Command{
 	Use:   "server",
 	Short: "Run the HTTP collector",

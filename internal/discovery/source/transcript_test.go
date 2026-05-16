@@ -1,6 +1,9 @@
 package source
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestOneLinePreviewCollapsesWhitespaceAndTruncates(t *testing.T) {
 	got := OneLinePreview("hello\n\nthere   friend", 14)
@@ -40,6 +43,56 @@ func TestAppendConversationMessageCountsRoles(t *testing.T) {
 	}
 	if info.AgentMessages != 1 {
 		t.Fatalf("AgentMessages = %d, want 1", info.AgentMessages)
+	}
+}
+
+func TestNewTranscriptMessagePrettyPrintsJSONObject(t *testing.T) {
+	detail, ok := NewTranscriptMessage(1, "tool_result", "", `{"z":2,"nested":{"ok":true}}`)
+	if !ok {
+		t.Fatal("NewTranscriptMessage() ok = false, want true")
+	}
+	for _, want := range []string{"{\n", "  \"nested\": {", "    \"ok\": true", "  \"z\": 2"} {
+		if !strings.Contains(detail.Text, want) {
+			t.Fatalf("detail.Text missing %q:\n%s", want, detail.Text)
+		}
+	}
+}
+
+func TestNewTranscriptMessageLeavesJSONScalarsCompact(t *testing.T) {
+	detail, ok := NewTranscriptMessage(1, "tool_result", "", `"plain string"`)
+	if !ok {
+		t.Fatal("NewTranscriptMessage() ok = false, want true")
+	}
+	if detail.Text != `"plain string"` {
+		t.Fatalf("detail.Text = %q, want compact JSON string", detail.Text)
+	}
+}
+
+func TestNewTranscriptMessagePrettyPrintsJSONLinesInMixedText(t *testing.T) {
+	detail, ok := NewTranscriptMessage(1, "tool_call", "", `Tool call: exec_command
+{"cmd":"go test ./...","yield_time_ms":1000}`)
+	if !ok {
+		t.Fatal("NewTranscriptMessage() ok = false, want true")
+	}
+	for _, want := range []string{"Tool call: exec_command", "{\n", "  \"cmd\": \"go test ./...\"", "  \"yield_time_ms\": 1000"} {
+		if !strings.Contains(detail.Text, want) {
+			t.Fatalf("detail.Text missing %q:\n%s", want, detail.Text)
+		}
+	}
+}
+
+func TestNewTranscriptMessageWithRawPrettyPrintsRawJSON(t *testing.T) {
+	detail, ok := NewTranscriptMessageWithRaw(1, "user", "", "filtered", `{"payload":{"content":"raw body"}}`)
+	if !ok {
+		t.Fatal("NewTranscriptMessageWithRaw() ok = false, want true")
+	}
+	if detail.Text != "filtered" {
+		t.Fatalf("detail.Text = %q, want filtered", detail.Text)
+	}
+	for _, want := range []string{"{\n", "  \"payload\": {", "    \"content\": \"raw body\""} {
+		if !strings.Contains(detail.RawText, want) {
+			t.Fatalf("detail.RawText missing %q:\n%s", want, detail.RawText)
+		}
 	}
 }
 

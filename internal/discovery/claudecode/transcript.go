@@ -11,22 +11,62 @@ import (
 
 // Transcript loads the Claude transcript for the given session.
 func Transcript(sessionID string, meta source.SessionMeta) (source.TranscriptInfo, error) {
-	if meta.Path != "" {
-		info, err := source.LoadTranscriptPath(meta.Path, parseTranscript)
-		if info.Model == "" {
-			info.Model = meta.Model
-		}
-		if info.Version == "" {
-			info.Version = meta.Version
-		}
-		return info, err
-	}
-	home, err := os.UserHomeDir()
+	path, err := transcriptPath(sessionID, meta)
 	if err != nil {
 		return source.TranscriptInfo{}, err
 	}
-	path := filepath.Join(home, ".claude", "projects", encodePath(meta.Cwd), sessionID+".jsonl")
-	return source.LoadTranscriptPath(path, parseTranscript)
+	info, err := source.LoadTranscriptPath(path, parseTranscript)
+	if info.Model == "" {
+		info.Model = meta.Model
+	}
+	if info.Version == "" {
+		info.Version = meta.Version
+	}
+	return info, err
+}
+
+func TranscriptMessages(sessionID string, meta source.SessionMeta) ([]source.TranscriptMessageSummary, error) {
+	path, err := transcriptPath(sessionID, meta)
+	if err != nil {
+		return nil, err
+	}
+	details, err := parseMessages(path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]source.TranscriptMessageSummary, 0, len(details))
+	for _, detail := range details {
+		out = append(out, source.TranscriptMessageSummaryFromDetail(detail))
+	}
+	return out, nil
+}
+
+func TranscriptMessage(sessionID string, meta source.SessionMeta, id string) (source.TranscriptMessageDetail, error) {
+	path, err := transcriptPath(sessionID, meta)
+	if err != nil {
+		return source.TranscriptMessageDetail{}, err
+	}
+	details, err := parseMessages(path)
+	if err != nil {
+		return source.TranscriptMessageDetail{}, err
+	}
+	for _, detail := range details {
+		if detail.ID == id {
+			return detail, nil
+		}
+	}
+	return source.TranscriptMessageDetail{}, source.ErrTranscriptMessageNotFound
+}
+
+func transcriptPath(sessionID string, meta source.SessionMeta) (string, error) {
+	if meta.Path != "" {
+		return meta.Path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude", "projects", encodePath(meta.Cwd), sessionID+".jsonl"), nil
 }
 
 // encodePath mirrors Claude Code's cwd-to-project-dir encoding.
@@ -105,6 +145,46 @@ func parseTranscript(path string) (source.TranscriptInfo, error) {
 		return info, err
 	}
 	return info, nil
+}
+
+func parseMessages(path string) ([]source.TranscriptMessageDetail, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var out []source.TranscriptMessageDetail
+	lineNumber := 0
+	if err := source.ScanJSONL(f, func(buf []byte) bool {
+		lineNumber++
+		var line transcriptLine
+		if err := json.Unmarshal(buf, &line); err != nil {
+			return true
+		}
+		switch line.Type {
+		case "assistant":
+			if detail, ok := claudeLineMessage(lineNumber, line, string(buf)); ok {
+				out = append(out, detail)
+			}
+		case "user":
+			if !line.IsMeta {
+				if detail, ok := claudeLineMessage(lineNumber, line, string(buf)); ok {
+					out = append(out, detail)
+				}
+			}
+		}
+		return true
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func claudeLineMessage(lineNumber int, line transcriptLine, raw string) (source.TranscriptMessageDetail, bool) {
+	role := source.MessageContentRole(line.Type, line.Message.Content)
+	text := source.ExtractMessageContent(line.Message.Content)
+	return source.NewTranscriptMessageWithRaw(lineNumber, role, line.Timestamp, text, raw)
 }
 
 type transcriptLine struct {

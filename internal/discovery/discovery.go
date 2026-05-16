@@ -19,6 +19,8 @@ type liveSource struct {
 	watch      func(ctx context.Context, s *state.Store) error
 	apply      func(ctx context.Context, s *state.Store, sess source.LiveSession) bool
 	transcript func(sessionID string, meta source.SessionMeta) (source.TranscriptInfo, error)
+	messages   func(sessionID string, meta source.SessionMeta) ([]source.TranscriptMessageSummary, error)
+	message    func(sessionID string, meta source.SessionMeta, id string) (source.TranscriptMessageDetail, error)
 }
 
 // sources is the registry of live agent backends. Treat as read-only after
@@ -30,6 +32,8 @@ var sources = []liveSource{
 		watch:      claudecode.Watch,
 		apply:      claudecode.Apply,
 		transcript: claudecode.Transcript,
+		messages:   claudecode.TranscriptMessages,
+		message:    claudecode.TranscriptMessage,
 	},
 	{
 		agent:      state.AgentCodex,
@@ -37,6 +41,8 @@ var sources = []liveSource{
 		watch:      codex.Watch,
 		apply:      codex.Apply,
 		transcript: codex.Transcript,
+		messages:   codex.TranscriptMessages,
+		message:    codex.TranscriptMessage,
 	},
 }
 
@@ -49,4 +55,22 @@ func LoadTranscript(sessionID, agent string, meta source.SessionMeta) (source.Tr
 		}
 	}
 	return source.TranscriptInfo{}, nil
+}
+
+func LoadTranscriptMessages(sessionID, agent string, meta source.SessionMeta) ([]source.TranscriptMessageSummary, error) {
+	for _, src := range sources {
+		if src.agent == agent {
+			return src.messages(sessionID, meta)
+		}
+	}
+	return nil, nil
+}
+
+func LoadTranscriptMessage(sessionID, agent string, meta source.SessionMeta, id string) (source.TranscriptMessageDetail, error) {
+	for _, src := range sources {
+		if src.agent == agent {
+			return src.message(sessionID, meta, id)
+		}
+	}
+	return source.TranscriptMessageDetail{}, source.ErrTranscriptMessageNotFound
 }

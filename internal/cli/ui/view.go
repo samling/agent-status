@@ -20,6 +20,8 @@ var (
 	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	borderStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 	roleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	lineSelectStyle  = lipgloss.NewStyle().Background(lipgloss.Color("240"))
+	lineTextStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 
 	connectedStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
 	disconnectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9"))
@@ -30,15 +32,16 @@ func keyHint(key, desc string) string {
 }
 
 const (
-	minLeftPane     = 24
-	maxLeftPane     = 46
-	paneGap         = 1
-	paneDividerCols = 1
-	cardPaddingCols = 2
-	cardBodyLines   = 2
-	cardBorderRows  = 2
-	childIndentCols = 2
-	roleLabelWidth  = 5
+	minLeftPane      = 24
+	maxLeftPane      = 46
+	paneGap          = 1
+	paneDividerCols  = 1
+	cardGapRows      = 1
+	cardLeftPadding  = 1
+	cardRightPadding = 1
+	cardBodyLines    = 2
+	childIndentCols  = 2
+	roleLabelWidth   = 5
 )
 
 type metadataItem struct {
@@ -59,18 +62,17 @@ func statusStyle(status string) lipgloss.Style {
 	}
 }
 
-func cardBorderColor(status string, selected bool) lipgloss.Color {
-	if selected {
-		return lipgloss.Color("12")
-	}
+func cardAccentColor(status string, selected bool) lipgloss.Color {
 	switch status {
 	case "active":
 		return lipgloss.Color("10")
 	case "waiting":
 		return lipgloss.Color("11")
-	default:
-		return lipgloss.Color("240")
 	}
+	if selected {
+		return lipgloss.Color("12")
+	}
+	return lipgloss.Color("240")
 }
 
 func (m uiModel) paneWidths() (int, int) {
@@ -110,7 +112,7 @@ func (m uiModel) cardPaneHeight() int {
 }
 
 func (m uiModel) cardHeight(_ sessionview.SessionCard, _ string) int {
-	return cardBodyLines + cardBorderRows
+	return cardBodyLines
 }
 
 func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) {
@@ -136,6 +138,9 @@ func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) 
 	end := offset
 	for end < len(cards) {
 		nextHeight := m.cardHeight(cards[end], selectedID)
+		if end > offset {
+			nextHeight += cardGapRows
+		}
 		if end > offset && used+nextHeight > budget {
 			break
 		}
@@ -164,9 +169,15 @@ func (m uiModel) renderCards(width int, selectedID string) string {
 		return strings.Join(lines, "\n")
 	}
 	start, end := m.visibleCardRangeFrom(m.scrollOffset, selectedID)
+	fillCards := m.focusMode == focusCards
 	for _, card := range cards[start:end] {
+		if len(lines) > 1 {
+			for i := 0; i < cardGapRows; i++ {
+				lines = append(lines, "")
+			}
+		}
 		selected := card.SessionID == selectedID
-		rendered := renderCard(card, cardWidth(width, card), selected, m.detailFor == card.SessionID, m.detail, m.expandedParents[card.SessionID])
+		rendered := renderCard(card, cardWidth(width, card), selected, fillCards, m.detail, m.expandedParents[card.SessionID])
 		if card.ParentSessionID != "" {
 			rendered = indentBlock(rendered, childIndentCols)
 		}
@@ -194,39 +205,95 @@ func indentBlock(text string, cols int) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderCard(card sessionview.SessionCard, width int, selected, _ bool, _ sessionview.SessionDetail, expanded bool) string {
+func renderCard(card sessionview.SessionCard, width int, selected, filled bool, _ sessionview.SessionDetail, expanded bool) string {
 	if width < 10 {
 		width = 10
 	}
-	boxWidth := width - 2
-	if boxWidth < 8 {
-		boxWidth = 8
-	}
-	contentWidth := boxWidth - cardPaddingCols
-	if contentWidth < 4 {
-		contentWidth = 4
+	railSelected := selected && !filled
+	contentWidth := max(width-cardLeftPadding-cardRightPadding, 4)
+	if railSelected {
+		contentWidth = max(contentWidth-1, 4)
 	}
 	agent := cardAgent(card, expanded)
 	status := card.Status
 	if card.ChildStatus != "" {
 		status = card.ChildStatus
 	}
+	fillSelected := filled && selected
 	statusText := statusStyle(status).Render(status)
+	if fillSelected {
+		statusText = status
+	}
 	selectionMarker := ""
-	if selected {
-		selectionMarker = accentStyle.Render(">") + " "
+	if fillSelected {
+		selectionMarker = "> "
 	}
 	agentWidth := max(contentWidth-lipgloss.Width(selectionMarker)-lipgloss.Width(statusText)-1, 1)
 	agent = truncate(agent, agentWidth)
-	title := compactCardLine(card.Title, "", contentWidth)
 	top := selectionMarker + fmt.Sprintf("%-*s %s", agentWidth, agent, statusText)
-	parts := []string{top, title}
-	style := lipgloss.NewStyle().
-		Width(boxWidth).
-		Padding(0, 1).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(cardBorderColor(card.Status, selected))
-	return style.Render(strings.Join(parts, "\n"))
+	if fillSelected {
+		return renderFilledSelectedCard(card, top, contentWidth, width)
+	}
+	title := compactCardLine(card.Title, cardAge(card), contentWidth)
+	if railSelected {
+		return renderRailSelectedCard(top, title, status)
+	}
+	pad := strings.Repeat(" ", cardLeftPadding)
+	return strings.Join([]string{pad + top, pad + title}, "\n")
+}
+
+func renderFilledSelectedCard(card sessionview.SessionCard, top string, contentWidth, width int) string {
+	fill := selectedCardFillColor(card)
+	lines := []string{
+		selectedPlainCardLine(top, width, fill),
+		selectedTitleCardLine(card.Title, cardAge(card), contentWidth, width, fill),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func selectedPlainCardLine(line string, width int, fill lipgloss.Color) string {
+	visible := strings.Repeat(" ", cardLeftPadding) + line
+	return selectedCardTextStyle(fill, false).Render(rightPad(visible, width))
+}
+
+func selectedTitleCardLine(title, subtitle string, contentWidth, width int, fill lipgloss.Color) string {
+	titlePart, rest := plainCardLineParts(title, subtitle, contentWidth)
+	pad := strings.Repeat(" ", cardLeftPadding)
+	visible := pad + titlePart + rest
+	rest += strings.Repeat(" ", max(width-len([]rune(visible)), 0))
+	return selectedCardTextStyle(fill, false).Render(pad) +
+		selectedCardTextStyle(fill, true).Render(titlePart) +
+		selectedCardTextStyle(fill, false).Render(rest)
+}
+
+func renderRailSelectedCard(top, title, status string) string {
+	return strings.Join([]string{
+		railSelectedCardLine(top, status),
+		railSelectedCardLine(title, status),
+	}, "\n")
+}
+
+func railSelectedCardLine(line, status string) string {
+	return statusStyle(status).Render("▌") + strings.Repeat(" ", cardLeftPadding) + line
+}
+
+func selectedCardTextStyle(fill lipgloss.Color, bold bool) lipgloss.Style {
+	return lipgloss.NewStyle().
+		Bold(bold).
+		Foreground(lipgloss.Color("0")).
+		Background(fill).
+		ColorWhitespace(true)
+}
+
+func selectedCardFillColor(card sessionview.SessionCard) lipgloss.Color {
+	return cardAccentColor(card.Status, true)
+}
+
+func cardAge(card sessionview.SessionCard) string {
+	if card.Age == "-" {
+		return ""
+	}
+	return card.Age
 }
 
 func cardAgent(card sessionview.SessionCard, expanded bool) string {
@@ -268,6 +335,21 @@ func compactCardLine(title, subtitle string, width int) string {
 	return sessionNameStyle.Render(title) + padding + " " + subtitle
 }
 
+func plainCardLineParts(title, subtitle string, width int) (string, string) {
+	if subtitle == "" {
+		return truncate(title, width), ""
+	}
+	subtitle = truncate(subtitle, max(width-5, 1))
+	subtitleWidth := len([]rune(subtitle))
+	titleWidth := width - subtitleWidth - 1
+	if titleWidth < 4 {
+		return "", leftPad(truncate(subtitle, width), width)
+	}
+	title = truncate(title, titleWidth)
+	padding := strings.Repeat(" ", max(titleWidth-len([]rune(title)), 0))
+	return title, padding + " " + subtitle
+}
+
 func leftPad(s string, width int) string {
 	padding := width - len([]rune(s))
 	if padding <= 0 {
@@ -276,14 +358,23 @@ func leftPad(s string, width int) string {
 	return strings.Repeat(" ", padding) + s
 }
 
+func rightPad(s string, width int) string {
+	padding := width - len([]rune(s))
+	if padding <= 0 {
+		return s
+	}
+	return s + strings.Repeat(" ", padding)
+}
+
 func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
+	return renderSessionDetailWithHeight(detail, width, 0)
+}
+
+func renderSessionDetailWithHeight(detail sessionview.SessionDetail, width, height int) string {
 	if detail.SessionID == "" {
 		return dimStyle.Render("select a session")
 	}
-	lines := []string{
-		headerStyle.Render("Metadata"),
-	}
-	lines = append(lines, renderMetadata(metadataFields(detail.Metadata), width)...)
+	lines := renderDetailMetadata(detail, width)
 	lines = append(lines, sectionDivider(width), headerStyle.Render("Conversation"))
 	if detail.TranscriptError != "" {
 		lines = append(lines, errorStyle.Render("transcript: "+detail.TranscriptError))
@@ -293,10 +384,235 @@ func renderSessionDetail(detail sessionview.SessionDetail, width int) string {
 		lines = append(lines, dimStyle.Render("(no conversation preview)"))
 		return strings.Join(lines, "\n")
 	}
-	for _, msg := range detail.Conversation {
+	limit := len(detail.Conversation)
+	if height > 0 {
+		used := lipgloss.Height(strings.Join(lines, "\n"))
+		limit = min(limit, max(height-used-1, 1))
+	}
+	for _, msg := range detail.Conversation[:limit] {
 		lines = append(lines, renderConversationLine(msg, width))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m uiModel) renderSessionDetailPreview(detail sessionview.SessionDetail, width, height int) string {
+	if detail.SessionID == "" {
+		return dimStyle.Render("select a session")
+	}
+	lines := renderDetailMetadata(detail, width)
+	lines = append(lines, sectionDivider(width), headerStyle.Render("Conversation"))
+	used := lipgloss.Height(strings.Join(lines, "\n"))
+	bodyHeight := max(height-used-1, 1)
+	lines = append(lines, m.renderMessagePreviewList(width, bodyHeight)...)
+	return strings.Join(lines, "\n")
+}
+
+func (m uiModel) renderMessagePreviewList(width, height int) []string {
+	if m.messageListFor != m.selectedID {
+		return []string{dimStyle.Render("(loading messages)")}
+	}
+	if m.messageListErr != nil {
+		return []string{errorStyle.Render("messages: " + m.messageListErr.Error())}
+	}
+	messages := m.previewMessages()
+	if len(messages) == 0 {
+		return []string{dimStyle.Render("(no messages)")}
+	}
+	limit := len(messages)
+	if height > 0 {
+		limit = min(limit, height)
+	}
+	lines := make([]string, 0, limit)
+	for _, msg := range messages[:limit] {
+		lines = append(lines, renderMessageSummaryLine(msg, width, false))
+	}
+	return lines
+}
+
+func renderDetailMetadata(detail sessionview.SessionDetail, width int) []string {
+	lines := []string{
+		headerStyle.Render("Metadata"),
+	}
+	lines = append(lines, renderMetadata(metadataFields(detail.Metadata), width)...)
+	return lines
+}
+
+func (m uiModel) renderFocusedDetail(detail sessionview.SessionDetail, width, height int) string {
+	if detail.SessionID == "" {
+		return dimStyle.Render("select a session")
+	}
+	lines := renderDetailMetadata(detail, width)
+	switch m.focusMode {
+	case focusMessageBody:
+		title := "Message"
+		if m.messageRaw {
+			title = "Message (raw)"
+		}
+		lines = append(lines, sectionDivider(width), headerStyle.Render(title))
+		used := lipgloss.Height(strings.Join(lines, "\n"))
+		lines = append(lines, m.renderMessageBody(width, max(height-used-1, 3))...)
+	default:
+		lines = append(lines, sectionDivider(width), headerStyle.Render("Conversation"))
+		if m.messageSearchMode || m.messageQuery != "" {
+			lines = append(lines, renderMessageSearch(m.messageQuery, m.messageSearchMode, width))
+		}
+		used := lipgloss.Height(strings.Join(lines, "\n"))
+		lines = append(lines, m.renderMessageList(width, max(height-used-1, 1))...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m uiModel) renderMessageList(width, height int) []string {
+	if m.messageListErr != nil {
+		return []string{errorStyle.Render("messages: " + m.messageListErr.Error())}
+	}
+	messages := m.visibleMessages()
+	if len(messages) == 0 {
+		if m.messageQuery != "" {
+			return []string{dimStyle.Render("(no matches)")}
+		}
+		if m.messageListFor != m.selectedID {
+			return []string{dimStyle.Render("(loading messages)")}
+		}
+		return []string{dimStyle.Render("(no messages)")}
+	}
+	start, end := messageListWindow(len(messages), height, m.messageIndex)
+	lines := make([]string, 0, end-start)
+	for i, msg := range messages[start:end] {
+		absoluteIndex := start + i
+		lines = append(lines, renderMessageSummaryLine(msg, width, absoluteIndex == m.messageIndex))
+	}
+	return lines
+}
+
+func messageListWindow(total, height, selected int) (int, int) {
+	if total <= 0 {
+		return 0, 0
+	}
+	if height <= 0 || height > total {
+		height = total
+	}
+	if selected < 0 {
+		selected = 0
+	}
+	if selected >= total {
+		selected = total - 1
+	}
+	start := 0
+	if selected >= height {
+		start = selected - height + 1
+	}
+	end := start + height
+	if end > total {
+		end = total
+	}
+	return start, end
+}
+
+func renderMessageSummaryLine(msg sessionview.MessageSummary, width int, selected bool) string {
+	if width <= 0 {
+		return ""
+	}
+	label := conversationLabel(msg.Role)
+	labelText := fmt.Sprintf("%-*s", roleLabelWidth, label)
+	previewWidth := max(width-roleLabelWidth-1, 0)
+	preview := truncate(msg.Preview, previewWidth)
+	if !selected {
+		line := roleStyle.Render(labelText)
+		if previewWidth > 0 {
+			line += " " + preview
+		}
+		return truncate(line, width)
+	}
+	role := roleStyle.Background(lipgloss.Color("240")).Render(labelText)
+	gap := lineSelectStyle.Render(" ")
+	text := lineTextStyle.Background(lipgloss.Color("240")).Render(preview)
+	fill := lineSelectStyle.Width(max(width-roleLabelWidth-1-lipgloss.Width(preview), 0)).Render("")
+	return role + gap + text + fill
+}
+
+func renderMessageSearch(query string, active bool, width int) string {
+	cursor := ""
+	if active {
+		cursor = "▏"
+	}
+	return truncate(dimStyle.Render("search: ")+query+cursor, width)
+}
+
+func (m uiModel) renderMessageBody(width, height int) []string {
+	if m.messageDetailErr != nil {
+		return []string{errorStyle.Render("message: " + m.messageDetailErr.Error())}
+	}
+	if m.messageDetail.ID == "" {
+		return []string{dimStyle.Render("(loading message)")}
+	}
+	_, truncated := m.messageBodyText()
+	lines := m.messageBodyLines(width)
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	start := m.messageScroll
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(lines) {
+		start = max(len(lines)-1, 0)
+	}
+	end := min(start+max(height, 1), len(lines))
+	out := make([]string, 0, end-start+1)
+	for _, line := range lines[start:end] {
+		out = append(out, truncate(line, width))
+	}
+	if truncated && end == len(lines) {
+		out = append(out, dimStyle.Render("(truncated)"))
+	}
+	return out
+}
+
+func (m uiModel) messageBodyLines(width int) []string {
+	text, _ := m.messageBodyText()
+	return wrapMessageLines(text, width)
+}
+
+func (m uiModel) messageBodyText() (string, bool) {
+	if m.messageRaw && m.messageDetail.RawText != "" {
+		return m.messageDetail.RawText, m.messageDetail.RawTruncated
+	}
+	return m.messageDetail.Text, m.messageDetail.Truncated
+}
+
+func (m uiModel) messageBodyWidth() int {
+	_, rightW := m.paneWidths()
+	if rightW > 0 {
+		return rightW
+	}
+	return m.width
+}
+
+func wrapMessageLines(text string, width int) []string {
+	if width <= 0 {
+		width = 1
+	}
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, wrapMessageLine(line, width)...)
+	}
+	return out
+}
+
+func wrapMessageLine(line string, width int) []string {
+	r := []rune(line)
+	if len(r) == 0 {
+		return []string{""}
+	}
+	out := make([]string, 0, len(r)/width+1)
+	for len(r) > width {
+		out = append(out, string(r[:width]))
+		r = r[width:]
+	}
+	out = append(out, string(r))
+	return out
 }
 
 func renderConversationLine(msg sessionview.ConversationMessage, width int) string {
@@ -313,10 +629,16 @@ func renderConversationLine(msg sessionview.ConversationMessage, width int) stri
 }
 
 func conversationLabel(role string) string {
-	if role == "assistant" {
+	switch role {
+	case "assistant":
 		return "Agent"
+	case "tool_call":
+		return "Tool"
+	case "tool_result":
+		return "Result"
+	default:
+		return "User"
 	}
-	return "User"
 }
 
 func sectionDivider(width int) string {
@@ -369,6 +691,8 @@ func metadataFields(meta sessionview.DetailMetadata) []metadataItem {
 		{Label: "model", Value: valueOrDash(meta.Model)},
 		{Label: "session", Value: valueOrDash(meta.Session)},
 		{Label: "session id", Value: valueOrDash(meta.SessionID)},
+		{Label: "created", Value: valueOrDash(meta.Created)},
+		{Label: "updated", Value: valueOrDash(meta.Updated)},
 		{Label: "cwd", Value: valueOrDash(meta.Cwd)},
 		{Label: "branch", Value: valueOrDash(meta.Branch)},
 	}
@@ -523,13 +847,45 @@ func renderMetadataGroup(fields []metadataItem, width int) []string {
 	return lines
 }
 
-func verticalDivider(height int) string {
+func activePaneRail(height int, leftEdge bool) string {
 	if height <= 0 {
 		return ""
 	}
+	if height == 1 {
+		return accentStyle.Render("│")
+	}
+	top, bottom := "╮", "╯"
+	if leftEdge {
+		top, bottom = "╭", "╰"
+	}
+	lines := make([]string, height)
+	lines[0] = accentStyle.Render(top)
+	for i := 1; i < height-1; i++ {
+		lines[i] = accentStyle.Render("│")
+	}
+	lines[height-1] = accentStyle.Render(bottom)
+	return strings.Join(lines, "\n")
+}
+
+func paneSeparator(height int, mode focusMode) string {
+	if height <= 0 {
+		return ""
+	}
+	spacer := blankColumn(height)
+	switch mode {
+	case focusMessages, focusMessageBody:
+		rail := activePaneRail(height, true)
+		return lipgloss.JoinHorizontal(lipgloss.Top, spacer, rail, spacer)
+	default:
+		rail := activePaneRail(height, false)
+		return lipgloss.JoinHorizontal(lipgloss.Top, rail, spacer, spacer)
+	}
+}
+
+func blankColumn(height int) string {
 	lines := make([]string, height)
 	for i := range lines {
-		lines[i] = dividerStyle.Render("│")
+		lines[i] = " "
 	}
 	return strings.Join(lines, "\n")
 }
@@ -579,6 +935,7 @@ func (m uiModel) View() string {
 		head.WriteString(errorStyle.Render("error: " + m.err.Error()))
 	} else {
 		leftW, rightW := m.paneWidths()
+		paneHeight := m.cardPaneHeight()
 		left := lipgloss.NewStyle().Width(leftW).Render(m.renderCards(leftW, selectedID))
 		rightContent := ""
 		switch {
@@ -591,16 +948,20 @@ func (m uiModel) View() string {
 			if m.detailFor == selectedID {
 				rightDetail = m.detail
 			}
-			rightContent = renderSessionDetail(rightDetail, rightW)
+			if m.focusMode == focusMessages || m.focusMode == focusMessageBody {
+				rightContent = m.renderFocusedDetail(rightDetail, rightW, paneHeight)
+			} else if m.showExtraMessages {
+				rightContent = m.renderSessionDetailPreview(rightDetail, rightW, paneHeight)
+			} else {
+				rightContent = renderSessionDetailWithHeight(rightDetail, rightW, paneHeight)
+			}
 		}
 		right := lipgloss.NewStyle().Width(rightW).Render(rightContent)
-		divider := verticalDivider(m.cardPaneHeight())
+		separator := paneSeparator(paneHeight, m.focusMode)
 		head.WriteString(lipgloss.JoinHorizontal(
 			lipgloss.Top,
 			left,
-			strings.Repeat(" ", paneGap),
-			divider,
-			strings.Repeat(" ", paneGap),
+			separator,
 			right,
 		))
 	}
@@ -622,6 +983,8 @@ func (m uiModel) View() string {
 	b.WriteString("\n")
 	if m.inputMode {
 		b.WriteString(dimStyle.Render("note: ") + m.inputBuf + "▏")
+	} else if m.messageSearchMode {
+		b.WriteString(dimStyle.Render("search: ") + m.messageQuery + "▏")
 	} else {
 		b.WriteString(dimStyle.Render(m.status))
 	}
@@ -633,15 +996,48 @@ func (m uiModel) View() string {
 			keyHint("esc", "cancel"),
 		}, "   ")
 	} else {
-		keymap = strings.Join([]string{
-			keyHint("↑/↓", "select"),
-			keyHint("space", "expand"),
-			keyHint("enter", "focus"),
-			keyHint("n", "note"),
-			keyHint("s", "sort:"+m.sort.String()),
-			keyHint("?", "config"),
-			keyHint("q", "quit"),
-		}, "   ")
+		switch m.focusMode {
+		case focusMessages:
+			toolHint := "show tools"
+			if m.showExtraMessages {
+				toolHint = "hide tools"
+			}
+			keymap = strings.Join([]string{
+				keyHint("↑/↓", "message"),
+				keyHint("ctrl-u/d", "page"),
+				keyHint("/", "search"),
+				keyHint("t", toolHint),
+				keyHint("enter", "open"),
+				keyHint("tab/shift-tab", "sessions"),
+				keyHint("esc", "sessions"),
+				keyHint("q", "quit"),
+			}, "   ")
+		case focusMessageBody:
+			keymap = strings.Join([]string{
+				keyHint("↑/↓", "scroll"),
+				keyHint("ctrl-u/d", "page"),
+				keyHint("t", "raw"),
+				keyHint("tab/shift-tab", "sessions"),
+				keyHint("esc", "messages"),
+				keyHint("q", "quit"),
+			}, "   ")
+		default:
+			toolHint := "show tools"
+			if m.showExtraMessages {
+				toolHint = "hide tools"
+			}
+			keymap = strings.Join([]string{
+				keyHint("↑/↓", "select"),
+				keyHint("space", "expand"),
+				keyHint("enter", "focus"),
+				keyHint("tab/shift-tab", "detail"),
+				keyHint("t", toolHint),
+				keyHint("n", "note"),
+				keyHint("s", "sort:"+m.sort.String()),
+				keyHint("?", "config"),
+				keyHint("q", "quit"),
+			}, "   ")
+		}
 	}
 	b.WriteString(keymap)
 	return b.String()

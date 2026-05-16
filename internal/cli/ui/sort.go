@@ -9,9 +9,9 @@ import (
 type sortMode int
 
 const (
-	sortStatus sortMode = iota
-	sortActivity
+	sortActivity sortMode = iota
 	sortCreated
+	sortStatus
 )
 
 func (m sortMode) String() string {
@@ -26,7 +26,7 @@ func (m sortMode) String() string {
 	return "?"
 }
 
-var sortCycle = []sortMode{sortStatus, sortActivity, sortCreated}
+var sortCycle = []sortMode{sortActivity, sortCreated, sortStatus}
 
 func (m sortMode) next() sortMode {
 	for i, s := range sortCycle {
@@ -56,7 +56,19 @@ func sortCards(cards []sessionview.SessionCard, mode sortMode, previousOrder map
 			if a.FirstSeenAt != b.FirstSeenAt {
 				return a.FirstSeenAt < b.FirstSeenAt
 			}
+		case sortActivity:
+			ra, rb := statusRank(a.Status), statusRank(b.Status)
+			if ra != rb {
+				return ra < rb
+			}
+			if a.StatusAt != b.StatusAt {
+				return a.StatusAt > b.StatusAt
+			}
 		default:
+			ra, rb := statusRank(a.Status), statusRank(b.Status)
+			if ra != rb {
+				return ra < rb
+			}
 			if a.StatusAt != b.StatusAt {
 				return a.StatusAt > b.StatusAt
 			}

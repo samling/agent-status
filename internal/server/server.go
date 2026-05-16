@@ -43,6 +43,8 @@ func (nopMeta) Transcript(string, string, source.SessionMeta) (source.Transcript
 type ViewProvider interface {
 	Cards(context.Context) ([]sessionview.SessionCard, error)
 	Detail(context.Context, string) (sessionview.SessionDetail, error)
+	Messages(context.Context, string) (sessionview.MessageList, error)
+	Message(context.Context, string, string) (sessionview.MessageDetail, error)
 }
 
 type nopViews struct{}
@@ -53,6 +55,14 @@ func (nopViews) Cards(context.Context) ([]sessionview.SessionCard, error) {
 
 func (nopViews) Detail(context.Context, string) (sessionview.SessionDetail, error) {
 	return sessionview.SessionDetail{}, state.ErrSessionNotFound
+}
+
+func (nopViews) Messages(context.Context, string) (sessionview.MessageList, error) {
+	return sessionview.MessageList{}, state.ErrSessionNotFound
+}
+
+func (nopViews) Message(context.Context, string, string) (sessionview.MessageDetail, error) {
+	return sessionview.MessageDetail{}, source.ErrTranscriptMessageNotFound
 }
 
 // Handler builds the HTTP mux. mp may be nil; when nil, the meta-backed
@@ -75,6 +85,8 @@ func HandlerWithViews(s *state.Store, mp MetaProvider, vp ViewProvider) http.Han
 	mux.HandleFunc("GET /state/{session_id}/transcript", makeTranscriptHandler(s, mp))
 	mux.HandleFunc("GET /meta", makeMetaHandler(mp))
 	mux.HandleFunc("GET /views/sessions", makeSessionCardsHandler(vp))
+	mux.HandleFunc("GET /views/sessions/{session_id}/messages", makeSessionMessagesHandler(vp))
+	mux.HandleFunc("GET /views/sessions/{session_id}/messages/{message_id}", makeSessionMessageHandler(vp))
 	mux.HandleFunc("GET /views/sessions/{session_id}", makeSessionDetailHandler(vp))
 	mux.HandleFunc("GET /healthz", makeHealthHandler())
 	mux.HandleFunc("GET /version", makeVersionHandler())
@@ -106,6 +118,47 @@ func makeSessionDetailHandler(vp ViewProvider) http.HandlerFunc {
 				return
 			}
 			http.Error(w, "session detail failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(r.Context(), w, http.StatusOK, detail)
+	}
+}
+
+func makeSessionMessagesHandler(vp ViewProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("session_id")
+		if id == "" {
+			http.Error(w, "missing session_id", http.StatusBadRequest)
+			return
+		}
+		messages, err := vp.Messages(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, state.ErrSessionNotFound) {
+				http.Error(w, "session not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "session messages failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(r.Context(), w, http.StatusOK, messages)
+	}
+}
+
+func makeSessionMessageHandler(vp ViewProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("session_id")
+		messageID := r.PathValue("message_id")
+		if id == "" || messageID == "" {
+			http.Error(w, "missing session_id or message_id", http.StatusBadRequest)
+			return
+		}
+		detail, err := vp.Message(r.Context(), id, messageID)
+		if err != nil {
+			if errors.Is(err, state.ErrSessionNotFound) || errors.Is(err, source.ErrTranscriptMessageNotFound) {
+				http.Error(w, "message not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "session message failed", http.StatusInternalServerError)
 			return
 		}
 		writeJSON(r.Context(), w, http.StatusOK, detail)

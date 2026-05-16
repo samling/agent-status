@@ -68,6 +68,22 @@ func (c *Client) SessionDetail(ctx context.Context, id string) (sessionview.Sess
 	return out, nil
 }
 
+func (c *Client) SessionMessages(ctx context.Context, id string) (sessionview.MessageList, error) {
+	var out sessionview.MessageList
+	if err := c.getJSON(ctx, "/views/sessions/"+id+"/messages", &out); err != nil {
+		return sessionview.MessageList{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) SessionMessage(ctx context.Context, id, messageID string) (sessionview.MessageDetail, error) {
+	var out sessionview.MessageDetail
+	if err := c.getJSON(ctx, "/views/sessions/"+id+"/messages/"+messageID, &out); err != nil {
+		return sessionview.MessageDetail{}, err
+	}
+	return out, nil
+}
+
 // Health probes GET /healthz; returns nil when the collector is reachable
 // and responding 200.
 func (c *Client) Health(ctx context.Context) error {

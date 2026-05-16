@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/samling/agent-status/internal/discovery/source"
 	"github.com/samling/agent-status/internal/state"
@@ -14,12 +15,20 @@ import (
 type fakeMeta struct {
 	meta       map[string]source.SessionMeta
 	transcript source.TranscriptInfo
+	messages   []source.TranscriptMessageSummary
+	message    source.TranscriptMessageDetail
 	err        error
 }
 
 func (f fakeMeta) LatestMeta() map[string]source.SessionMeta { return f.meta }
 func (f fakeMeta) Transcript(string, string, source.SessionMeta) (source.TranscriptInfo, error) {
 	return f.transcript, f.err
+}
+func (f fakeMeta) TranscriptMessages(string, string, source.SessionMeta) ([]source.TranscriptMessageSummary, error) {
+	return f.messages, f.err
+}
+func (f fakeMeta) TranscriptMessage(string, string, source.SessionMeta, string) (source.TranscriptMessageDetail, error) {
+	return f.message, f.err
 }
 
 func seedStore(t *testing.T) *state.Store {
@@ -85,6 +94,97 @@ func TestCardsIncludeAgentStatusTitleAndHint(t *testing.T) {
 	if card.Subtitle != "" {
 		t.Fatalf("Subtitle = %q, want empty", card.Subtitle)
 	}
+	if card.Age == "" {
+		t.Fatalf("Age should be populated; card = %#v", card)
+	}
+}
+
+func TestCardsSuppressDuplicateParentSessionsWithSamePID(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sess := range []state.Session{
+		{
+			SessionID:   "older-session-newer-event",
+			Agent:       state.AgentCodex,
+			PID:         777,
+			FirstSeenAt: "2026-05-14T10:00:00Z",
+			LastEvent:   state.EventPostToolUse,
+			LastEventAt: "2026-05-14T10:03:00Z",
+			StatusAt:    "2026-05-14T10:00:00Z",
+		},
+		{
+			SessionID:   "newer-session-older-event",
+			Agent:       state.AgentCodex,
+			PID:         777,
+			FirstSeenAt: "2026-05-14T10:02:00Z",
+			LastEvent:   state.EventPostToolUse,
+			LastEventAt: "2026-05-14T10:02:30Z",
+			StatusAt:    "2026-05-14T10:02:00Z",
+		},
+	} {
+		if _, err := store.InsertSession(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := Provider{Store: store}
+
+	cards, err := p.Cards(context.Background())
+	if err != nil {
+		t.Fatalf("Cards() error = %v", err)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("len(Cards()) = %d, want 1; cards=%#v", len(cards), cards)
+	}
+	if cards[0].SessionID != "older-session-newer-event" {
+		t.Fatalf("card SessionID = %q, want older-session-newer-event; cards=%#v", cards[0].SessionID, cards)
+	}
+}
+
+func TestCardsKeepsParentAndChildWithSamePID(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sess := range []state.Session{
+		{
+			SessionID:   "parent",
+			Agent:       state.AgentCodex,
+			PID:         777,
+			FirstSeenAt: "2026-05-14T10:00:00Z",
+			LastEvent:   state.EventPostToolUse,
+			LastEventAt: "2026-05-14T10:03:00Z",
+			StatusAt:    "2026-05-14T10:00:00Z",
+		},
+		{
+			SessionID:   "child",
+			Agent:       state.AgentCodex,
+			PID:         777,
+			FirstSeenAt: "2026-05-14T10:02:00Z",
+			LastEvent:   state.EventPostToolUse,
+			LastEventAt: "2026-05-14T10:02:30Z",
+			StatusAt:    "2026-05-14T10:02:00Z",
+		},
+	} {
+		if _, err := store.InsertSession(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := Provider{
+		Store: store,
+		Meta: fakeMeta{meta: map[string]source.SessionMeta{
+			"child": {ParentSessionID: "parent"},
+		}},
+	}
+
+	cards, err := p.Cards(context.Background())
+	if err != nil {
+		t.Fatalf("Cards() error = %v", err)
+	}
+	if len(cards) != 2 {
+		t.Fatalf("len(Cards()) = %d, want 2; cards=%#v", len(cards), cards)
+	}
 }
 
 func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
@@ -147,6 +247,12 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 	if got := detail.Metadata.AgentMessages; got != 5 {
 		t.Fatalf("agent msgs field = %d, want 5", got)
 	}
+	if want := displayTime("2026-05-14T10:00:00Z"); detail.Metadata.Created != want {
+		t.Fatalf("created field = %q, want %q", detail.Metadata.Created, want)
+	}
+	if want := displayTime("2026-05-14T10:01:00Z"); detail.Metadata.Updated != want {
+		t.Fatalf("updated field = %q, want %q", detail.Metadata.Updated, want)
+	}
 	if got := detail.Metadata.InputTokens; got != 100000 {
 		t.Fatalf("input tokens field = %d, want 100000", got)
 	}
@@ -161,6 +267,77 @@ func TestDetailReturnsMetadataNotesAndNewestFirstConversation(t *testing.T) {
 	}
 	if len(detail.Conversation) != 2 || detail.Conversation[0].Text != "newer" || detail.Conversation[1].Text != "older" {
 		t.Fatalf("conversation order = %#v", detail.Conversation)
+	}
+}
+
+func displayTime(raw string) string {
+	t, _ := time.Parse(time.RFC3339Nano, raw)
+	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+func TestMessagesReturnsNewestFirstSummaries(t *testing.T) {
+	store := seedStore(t)
+	p := Provider{
+		Store: store,
+		Meta: fakeMeta{messages: []source.TranscriptMessageSummary{
+			{ID: "1", Index: 1, Role: "user", Preview: "older"},
+			{ID: "2", Index: 2, Role: "assistant", Preview: "newer"},
+		}},
+	}
+
+	messages, err := p.Messages(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("Messages() error = %v", err)
+	}
+	if messages.SessionID != "session-1" {
+		t.Fatalf("SessionID = %q, want session-1", messages.SessionID)
+	}
+	if len(messages.Messages) != 2 {
+		t.Fatalf("len(Messages) = %d, want 2", len(messages.Messages))
+	}
+	if messages.Messages[0].ID != "2" || messages.Messages[0].Preview != "newer" {
+		t.Fatalf("messages order = %#v, want newest first", messages.Messages)
+	}
+}
+
+func TestMessagesTreatsMissingTranscriptAsEmptyList(t *testing.T) {
+	store := seedStore(t)
+	p := Provider{
+		Store: store,
+		Meta:  fakeMeta{err: os.ErrNotExist},
+	}
+
+	messages, err := p.Messages(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("Messages() error = %v", err)
+	}
+	if messages.SessionID != "session-1" {
+		t.Fatalf("SessionID = %q, want session-1", messages.SessionID)
+	}
+	if len(messages.Messages) != 0 {
+		t.Fatalf("len(Messages) = %d, want 0", len(messages.Messages))
+	}
+}
+
+func TestMessageReturnsDetail(t *testing.T) {
+	store := seedStore(t)
+	p := Provider{
+		Store: store,
+		Meta: fakeMeta{message: source.TranscriptMessageDetail{
+			ID:      "7",
+			Index:   7,
+			Role:    "tool_result",
+			Preview: "tests passed",
+			Text:    "tests passed in detail",
+		}},
+	}
+
+	detail, err := p.Message(context.Background(), "session-1", "7")
+	if err != nil {
+		t.Fatalf("Message() error = %v", err)
+	}
+	if detail.ID != "7" || detail.Role != "tool_result" || detail.Text != "tests passed in detail" {
+		t.Fatalf("detail = %#v", detail)
 	}
 }
 
