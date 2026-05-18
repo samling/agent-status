@@ -317,6 +317,32 @@ func TestScanMarksRunningQuestionToolAsWaiting(t *testing.T) {
 	}
 }
 
+func TestScanMarksRunningExternalDirectoryToolAsWaiting(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	stubLiveProcesses(t, []liveProcess{{PID: 1234, Cwd: "/work/live"}})
+	db := filepath.Join(dir, "opencode", "opencode.db")
+	createOpencodeDB(t, db)
+	insertOpencodeMessage(t, db, "msg_assistant", "ses_live", 1767225600600, `{"role":"assistant","path":{"cwd":"/work/live","root":"/work/live"},"time":{"created":1767225600600}}`)
+	insertOpencodePart(t, db, "part_glob", "msg_assistant", 1767225600700, `{"type":"tool","tool":"glob","state":{"status":"running","input":{"pattern":"*.go","path":"/home/sboynton"}}}`)
+
+	sessions, _, err := Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := liveSessionByID(sessions, "ses_live")
+	if got.SessionID == "" {
+		t.Fatalf("ses_live missing: %#v", sessions)
+	}
+	if got.EngineStatus != "busy" {
+		t.Fatalf("EngineStatus = %q, want busy", got.EngineStatus)
+	}
+	if got.Meta.WaitingFor != "access external directory" {
+		t.Fatalf("WaitingFor = %q, want access external directory", got.Meta.WaitingFor)
+	}
+}
+
 func TestApplyStoresDiscoveredWaitingForAsWaitingStatus(t *testing.T) {
 	store := mustOpenStore(t)
 	if !Apply(context.Background(), store, source.LiveSession{

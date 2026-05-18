@@ -77,11 +77,11 @@ server:
   # action that brings that session's window to the foreground via
   # the focus subcommand. Requires libnotify (notify-send) on Linux.
   notify:
-    enabled: false
+    enabled: true
     # Delay between a session entering waiting and its first
     # notification. Each session has its own initial timer; re-entering
     # waiting later starts a fresh delay.
-    initial-delay: 5s
+    initial-delay: 0s
     # Cadence of repeat notifications while a session stays waiting.
     # Set to 0 to fire only once per waiting episode.
     repeat: 5m

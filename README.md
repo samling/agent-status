@@ -150,10 +150,12 @@ The collector exposes a local JSON API:
 
 ### Notifications
 
-Desktop notifications are disabled by default. Enable them on the server:
+Desktop notifications are enabled by default when the server runs, and fire
+immediately when a session starts waiting. Disable them with `--notify=false` or
+`server.notify.enabled: false` in config:
 
 ```sh
-agent-status server --notify
+agent-status server --notify=false
 ```
 
 Useful notification flags include `--notify-initial-delay`,

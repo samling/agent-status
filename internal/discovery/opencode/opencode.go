@@ -43,7 +43,11 @@ type sessionRuntime struct {
 type messageData struct {
 	Role   string `json:"role"`
 	Finish string `json:"finish"`
-	Time   struct {
+	Path   struct {
+		Cwd  string `json:"cwd"`
+		Root string `json:"root"`
+	} `json:"path"`
+	Time struct {
 		Completed int64 `json:"completed"`
 	} `json:"time"`
 }
@@ -53,6 +57,9 @@ type partData struct {
 	Tool  string `json:"tool"`
 	State struct {
 		Status string `json:"status"`
+		Input  struct {
+			Path string `json:"path"`
+		} `json:"input"`
 	} `json:"state"`
 }
 
@@ -135,7 +142,7 @@ func runtimeState(db *sql.DB, sessionID string) sessionRuntime {
 	case "user":
 		return sessionRuntime{EngineStatus: "busy"}
 	case "assistant":
-		tool, hasIncompleteTool, waitingFor := latestToolState(db, msgID)
+		tool, hasIncompleteTool, waitingFor := latestToolState(db, msgID, msgRoot(msg))
 		if msg.Finish == "tool-calls" || hasIncompleteTool {
 			return sessionRuntime{EngineStatus: "busy", CurrentTool: tool, WaitingFor: waitingFor}
 		}
@@ -148,7 +155,7 @@ func runtimeState(db *sql.DB, sessionID string) sessionRuntime {
 	}
 }
 
-func latestToolState(db *sql.DB, messageID string) (string, bool, string) {
+func latestToolState(db *sql.DB, messageID, root string) (string, bool, string) {
 	rows, err := db.Query(`select data from part where message_id = ? order by time_created asc`, messageID)
 	if err != nil {
 		return "", false, ""
@@ -173,10 +180,30 @@ func latestToolState(db *sql.DB, messageID string) (string, bool, string) {
 			incomplete = true
 			if part.Tool == "question" {
 				waitingFor = "answer question"
+			} else if isExternalPath(part.State.Input.Path, root) {
+				waitingFor = "access external directory"
 			}
 		}
 	}
 	return tool, incomplete, waitingFor
+}
+
+func msgRoot(msg messageData) string {
+	if msg.Path.Root != "" {
+		return msg.Path.Root
+	}
+	return msg.Path.Cwd
+}
+
+func isExternalPath(path, root string) bool {
+	if path == "" || root == "" || !filepath.IsAbs(path) || !filepath.IsAbs(root) {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func selectLiveSessions(rows []dbSession, procs []liveProcess, now time.Time, dbPath string) []source.LiveSession {
