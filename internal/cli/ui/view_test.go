@@ -851,8 +851,86 @@ func TestRenderCardsUsesCompactRows(t *testing.T) {
 	if !strings.Contains(out, "\n\n") {
 		t.Fatalf("renderCards() should add a blank line between cards; output:\n%s", out)
 	}
-	if lipgloss.Height(out) != 6 {
-		t.Fatalf("renderCards() height = %d, want 6; output:\n%s", lipgloss.Height(out), out)
+	if lipgloss.Height(out) != 7 {
+		t.Fatalf("renderCards() height = %d, want 7; output:\n%s", lipgloss.Height(out), out)
+	}
+}
+
+func TestRenderCardsShowsActiveAndIdleSections(t *testing.T) {
+	m := uiModel{
+		width:      90,
+		height:     24,
+		selectedID: "active",
+		cards: []sessionview.SessionCard{
+			{SessionID: "active", Agent: "codex", Status: "active", Title: "active", Age: "1h"},
+			{SessionID: "waiting", Agent: "codex", Status: "waiting", Title: "waiting"},
+			{SessionID: "idle", Agent: "codex", Status: "idle", Title: "idle"},
+		},
+	}
+
+	out := m.renderCards(36, "active")
+	if !strings.Contains(out, "Active Sessions") {
+		t.Fatalf("renderCards() missing active section heading; output:\n%s", out)
+	}
+	if !strings.Contains(out, "Idle Sessions") {
+		t.Fatalf("renderCards() missing idle section heading; output:\n%s", out)
+	}
+	if strings.Index(out, "Active Sessions") > strings.Index(out, "active") {
+		t.Fatalf("active heading should appear before active cards; output:\n%s", out)
+	}
+	if strings.Index(out, "Idle Sessions") > strings.Index(out, "idle") {
+		t.Fatalf("idle heading should appear before idle cards; output:\n%s", out)
+	}
+	if strings.Index(out, "idle") < strings.Index(out, "Idle Sessions") {
+		t.Fatalf("idle card should appear under idle section; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsOmitsEmptySectionHeadings(t *testing.T) {
+	m := uiModel{
+		width:      90,
+		height:     24,
+		selectedID: "active",
+		cards: []sessionview.SessionCard{
+			{SessionID: "active", Agent: "codex", Status: "active", Title: "active"},
+		},
+	}
+
+	out := m.renderCards(36, "active")
+	if !strings.Contains(out, "Active Sessions") {
+		t.Fatalf("renderCards() missing active section heading; output:\n%s", out)
+	}
+	if strings.Contains(out, "Idle Sessions") {
+		t.Fatalf("renderCards() should omit empty idle section; output:\n%s", out)
+	}
+
+	m.cards = []sessionview.SessionCard{
+		{SessionID: "idle", Agent: "codex", Status: "idle", Title: "idle"},
+	}
+	m.selectedID = "idle"
+	out = m.renderCards(36, "idle")
+	if strings.Contains(out, "Active Sessions") {
+		t.Fatalf("renderCards() should omit empty active section; output:\n%s", out)
+	}
+	if !strings.Contains(out, "Idle Sessions") {
+		t.Fatalf("renderCards() missing idle section heading; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsScrollBudgetIncludesSectionHeadings(t *testing.T) {
+	m := uiModel{
+		width:      90,
+		height:     12,
+		selectedID: "active",
+		cards: []sessionview.SessionCard{
+			{SessionID: "active", Agent: "codex", Status: "active", Title: "active"},
+			{SessionID: "idle", Agent: "codex", Status: "idle", Title: "idle"},
+		},
+	}
+
+	out := m.renderCards(36, "active")
+	if lipgloss.Height(out) > m.cardPaneHeight() {
+		t.Fatalf("renderCards() height = %d, want <= %d; output:\n%s", lipgloss.Height(out), m.cardPaneHeight(), out)
 	}
 }
 
@@ -991,6 +1069,56 @@ func TestRenderCardsExpandsChildren(t *testing.T) {
 	}
 	if !strings.Contains(out, "-") {
 		t.Fatalf("renderCards() missing expanded child marker; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsKeepsExpandedChildrenWithParentSection(t *testing.T) {
+	m := uiModel{
+		width:           90,
+		height:          24,
+		expandedParents: map[string]bool{"parent": true},
+		cards: []sessionview.SessionCard{
+			{SessionID: "parent", Agent: "codex", Status: "active", Title: "parent", ChildCount: 1},
+			{SessionID: "child", ParentSessionID: "parent", Agent: "codex", Status: "idle", Title: "child"},
+			{SessionID: "idle", Agent: "codex", Status: "idle", Title: "idle"},
+		},
+		selectedID: "parent",
+	}
+
+	out := m.renderCards(36, "parent")
+	parentIndex := strings.Index(out, "parent")
+	childIndex := strings.LastIndex(out, "child")
+	idleHeadingIndex := strings.Index(out, "Idle Sessions")
+	if parentIndex < 0 || childIndex < 0 || idleHeadingIndex < 0 {
+		t.Fatalf("renderCards() missing expected content; output:\n%s", out)
+	}
+	if !(parentIndex < childIndex && childIndex < idleHeadingIndex) {
+		t.Fatalf("expanded child should stay with active parent before idle section; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsKeepsExpandedChildrenWithIdleParentSection(t *testing.T) {
+	m := uiModel{
+		width:           90,
+		height:          24,
+		expandedParents: map[string]bool{"parent": true},
+		cards: []sessionview.SessionCard{
+			{SessionID: "active", Agent: "codex", Status: "active", Title: "active"},
+			{SessionID: "parent", Agent: "codex", Status: "idle", Title: "parent", ChildCount: 1},
+			{SessionID: "child", ParentSessionID: "parent", Agent: "codex", Status: "active", Title: "child"},
+		},
+		selectedID: "active",
+	}
+
+	out := m.renderCards(36, "active")
+	idleHeadingIndex := strings.Index(out, "Idle Sessions")
+	parentIndex := strings.Index(out, "parent")
+	childIndex := strings.LastIndex(out, "child")
+	if idleHeadingIndex < 0 || parentIndex < 0 || childIndex < 0 {
+		t.Fatalf("renderCards() missing expected content; output:\n%s", out)
+	}
+	if !(idleHeadingIndex < parentIndex && parentIndex < childIndex) {
+		t.Fatalf("expanded child should stay with idle parent under idle section; output:\n%s", out)
 	}
 }
 

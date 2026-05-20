@@ -128,6 +128,66 @@ func (m uiModel) cardHeight(_ sessionview.SessionCard, _ string) int {
 	return cardBodyLines
 }
 
+type cardSection struct {
+	Title string
+	Cards []sessionview.SessionCard
+}
+
+func cardSections(cards []sessionview.SessionCard) []cardSection {
+	if len(cards) == 0 {
+		return nil
+	}
+	sections := make([]cardSection, 0, 2)
+	active := cardSection{Title: "Active Sessions"}
+	idle := cardSection{Title: "Idle Sessions"}
+	parentSection := ""
+	for _, card := range cards {
+		sectionStatus := cardSectionStatus(card, parentSection)
+		if card.ParentSessionID == "" {
+			parentSection = sectionStatus
+		}
+		if sectionStatus == "idle" {
+			idle.Cards = append(idle.Cards, card)
+			continue
+		}
+		active.Cards = append(active.Cards, card)
+	}
+	if len(active.Cards) > 0 {
+		sections = append(sections, active)
+	}
+	if len(idle.Cards) > 0 {
+		sections = append(sections, idle)
+	}
+	return sections
+}
+
+func cardSectionStatus(card sessionview.SessionCard, parentSection string) string {
+	if card.ParentSessionID != "" && parentSection != "" {
+		return parentSection
+	}
+	if card.ChildStatus != "" {
+		return card.ChildStatus
+	}
+	return card.Status
+}
+
+func (m uiModel) renderedCardListHeight(cards []sessionview.SessionCard, selectedID string) int {
+	height := 0
+	for _, section := range cardSections(cards) {
+		if height > 0 {
+			height += cardGapRows
+		}
+		height++
+		for i, card := range section.Cards {
+			if i > 0 {
+				height += cardGapRows
+			}
+			height += m.cardHeight(card, selectedID)
+		}
+	}
+	return height
+}
+
 func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) {
 	cards := m.visibleCards()
 	if len(cards) == 0 {
@@ -147,18 +207,13 @@ func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) 
 	if budget < 1 {
 		return offset, offset + 1
 	}
-	used := 0
 	end := offset
 	for end < len(cards) {
-		nextHeight := m.cardHeight(cards[end], selectedID)
-		if end > offset {
-			nextHeight += cardGapRows
-		}
-		if end > offset && used+nextHeight > budget {
+		nextEnd := end + 1
+		if end > offset && m.renderedCardListHeight(cards[offset:nextEnd], selectedID) > budget {
 			break
 		}
-		used += nextHeight
-		end++
+		end = nextEnd
 	}
 	if end == offset {
 		end = offset + 1
@@ -182,19 +237,24 @@ func (m uiModel) renderCards(width int, selectedID string) string {
 		return strings.Join(lines, "\n")
 	}
 	start, end := m.visibleCardRangeFrom(m.scrollOffset, selectedID)
+	visible := cards[start:end]
 	fillCards := m.focusMode == focusCards
-	for _, card := range cards[start:end] {
+	for _, section := range cardSections(visible) {
 		if len(lines) > 1 {
-			for i := 0; i < cardGapRows; i++ {
+			lines = append(lines, "")
+		}
+		lines = append(lines, headerStyle.Render(section.Title))
+		for i, card := range section.Cards {
+			if i > 0 {
 				lines = append(lines, "")
 			}
+			selected := card.SessionID == selectedID
+			rendered := renderCard(card, cardWidth(width, card), selected, fillCards, m.detail, m.expandedParents[card.SessionID])
+			if card.ParentSessionID != "" {
+				rendered = indentBlock(rendered, childIndentCols)
+			}
+			lines = append(lines, rendered)
 		}
-		selected := card.SessionID == selectedID
-		rendered := renderCard(card, cardWidth(width, card), selected, fillCards, m.detail, m.expandedParents[card.SessionID])
-		if card.ParentSessionID != "" {
-			rendered = indentBlock(rendered, childIndentCols)
-		}
-		lines = append(lines, rendered)
 	}
 	return strings.Join(lines, "\n")
 }
