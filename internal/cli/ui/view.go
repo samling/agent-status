@@ -133,6 +133,18 @@ type cardSection struct {
 	Cards []sessionview.SessionCard
 }
 
+func (s cardSection) Header(count int) string {
+	return fmt.Sprintf("%s (%d)", s.Title, count)
+}
+
+func cardSectionCounts(cards []sessionview.SessionCard) map[string]int {
+	counts := map[string]int{}
+	for _, section := range cardSections(cards) {
+		counts[section.Title] = len(section.Cards)
+	}
+	return counts
+}
+
 func cardSections(cards []sessionview.SessionCard) []cardSection {
 	if len(cards) == 0 {
 		return nil
@@ -178,10 +190,8 @@ func (m uiModel) renderedCardListHeight(cards []sessionview.SessionCard, selecte
 			height += cardGapRows
 		}
 		height++
-		for i, card := range section.Cards {
-			if i > 0 {
-				height += cardGapRows
-			}
+		for _, card := range section.Cards {
+			height += cardGapRows
 			height += m.cardHeight(card, selectedID)
 		}
 	}
@@ -203,7 +213,7 @@ func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) 
 	if height == 0 {
 		return 0, len(m.cards)
 	}
-	budget := height - 1
+	budget := height
 	if budget < 1 {
 		return offset, offset + 1
 	}
@@ -223,31 +233,22 @@ func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) 
 
 func (m uiModel) renderCards(width int, selectedID string) string {
 	cards := m.visibleCards()
-	title := "Sessions"
-	if len(cards) > 0 {
-		if idx := cardIndex(cards, selectedID); idx >= 0 {
-			title = fmt.Sprintf("Sessions %d/%d", idx+1, len(cards))
-		} else {
-			title = fmt.Sprintf("Sessions %d", len(cards))
-		}
-	}
-	lines := []string{headerStyle.Render(title)}
+	lines := []string{}
 	if len(cards) == 0 {
 		lines = append(lines, dimStyle.Render("(no live sessions)"))
 		return strings.Join(lines, "\n")
 	}
 	start, end := m.visibleCardRangeFrom(m.scrollOffset, selectedID)
 	visible := cards[start:end]
+	sectionCounts := cardSectionCounts(cards)
 	fillCards := m.focusMode == focusCards
 	for _, section := range cardSections(visible) {
 		if len(lines) > 1 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, headerStyle.Render(section.Title))
-		for i, card := range section.Cards {
-			if i > 0 {
-				lines = append(lines, "")
-			}
+		lines = append(lines, headerStyle.Render(section.Header(sectionCounts[section.Title])))
+		for _, card := range section.Cards {
+			lines = append(lines, "")
 			selected := card.SessionID == selectedID
 			rendered := renderCard(card, cardWidth(width, card), selected, fillCards, m.detail, m.expandedParents[card.SessionID])
 			if card.ParentSessionID != "" {

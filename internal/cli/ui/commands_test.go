@@ -933,14 +933,17 @@ func TestUpdateIgnoresStaleSnapshotDetail(t *testing.T) {
 	}
 }
 
-func TestViewShowsSessionsHeadingForEmptyCards(t *testing.T) {
+func TestViewShowsEmptySessionListWithoutGenericHeading(t *testing.T) {
 	m := uiModel{width: 80, height: 20}
 
 	out := m.View()
-	for _, want := range []string{"Sessions", "(no live sessions)"} {
+	for _, want := range []string{"(no live sessions)"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("View() missing %q; output:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "Sessions") {
+		t.Fatalf("View() should not show generic sessions heading; output:\n%s", out)
 	}
 }
 

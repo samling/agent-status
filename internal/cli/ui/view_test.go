@@ -869,19 +869,28 @@ func TestRenderCardsShowsActiveAndIdleSections(t *testing.T) {
 	}
 
 	out := m.renderCards(36, "active")
-	if !strings.Contains(out, "Active Sessions") {
+	if !strings.Contains(out, "Active Sessions (2)") {
 		t.Fatalf("renderCards() missing active section heading; output:\n%s", out)
 	}
-	if !strings.Contains(out, "Idle Sessions") {
+	if !strings.Contains(out, "Idle Sessions (1)") {
 		t.Fatalf("renderCards() missing idle section heading; output:\n%s", out)
 	}
-	if strings.Index(out, "Active Sessions") > strings.Index(out, "active") {
+	if strings.Contains(out, "Sessions 1/3") {
+		t.Fatalf("renderCards() should not show generic sessions title; output:\n%s", out)
+	}
+	if !strings.Contains(out, "Active Sessions (2)\n\n") {
+		t.Fatalf("renderCards() should put space after active heading; output:\n%s", out)
+	}
+	if !strings.Contains(out, "Idle Sessions (1)\n\n") {
+		t.Fatalf("renderCards() should put space after idle heading; output:\n%s", out)
+	}
+	if strings.Index(out, "Active Sessions (2)") > strings.Index(out, "active") {
 		t.Fatalf("active heading should appear before active cards; output:\n%s", out)
 	}
-	if strings.Index(out, "Idle Sessions") > strings.Index(out, "idle") {
+	if strings.Index(out, "Idle Sessions (1)") > strings.Index(out, "idle") {
 		t.Fatalf("idle heading should appear before idle cards; output:\n%s", out)
 	}
-	if strings.Index(out, "idle") < strings.Index(out, "Idle Sessions") {
+	if strings.Index(out, "idle") < strings.Index(out, "Idle Sessions (1)") {
 		t.Fatalf("idle card should appear under idle section; output:\n%s", out)
 	}
 }
@@ -897,7 +906,7 @@ func TestRenderCardsOmitsEmptySectionHeadings(t *testing.T) {
 	}
 
 	out := m.renderCards(36, "active")
-	if !strings.Contains(out, "Active Sessions") {
+	if !strings.Contains(out, "Active Sessions (1)") {
 		t.Fatalf("renderCards() missing active section heading; output:\n%s", out)
 	}
 	if strings.Contains(out, "Idle Sessions") {
@@ -912,7 +921,7 @@ func TestRenderCardsOmitsEmptySectionHeadings(t *testing.T) {
 	if strings.Contains(out, "Active Sessions") {
 		t.Fatalf("renderCards() should omit empty active section; output:\n%s", out)
 	}
-	if !strings.Contains(out, "Idle Sessions") {
+	if !strings.Contains(out, "Idle Sessions (1)") {
 		t.Fatalf("renderCards() missing idle section heading; output:\n%s", out)
 	}
 }
@@ -1088,7 +1097,7 @@ func TestRenderCardsKeepsExpandedChildrenWithParentSection(t *testing.T) {
 	out := m.renderCards(36, "parent")
 	parentIndex := strings.Index(out, "parent")
 	childIndex := strings.LastIndex(out, "child")
-	idleHeadingIndex := strings.Index(out, "Idle Sessions")
+	idleHeadingIndex := strings.Index(out, "Idle Sessions (1)")
 	if parentIndex < 0 || childIndex < 0 || idleHeadingIndex < 0 {
 		t.Fatalf("renderCards() missing expected content; output:\n%s", out)
 	}
@@ -1111,7 +1120,7 @@ func TestRenderCardsKeepsExpandedChildrenWithIdleParentSection(t *testing.T) {
 	}
 
 	out := m.renderCards(36, "active")
-	idleHeadingIndex := strings.Index(out, "Idle Sessions")
+	idleHeadingIndex := strings.Index(out, "Idle Sessions (2)")
 	parentIndex := strings.Index(out, "parent")
 	childIndex := strings.LastIndex(out, "child")
 	if idleHeadingIndex < 0 || parentIndex < 0 || childIndex < 0 {
@@ -1498,8 +1507,8 @@ func TestMoveSelectionScrollsSelectedCardIntoView(t *testing.T) {
 	if strings.Contains(out, "session-00") {
 		t.Fatalf("View() still shows first card after scrolling; output:\n%s", out)
 	}
-	if !strings.Contains(out, "10/12") {
-		t.Fatalf("View() missing position hint; output:\n%s", out)
+	if !strings.Contains(out, "Active Sessions (12)") {
+		t.Fatalf("View() missing active session count; output:\n%s", out)
 	}
 }
 
