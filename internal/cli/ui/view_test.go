@@ -287,7 +287,7 @@ func TestViewShowsSelectedEntryRailWhenDetailPaneIsActive(t *testing.T) {
 	}
 
 	out := m.View()
-	selectedRail := statusStyle("active").Render("▌")
+	selectedRail := statusRail("active")
 	if got, want := strings.Count(out, selectedRail), 2; got != want {
 		t.Fatalf("selected entry rail height = %d lines, want %d; output:\n%q", got, want, out)
 	}
@@ -340,6 +340,58 @@ func TestViewShowsLeftPaneActiveRail(t *testing.T) {
 	}
 	if strings.Contains(out, dividerStyle.Render("│")) {
 		t.Fatalf("left pane active state should not render a separate dim divider; output:\n%q", out)
+	}
+}
+
+func TestRenderUnselectedSessionCardsAlwaysShowStatusRail(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	for _, tc := range []struct {
+		status string
+		color  string
+	}{
+		{status: "idle", color: "8"},
+		{status: "active", color: "10"},
+		{status: "waiting", color: "11"},
+	} {
+		out := renderCard(sessionview.SessionCard{Agent: "opencode", Status: tc.status, Title: tc.status}, 36, false, false, sessionview.SessionDetail{}, false)
+		wantRail := statusRail(tc.status)
+		if got, want := strings.Count(out, wantRail), 2; got != want {
+			t.Fatalf("%s rail count = %d, want %d; output:\n%q", tc.status, got, want, out)
+		}
+		if regexp.MustCompile(`\x1b\[[0-9;]*48;5;240[0-9;]*m`).MatchString(out) {
+			t.Fatalf("unselected %s card should not have gray background; output:\n%q", tc.status, out)
+		}
+	}
+}
+
+func TestRenderSelectedSessionCardUsesGrayHighlightAndStatusRail(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(oldProfile)
+
+	out := renderCard(sessionview.SessionCard{Agent: "opencode", Status: "waiting", Title: "needs approval"}, 42, true, true, sessionview.SessionDetail{}, false)
+	wantRail := statusRail("waiting")
+	if got, want := strings.Count(out, wantRail), 2; got != want {
+		t.Fatalf("selected status rail count = %d, want %d; output:\n%q", got, want, out)
+	}
+	if !regexp.MustCompile(`\x1b\[[0-9;]*48;5;238[0-9;]*m`).MatchString(out) {
+		t.Fatalf("selected card should use darker gray background; output:\n%q", out)
+	}
+	bodyPrefix := ansiPrefix(selectedCardTextStyle(selectedSessionFillColor(), false))
+	if !strings.Contains(out, bodyPrefix+" opencode") {
+		t.Fatalf("selected card body text should use light foreground on dark gray; output:\n%q", out)
+	}
+	if !strings.Contains(out, selectedStatusTextStyle("waiting").Render("waiting")) {
+		t.Fatalf("selected card status text should keep status color on dark gray; output:\n%q", out)
+	}
+	if !strings.Contains(out, selectedSessionNameStyle().Render("needs approval")) {
+		t.Fatalf("selected card title should keep session name color on dark gray; output:\n%q", out)
+	}
+	if strings.Contains(out, "\x1b[48;5;11m") || strings.Contains(out, "\x1b[43m") {
+		t.Fatalf("selected card should not use status color as fill; output:\n%q", out)
 	}
 }
 
@@ -578,7 +630,7 @@ func TestSelectedCardOutsideSessionListDoesNotUseBackground(t *testing.T) {
 	}
 }
 
-func TestRenderCardsFillsSelectedCardWhenSessionListIsActive(t *testing.T) {
+func TestRenderCardsHighlightsSelectedCardGrayWhenSessionListIsActive(t *testing.T) {
 	oldProfile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.ANSI256)
 	defer lipgloss.SetColorProfile(oldProfile)
@@ -595,23 +647,18 @@ func TestRenderCardsFillsSelectedCardWhenSessionListIsActive(t *testing.T) {
 	}
 
 	out := m.renderCards(36, "selected")
-	fill := string(cardAccentColor("idle", true))
-	normalPrefix := ansiPrefix(lipgloss.NewStyle().
-		Foreground(lipgloss.Color("0")).
-		Background(lipgloss.Color(fill)))
-	titlePrefix := ansiPrefix(lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("0")).
-		Background(lipgloss.Color(fill)))
+	fill := "238"
+	normalPrefix := ansiPrefix(selectedCardTextStyle(lipgloss.Color(fill), false))
+	titlePrefix := ansiPrefix(selectedSessionNameStyle())
 	for _, text := range []string{"codex", "idle", "5h"} {
 		if !regexp.MustCompile(regexp.QuoteMeta(normalPrefix) + `[^\n]*` + regexp.QuoteMeta(text)).MatchString(out) {
 			t.Fatalf("selected card text %q should keep selected background; output:\n%q", text, out)
 		}
 	}
-	if !strings.Contains(out, normalPrefix+" > codex") {
+	if !strings.Contains(out, statusRail("idle")+normalPrefix+" codex") {
 		t.Fatalf("selected card should include left padding inside the fill; output:\n%q", out)
 	}
-	if !regexp.MustCompile(regexp.QuoteMeta(normalPrefix) + ` > codex[^\n]*idle \x1b\[0m`).MatchString(out) {
+	if !regexp.MustCompile(regexp.QuoteMeta(normalPrefix) + ` codex[^\n]*idle\x1b\[0m`).MatchString(out) {
 		t.Fatalf("selected card should include right padding inside the fill; output:\n%q", out)
 	}
 	if !regexp.MustCompile(regexp.QuoteMeta(titlePrefix) + regexp.QuoteMeta("selected")).MatchString(out) {
@@ -637,7 +684,7 @@ func TestRenderCardsFillsSelectedCardWhenSessionListIsActive(t *testing.T) {
 	}
 }
 
-func TestRenderCardsFillsSelectedActiveCardWithActiveAccentColor(t *testing.T) {
+func TestRenderCardsKeepsActiveRailWithGraySelectedFill(t *testing.T) {
 	oldProfile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.ANSI256)
 	defer lipgloss.SetColorProfile(oldProfile)
@@ -653,13 +700,15 @@ func TestRenderCardsFillsSelectedActiveCardWithActiveAccentColor(t *testing.T) {
 	}
 
 	out := m.renderCards(36, "active")
-	fill := cardAccentColor("active", true)
+	fill := lipgloss.Color("238")
 	selectedPrefix := ansiPrefix(lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("0")).
+		Foreground(lipgloss.Color("252")).
 		Background(fill))
 	if !strings.Contains(out, selectedPrefix) {
-		t.Fatalf("selected active card should use active accent color as fill; output:\n%q", out)
+		t.Fatalf("selected active card should use gray fill; output:\n%q", out)
+	}
+	if got, want := strings.Count(out, statusRail("active")), 2; got != want {
+		t.Fatalf("selected active card rail count = %d, want %d; output:\n%q", got, want, out)
 	}
 	if strings.ContainsAny(out, "╭╮╰╯│") {
 		t.Fatalf("selected active card should not render card borders; output:\n%q", out)
@@ -696,7 +745,7 @@ func ansiPrefix(style lipgloss.Style) string {
 	return parts[0]
 }
 
-func TestSelectedCardIncludesSelectionMarker(t *testing.T) {
+func TestSelectedCardDoesNotUseSelectionMarker(t *testing.T) {
 	selected := renderCard(sessionview.SessionCard{
 		SessionID: "s1",
 		Agent:     "codex",
@@ -710,8 +759,8 @@ func TestSelectedCardIncludesSelectionMarker(t *testing.T) {
 		Title:     "active",
 	}, 36, false, false, sessionview.SessionDetail{}, false)
 
-	if !strings.Contains(selected, ">") {
-		t.Fatalf("selected card should include a selection marker; output:\n%s", selected)
+	if strings.Contains(selected, ">") {
+		t.Fatalf("selected card should use gray fill and rail instead of a marker; output:\n%s", selected)
 	}
 	if strings.Contains(active, ">") {
 		t.Fatalf("unselected active card should not include a selection marker; output:\n%s", active)
@@ -726,7 +775,7 @@ func TestSelectedCardUsesRailOutsideSessionListFocus(t *testing.T) {
 		Title:     "selected",
 	}, 36, true, false, sessionview.SessionDetail{}, false)
 
-	if got, want := strings.Count(selected, statusStyle("active").Render("▌")), 2; got != want {
+	if got, want := strings.Count(selected, statusRail("active")), 2; got != want {
 		t.Fatalf("selected card rail height = %d lines, want %d; output:\n%s", got, want, selected)
 	}
 	if strings.Contains(selected, ">") {
@@ -759,7 +808,7 @@ func TestSelectedCardRailMatchesEffectiveStatus(t *testing.T) {
 				Title:       "selected",
 			}, 36, true, false, sessionview.SessionDetail{}, false)
 
-			if got, want := strings.Count(out, statusStyle(tc.wantStatus).Render("▌")), 2; got != want {
+			if got, want := strings.Count(out, statusRail(tc.wantStatus)), 2; got != want {
 				t.Fatalf("selected card rail count = %d, want %d; output:\n%q", got, want, out)
 			}
 		})
@@ -802,8 +851,95 @@ func TestRenderCardsUsesCompactRows(t *testing.T) {
 	if !strings.Contains(out, "\n\n") {
 		t.Fatalf("renderCards() should add a blank line between cards; output:\n%s", out)
 	}
-	if lipgloss.Height(out) != 6 {
-		t.Fatalf("renderCards() height = %d, want 6; output:\n%s", lipgloss.Height(out), out)
+	if lipgloss.Height(out) != 7 {
+		t.Fatalf("renderCards() height = %d, want 7; output:\n%s", lipgloss.Height(out), out)
+	}
+}
+
+func TestRenderCardsShowsActiveAndIdleSections(t *testing.T) {
+	m := uiModel{
+		width:      90,
+		height:     24,
+		selectedID: "active",
+		cards: []sessionview.SessionCard{
+			{SessionID: "active", Agent: "codex", Status: "active", Title: "active", Age: "1h"},
+			{SessionID: "waiting", Agent: "codex", Status: "waiting", Title: "waiting"},
+			{SessionID: "idle", Agent: "codex", Status: "idle", Title: "idle"},
+		},
+	}
+
+	out := m.renderCards(36, "active")
+	if !strings.Contains(out, "Active Sessions (2)") {
+		t.Fatalf("renderCards() missing active section heading; output:\n%s", out)
+	}
+	if !strings.Contains(out, "Idle Sessions (1)") {
+		t.Fatalf("renderCards() missing idle section heading; output:\n%s", out)
+	}
+	if strings.Contains(out, "Sessions 1/3") {
+		t.Fatalf("renderCards() should not show generic sessions title; output:\n%s", out)
+	}
+	if !strings.Contains(out, "Active Sessions (2)\n\n") {
+		t.Fatalf("renderCards() should put space after active heading; output:\n%s", out)
+	}
+	if !strings.Contains(out, "Idle Sessions (1)\n\n") {
+		t.Fatalf("renderCards() should put space after idle heading; output:\n%s", out)
+	}
+	if strings.Index(out, "Active Sessions (2)") > strings.Index(out, "active") {
+		t.Fatalf("active heading should appear before active cards; output:\n%s", out)
+	}
+	if strings.Index(out, "Idle Sessions (1)") > strings.Index(out, "idle") {
+		t.Fatalf("idle heading should appear before idle cards; output:\n%s", out)
+	}
+	if strings.Index(out, "idle") < strings.Index(out, "Idle Sessions (1)") {
+		t.Fatalf("idle card should appear under idle section; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsOmitsEmptySectionHeadings(t *testing.T) {
+	m := uiModel{
+		width:      90,
+		height:     24,
+		selectedID: "active",
+		cards: []sessionview.SessionCard{
+			{SessionID: "active", Agent: "codex", Status: "active", Title: "active"},
+		},
+	}
+
+	out := m.renderCards(36, "active")
+	if !strings.Contains(out, "Active Sessions (1)") {
+		t.Fatalf("renderCards() missing active section heading; output:\n%s", out)
+	}
+	if strings.Contains(out, "Idle Sessions") {
+		t.Fatalf("renderCards() should omit empty idle section; output:\n%s", out)
+	}
+
+	m.cards = []sessionview.SessionCard{
+		{SessionID: "idle", Agent: "codex", Status: "idle", Title: "idle"},
+	}
+	m.selectedID = "idle"
+	out = m.renderCards(36, "idle")
+	if strings.Contains(out, "Active Sessions") {
+		t.Fatalf("renderCards() should omit empty active section; output:\n%s", out)
+	}
+	if !strings.Contains(out, "Idle Sessions (1)") {
+		t.Fatalf("renderCards() missing idle section heading; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsScrollBudgetIncludesSectionHeadings(t *testing.T) {
+	m := uiModel{
+		width:      90,
+		height:     12,
+		selectedID: "active",
+		cards: []sessionview.SessionCard{
+			{SessionID: "active", Agent: "codex", Status: "active", Title: "active"},
+			{SessionID: "idle", Agent: "codex", Status: "idle", Title: "idle"},
+		},
+	}
+
+	out := m.renderCards(36, "active")
+	if lipgloss.Height(out) > m.cardPaneHeight() {
+		t.Fatalf("renderCards() height = %d, want <= %d; output:\n%s", lipgloss.Height(out), m.cardPaneHeight(), out)
 	}
 }
 
@@ -816,8 +952,8 @@ func TestRenderCardOmitsMarkerSpaceForLeafSession(t *testing.T) {
 	}
 
 	out := renderCard(card, 36, false, false, sessionview.SessionDetail{}, false)
-	if !strings.HasPrefix(out, " codex") {
-		t.Fatalf("renderCard() should start leaf agent after left padding; output:\n%s", out)
+	if !strings.HasPrefix(out, statusRail("active")+" codex") {
+		t.Fatalf("renderCard() should start leaf agent after status rail and left padding; output:\n%s", out)
 	}
 	if strings.Contains(out, "   codex") {
 		t.Fatalf("renderCard() should not reserve marker space for leaf sessions; output:\n%s", out)
@@ -942,6 +1078,56 @@ func TestRenderCardsExpandsChildren(t *testing.T) {
 	}
 	if !strings.Contains(out, "-") {
 		t.Fatalf("renderCards() missing expanded child marker; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsKeepsExpandedChildrenWithParentSection(t *testing.T) {
+	m := uiModel{
+		width:           90,
+		height:          24,
+		expandedParents: map[string]bool{"parent": true},
+		cards: []sessionview.SessionCard{
+			{SessionID: "parent", Agent: "codex", Status: "active", Title: "parent", ChildCount: 1},
+			{SessionID: "child", ParentSessionID: "parent", Agent: "codex", Status: "idle", Title: "child"},
+			{SessionID: "idle", Agent: "codex", Status: "idle", Title: "idle"},
+		},
+		selectedID: "parent",
+	}
+
+	out := m.renderCards(36, "parent")
+	parentIndex := strings.Index(out, "parent")
+	childIndex := strings.LastIndex(out, "child")
+	idleHeadingIndex := strings.Index(out, "Idle Sessions (1)")
+	if parentIndex < 0 || childIndex < 0 || idleHeadingIndex < 0 {
+		t.Fatalf("renderCards() missing expected content; output:\n%s", out)
+	}
+	if !(parentIndex < childIndex && childIndex < idleHeadingIndex) {
+		t.Fatalf("expanded child should stay with active parent before idle section; output:\n%s", out)
+	}
+}
+
+func TestRenderCardsKeepsExpandedChildrenWithIdleParentSection(t *testing.T) {
+	m := uiModel{
+		width:           90,
+		height:          24,
+		expandedParents: map[string]bool{"parent": true},
+		cards: []sessionview.SessionCard{
+			{SessionID: "active", Agent: "codex", Status: "active", Title: "active"},
+			{SessionID: "parent", Agent: "codex", Status: "idle", Title: "parent", ChildCount: 1},
+			{SessionID: "child", ParentSessionID: "parent", Agent: "codex", Status: "active", Title: "child"},
+		},
+		selectedID: "active",
+	}
+
+	out := m.renderCards(36, "active")
+	idleHeadingIndex := strings.Index(out, "Idle Sessions (2)")
+	parentIndex := strings.Index(out, "parent")
+	childIndex := strings.LastIndex(out, "child")
+	if idleHeadingIndex < 0 || parentIndex < 0 || childIndex < 0 {
+		t.Fatalf("renderCards() missing expected content; output:\n%s", out)
+	}
+	if !(idleHeadingIndex < parentIndex && parentIndex < childIndex) {
+		t.Fatalf("expanded child should stay with idle parent under idle section; output:\n%s", out)
 	}
 }
 
@@ -1321,8 +1507,8 @@ func TestMoveSelectionScrollsSelectedCardIntoView(t *testing.T) {
 	if strings.Contains(out, "session-00") {
 		t.Fatalf("View() still shows first card after scrolling; output:\n%s", out)
 	}
-	if !strings.Contains(out, "10/12") {
-		t.Fatalf("View() missing position hint; output:\n%s", out)
+	if !strings.Contains(out, "Active Sessions (12)") {
+		t.Fatalf("View() missing active session count; output:\n%s", out)
 	}
 }
 

@@ -392,6 +392,22 @@ func TestMetadataShowsZeroMessageSide(t *testing.T) {
 	}
 }
 
+func TestMetadataUsesSessionWaitingLabelWhenMetaHasNone(t *testing.T) {
+	meta := detailMetadata(state.Session{
+		SessionID:   "session-1",
+		Agent:       state.AgentOpencode,
+		FirstSeenAt: "2026-05-14T10:00:00Z",
+		LastEvent:   state.EventPermissionRequest,
+		LastEventAt: "2026-05-14T10:01:00Z",
+		StatusAt:    "2026-05-14T10:01:00Z",
+		WaitingFor:  "approve Bash",
+	}, source.SessionMeta{}, source.TranscriptInfo{}, "")
+
+	if got := meta.Waiting; got != "approve Bash" {
+		t.Fatalf("Waiting = %q, want approve Bash", got)
+	}
+}
+
 func TestDetailKeepsMetadataWhenTranscriptFails(t *testing.T) {
 	store := seedStore(t)
 	p := Provider{

@@ -26,15 +26,17 @@ make install
 
 ## How It Works
 
-AI agents like Claude Code and Codex support [hooks](https://code.claude.com/docs/en/hooks) that enable users to execute actions at various points in the agent's lifecycle (new session, prompt submitted, tool used, etc.). We configure the agent hooks to execute a [forwarder script](./internal/bootstrap/assets/post-agent-status.sh) to POST the event to the collector (`agent-status server`). The collector receives those events over local HTTP and persists per-session state. Agent state files and databases are also checked for locally to discover live sessions and reap stale ones. Clients (the TUI `agent-status ui`, `agent-status statusline`, `agent-status focus <session_id>`) read live state through the collector's `GET /state` HTTP endpoints, so the daemon is the single source of truth.
+AI agents like Claude Code, Codex, and opencode support hooks or plugins that enable users to execute actions at various points in the agent's lifecycle (new session, prompt submitted, tool used, etc.). We configure Claude Code and Codex hooks to execute a [forwarder script](./internal/bootstrap/assets/post-agent-status.sh), and configure opencode to load a plugin, to POST events to the collector (`agent-status server`). The collector receives those events over local HTTP and persists per-session state. Agent state files and databases are also checked for locally to discover live sessions and reap stale ones. Clients (the TUI `agent-status ui`, `agent-status statusline`, `agent-status focus <session_id>`) read live state through the collector's `GET /state` HTTP endpoints, so the daemon is the single source of truth.
 
-The data read by `agent-status` is **local** and **only data provided by the supported agents**. **Nothing ever leaves your machine.** `agent-status` uses the _presence_ of certain files (e.g. `~/.claude/sessions/*.jsonl`) to infer the existence of sessions; it uses the _contents_ to provide information on that session (model name, agent version, a preview of the last submitted prompt). This data already exists unencrypted on your machine; poke around `~/.claude`, `~/.codex` etc. if you're curious. Absolutely no data is collected by me from service nor will it ever be. A non-exhaustive list of data and locations checked includes:
+The data read by `agent-status` is **local** and **only data provided by the supported agents**. **Nothing ever leaves your machine.** `agent-status` uses the _presence_ of certain files (e.g. `~/.claude/sessions/*.jsonl`) to infer the existence of sessions; it uses the _contents_ to provide information on that session (model name, agent version, a preview of the last submitted prompt). This data already exists unencrypted on your machine; poke around `~/.claude`, `~/.codex`, `~/.local/share/opencode`, etc. if you're curious. Absolutely no data is collected by me from service nor will it ever be. A non-exhaustive list of data and locations checked includes:
 
 - Claude Code hook payloads (event-specific data - prompt submitted, tool used, session started/ended, awaiting input, etc.)
 - Claude Code data in `~/.claude`, specifically `sessions` and `projects` (session-specific data - model used, creation date, current session status, etc.)
 - Codex hook payloads (event-specific data - prompt submitted, tool used, session started/ended, awaiting input, etc.)
 - Codex data in `~/.codex`, specifically `state_*.sqlite`, `logs_*.sqlite`, and `sessions` (session-specific data - model used, creation date, current session status, etc.)
   - `shell_snapshots/` is checked for the presence of a session file as it's currently the only way I've found to determine when a new Codex session is started _before_ sending the first message
+- opencode plugin events: session/message/tool/permission activity posted to the local collector
+- opencode data in `$XDG_DATA_HOME/opencode` (default `~/.local/share/opencode`), specifically `opencode.db` for session metadata and messages
 
 This tool aggregates that data, tracks state by agent and session id, and presents it in a terminal UI.
 
@@ -66,28 +68,29 @@ Run the bootstrap subcommand from the installed binary:
 agent-status bootstrap
 ```
 
-It configures Claude Code and Codex and will:
+It configures Claude Code, Codex, and opencode and will:
 
-1. Install a single shared forwarder script to `$XDG_CONFIG_HOME/agent-status/post-agent-status.sh` (default `~/.config/agent-status/post-agent-status.sh`). Both agents' hook configs point at this one location.
-2. Render the embedded hook templates with the absolute path to the forwarder.
-3. Merge the rendered Claude Code hooks into `~/.claude/settings.json` and Codex hooks into `~/.codex/hooks.json`. If a file already exists, the merge leaves a `.bak.<timestamp>` next to the original. Existing hook entries that reference any prior `post-agent-status.sh` are replaced (not duplicated) with the new one.
-4. Remove any per-agent script copies left behind by earlier installs (`~/.claude/scripts/post-agent-status.sh`, `~/.codex/scripts/post-agent-status.sh`); modified copies are backed up first.
+1. Install a single shared forwarder script to `$XDG_CONFIG_HOME/agent-status/post-agent-status.sh` (default `~/.config/agent-status/post-agent-status.sh`). Claude Code and Codex hook configs point at this one location.
+2. Install the opencode plugin asset to `$XDG_CONFIG_HOME/agent-status/opencode-agent-status-plugin.js`.
+3. Render the embedded hook templates with the absolute path to the forwarder.
+4. Merge the rendered Claude Code hooks into `~/.claude/settings.json`, Codex hooks into `~/.codex/hooks.json`, and the opencode plugin path into the opencode config. If a file already exists, the merge leaves a `.bak.<timestamp>` next to the original. Existing hook entries that reference any prior `post-agent-status.sh`, and existing opencode plugin entries that reference any prior `opencode-agent-status-plugin.js`, are replaced (not duplicated) with the new one.
+5. Remove any per-agent script copies left behind by earlier installs (`~/.claude/scripts/post-agent-status.sh`, `~/.codex/scripts/post-agent-status.sh`); modified copies are backed up first.
 
 The planned changes are printed before any files are written, and the
 command asks for confirmation. Useful flags:
 
 - `--yes` skip the confirmation prompt
 - `--dry-run` print the plan without writing anything
-- `--agents=claude` (or `--agents=codex`) configure just one agent
-- `--claude-dir` / `--codex-dir` override the config dir for either agent
+- `--agents=claude`, `--agents=codex`, or `--agents=opencode` configure just one agent
+- `--claude-dir` / `--codex-dir` / `--opencode-dir` override the config dir for an agent
 
-`CLAUDE_CONFIG_DIR` and `CODEX_HOME` are honored when their respective
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `OPENCODE_CONFIG_DIR` are honored when their respective
 `--*-dir` flags aren't passed.
 
-The forwarder discovers the collector's address at runtime, so changing
-`--addr` / `--port` (or the matching config keys) only requires
-restarting the server — no need to re-run bootstrap. Resolution order in
-the script is:
+The forwarder and opencode plugin discover the collector's address at runtime,
+so changing `--addr` / `--port` (or the matching config keys) only requires
+restarting the server — no need to re-run bootstrap. Both assets use this
+shared resolution order:
 
 1. `$AGENT_STATUS_ENDPOINT` (e.g. `127.0.0.1:7878`) if set in the agent's environment.
 2. `$XDG_STATE_HOME/agent-status/endpoint` (default `~/.local/state/agent-status/endpoint`), which the server writes on startup.
@@ -95,15 +98,18 @@ the script is:
 
 ### Manual setup
 
-If you'd rather wire the hooks yourself, the templates and forwarder live
-at [`internal/bootstrap/assets/`](./internal/bootstrap/assets/). Copy
-`post-agent-status.sh` to `$XDG_CONFIG_HOME/agent-status/`, replace
-`path-to-post-agent-status` in `claude-code.json` / `codex.json` with
-that absolute path, then merge the rendered JSON into
-`~/.claude/settings.json` and write it to `~/.codex/hooks.json`. The
-script reads the collector's address from
-`$XDG_STATE_HOME/agent-status/endpoint` at runtime, so the same script
-works regardless of which port the server runs on.
+If you'd rather wire the hooks yourself, the templates, forwarder, and
+opencode plugin asset live at
+[`internal/bootstrap/assets/`](./internal/bootstrap/assets/). Copy
+`post-agent-status.sh` and `opencode-agent-status-plugin.js` to
+`$XDG_CONFIG_HOME/agent-status/`, replace `path-to-post-agent-status` in
+`claude-code.json` / `codex.json` with that absolute path, then merge the
+rendered JSON into `~/.claude/settings.json` and write it to
+`~/.codex/hooks.json`. Add the opencode plugin asset path to the `plugin`
+array in your opencode config (`opencode.jsonc`, `opencode.json`, or
+`config.json`). The script and plugin read the collector's address from
+`$XDG_STATE_HOME/agent-status/endpoint` at runtime, so the same assets
+work regardless of which port the server runs on.
 
 ## Configure
 
@@ -144,10 +150,12 @@ The collector exposes a local JSON API:
 
 ### Notifications
 
-Desktop notifications are disabled by default. Enable them on the server:
+Desktop notifications are enabled by default when the server runs, and fire
+immediately when a session starts waiting. Disable them with `--notify=false` or
+`server.notify.enabled: false` in config:
 
 ```sh
-agent-status server --notify
+agent-status server --notify=false
 ```
 
 Useful notification flags include `--notify-initial-delay`,

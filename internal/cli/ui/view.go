@@ -75,6 +75,19 @@ func cardAccentColor(status string, selected bool) lipgloss.Color {
 	return lipgloss.Color("240")
 }
 
+func cardStatusRailColor(status string) lipgloss.Color {
+	switch status {
+	case "active":
+		return lipgloss.Color("10")
+	case "waiting":
+		return lipgloss.Color("11")
+	case "idle":
+		return lipgloss.Color("8")
+	default:
+		return lipgloss.Color("240")
+	}
+}
+
 func (m uiModel) paneWidths() (int, int) {
 	inner := m.width - 4
 	separatorWidth := paneGap*2 + paneDividerCols
@@ -115,6 +128,76 @@ func (m uiModel) cardHeight(_ sessionview.SessionCard, _ string) int {
 	return cardBodyLines
 }
 
+type cardSection struct {
+	Title string
+	Cards []sessionview.SessionCard
+}
+
+func (s cardSection) Header(count int) string {
+	return fmt.Sprintf("%s (%d)", s.Title, count)
+}
+
+func cardSectionCounts(cards []sessionview.SessionCard) map[string]int {
+	counts := map[string]int{}
+	for _, section := range cardSections(cards) {
+		counts[section.Title] = len(section.Cards)
+	}
+	return counts
+}
+
+func cardSections(cards []sessionview.SessionCard) []cardSection {
+	if len(cards) == 0 {
+		return nil
+	}
+	sections := make([]cardSection, 0, 2)
+	active := cardSection{Title: "Active Sessions"}
+	idle := cardSection{Title: "Idle Sessions"}
+	parentSection := ""
+	for _, card := range cards {
+		sectionStatus := cardSectionStatus(card, parentSection)
+		if card.ParentSessionID == "" {
+			parentSection = sectionStatus
+		}
+		if sectionStatus == "idle" {
+			idle.Cards = append(idle.Cards, card)
+			continue
+		}
+		active.Cards = append(active.Cards, card)
+	}
+	if len(active.Cards) > 0 {
+		sections = append(sections, active)
+	}
+	if len(idle.Cards) > 0 {
+		sections = append(sections, idle)
+	}
+	return sections
+}
+
+func cardSectionStatus(card sessionview.SessionCard, parentSection string) string {
+	if card.ParentSessionID != "" && parentSection != "" {
+		return parentSection
+	}
+	if card.ChildStatus != "" {
+		return card.ChildStatus
+	}
+	return card.Status
+}
+
+func (m uiModel) renderedCardListHeight(cards []sessionview.SessionCard, selectedID string) int {
+	height := 0
+	for _, section := range cardSections(cards) {
+		if height > 0 {
+			height += cardGapRows
+		}
+		height++
+		for _, card := range section.Cards {
+			height += cardGapRows
+			height += m.cardHeight(card, selectedID)
+		}
+	}
+	return height
+}
+
 func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) {
 	cards := m.visibleCards()
 	if len(cards) == 0 {
@@ -130,22 +213,17 @@ func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) 
 	if height == 0 {
 		return 0, len(m.cards)
 	}
-	budget := height - 1
+	budget := height
 	if budget < 1 {
 		return offset, offset + 1
 	}
-	used := 0
 	end := offset
 	for end < len(cards) {
-		nextHeight := m.cardHeight(cards[end], selectedID)
-		if end > offset {
-			nextHeight += cardGapRows
-		}
-		if end > offset && used+nextHeight > budget {
+		nextEnd := end + 1
+		if end > offset && m.renderedCardListHeight(cards[offset:nextEnd], selectedID) > budget {
 			break
 		}
-		used += nextHeight
-		end++
+		end = nextEnd
 	}
 	if end == offset {
 		end = offset + 1
@@ -155,33 +233,29 @@ func (m uiModel) visibleCardRangeFrom(offset int, selectedID string) (int, int) 
 
 func (m uiModel) renderCards(width int, selectedID string) string {
 	cards := m.visibleCards()
-	title := "Sessions"
-	if len(cards) > 0 {
-		if idx := cardIndex(cards, selectedID); idx >= 0 {
-			title = fmt.Sprintf("Sessions %d/%d", idx+1, len(cards))
-		} else {
-			title = fmt.Sprintf("Sessions %d", len(cards))
-		}
-	}
-	lines := []string{headerStyle.Render(title)}
+	lines := []string{}
 	if len(cards) == 0 {
 		lines = append(lines, dimStyle.Render("(no live sessions)"))
 		return strings.Join(lines, "\n")
 	}
 	start, end := m.visibleCardRangeFrom(m.scrollOffset, selectedID)
+	visible := cards[start:end]
+	sectionCounts := cardSectionCounts(cards)
 	fillCards := m.focusMode == focusCards
-	for _, card := range cards[start:end] {
+	for _, section := range cardSections(visible) {
 		if len(lines) > 1 {
-			for i := 0; i < cardGapRows; i++ {
-				lines = append(lines, "")
+			lines = append(lines, "")
+		}
+		lines = append(lines, headerStyle.Render(section.Header(sectionCounts[section.Title])))
+		for _, card := range section.Cards {
+			lines = append(lines, "")
+			selected := card.SessionID == selectedID
+			rendered := renderCard(card, cardWidth(width, card), selected, fillCards, m.detail, m.expandedParents[card.SessionID])
+			if card.ParentSessionID != "" {
+				rendered = indentBlock(rendered, childIndentCols)
 			}
+			lines = append(lines, rendered)
 		}
-		selected := card.SessionID == selectedID
-		rendered := renderCard(card, cardWidth(width, card), selected, fillCards, m.detail, m.expandedParents[card.SessionID])
-		if card.ParentSessionID != "" {
-			rendered = indentBlock(rendered, childIndentCols)
-		}
-		lines = append(lines, rendered)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -222,47 +296,43 @@ func renderCard(card sessionview.SessionCard, width int, selected, filled bool, 
 	fillSelected := filled && selected
 	statusText := statusStyle(status).Render(status)
 	if fillSelected {
-		statusText = status
+		statusText = selectedStatusTextStyle(status).Render(status)
 	}
 	selectionMarker := ""
-	if fillSelected {
-		selectionMarker = "> "
-	}
 	agentWidth := max(contentWidth-lipgloss.Width(selectionMarker)-lipgloss.Width(statusText)-1, 1)
 	agent = truncate(agent, agentWidth)
 	top := selectionMarker + fmt.Sprintf("%-*s %s", agentWidth, agent, statusText)
 	if fillSelected {
-		return renderFilledSelectedCard(card, top, contentWidth, width)
+		return renderFilledSelectedCard(card, status, top, contentWidth, width)
 	}
 	title := compactCardLine(card.Title, cardAge(card), contentWidth)
 	if railSelected {
 		return renderRailSelectedCard(top, title, status)
 	}
-	pad := strings.Repeat(" ", cardLeftPadding)
-	return strings.Join([]string{pad + top, pad + title}, "\n")
+	return renderRailSelectedCard(top, title, status)
 }
 
-func renderFilledSelectedCard(card sessionview.SessionCard, top string, contentWidth, width int) string {
-	fill := selectedCardFillColor(card)
+func renderFilledSelectedCard(card sessionview.SessionCard, status, top string, contentWidth, width int) string {
+	fill := selectedSessionFillColor()
 	lines := []string{
-		selectedPlainCardLine(top, width, fill),
-		selectedTitleCardLine(card.Title, cardAge(card), contentWidth, width, fill),
+		selectedPlainCardLine(top, width, fill, status),
+		selectedTitleCardLine(card.Title, cardAge(card), contentWidth, width, fill, status),
 	}
 	return strings.Join(lines, "\n")
 }
 
-func selectedPlainCardLine(line string, width int, fill lipgloss.Color) string {
+func selectedPlainCardLine(line string, width int, fill lipgloss.Color, status string) string {
 	visible := strings.Repeat(" ", cardLeftPadding) + line
-	return selectedCardTextStyle(fill, false).Render(rightPad(visible, width))
+	return statusRail(status) + selectedCardTextStyle(fill, false).Render(rightPad(visible, width-1))
 }
 
-func selectedTitleCardLine(title, subtitle string, contentWidth, width int, fill lipgloss.Color) string {
+func selectedTitleCardLine(title, subtitle string, contentWidth, width int, fill lipgloss.Color, status string) string {
 	titlePart, rest := plainCardLineParts(title, subtitle, contentWidth)
 	pad := strings.Repeat(" ", cardLeftPadding)
 	visible := pad + titlePart + rest
-	rest += strings.Repeat(" ", max(width-len([]rune(visible)), 0))
-	return selectedCardTextStyle(fill, false).Render(pad) +
-		selectedCardTextStyle(fill, true).Render(titlePart) +
+	rest += strings.Repeat(" ", max(width-1-len([]rune(visible)), 0))
+	return statusRail(status) + selectedCardTextStyle(fill, false).Render(pad) +
+		selectedSessionNameStyle().Render(titlePart) +
 		selectedCardTextStyle(fill, false).Render(rest)
 }
 
@@ -274,14 +344,38 @@ func renderRailSelectedCard(top, title, status string) string {
 }
 
 func railSelectedCardLine(line, status string) string {
-	return statusStyle(status).Render("▌") + strings.Repeat(" ", cardLeftPadding) + line
+	return statusRail(status) + strings.Repeat(" ", cardLeftPadding) + line
+}
+
+func statusRail(status string) string {
+	return lipgloss.NewStyle().Foreground(cardStatusRailColor(status)).Render("▌")
 }
 
 func selectedCardTextStyle(fill lipgloss.Color, bold bool) lipgloss.Style {
 	return lipgloss.NewStyle().
 		Bold(bold).
-		Foreground(lipgloss.Color("0")).
+		Foreground(lipgloss.Color("252")).
 		Background(fill).
+		ColorWhitespace(true)
+}
+
+func selectedSessionFillColor() lipgloss.Color {
+	return lipgloss.Color("238")
+}
+
+func selectedStatusTextStyle(status string) lipgloss.Style {
+	return lipgloss.NewStyle().
+		Bold(true).
+		Foreground(cardStatusRailColor(status)).
+		Background(selectedSessionFillColor()).
+		ColorWhitespace(true)
+}
+
+func selectedSessionNameStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("14")).
+		Background(selectedSessionFillColor()).
 		ColorWhitespace(true)
 }
 

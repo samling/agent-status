@@ -26,7 +26,8 @@ type Session struct {
 	LastEventAt  string `json:"last_event_at"`
 	TurnID       string `json:"turn_id,omitempty"`
 	EngineStatus string `json:"engine_status"` // most recent self-reported engine status ("idle"|"busy") when the agent exposes one
-	StatusAt     string `json:"status_at"`     // when derived status last transitioned
+	WaitingFor   string `json:"waiting_for,omitempty"`
+	StatusAt     string `json:"status_at"` // when derived status last transitioned
 
 	// Parsed timestamps for renderers; omitted from JSON.
 	FirstSeenTime time.Time `json:"-"`
@@ -48,6 +49,7 @@ type Store struct {
 const (
 	AgentClaudeCode   = "claude-code"
 	AgentCodex        = "codex"
+	AgentOpencode     = "opencode"
 	AgentUnidentified = "unidentified"
 )
 
@@ -213,6 +215,7 @@ type HookEvent struct {
 	SessionID  string
 	Event      string
 	TurnID     string
+	ToolName   string
 	ReceivedAt string
 }
 
@@ -261,6 +264,11 @@ func (s *Store) RecordEvent(ctx context.Context, e HookEvent) (applied bool, err
 	}
 	sess.LastEvent = e.Event
 	sess.LastEventAt = e.ReceivedAt
+	if e.Event == EventPermissionRequest {
+		sess.WaitingFor = permissionWaitingLabel(e.ToolName)
+	} else if e.Event == EventUserPromptSubmit || e.Event == EventPreToolUse || e.Event == EventPostToolUse || e.Event == EventStop || e.Event == EventStopFailure {
+		sess.WaitingFor = ""
+	}
 	if e.TurnID != "" {
 		sess.TurnID = e.TurnID
 	}
@@ -287,6 +295,13 @@ func (s *Store) RecordEvent(ctx context.Context, e HookEvent) (applied bool, err
 			"status", newStatus)
 	}
 	return true, nil
+}
+
+func permissionWaitingLabel(toolName string) string {
+	if toolName == "" {
+		return "approve"
+	}
+	return "approve " + toolName
 }
 
 // InsertSession inserts sess under sess.SessionID on first sight.
@@ -412,7 +427,7 @@ func sortedSessions(m map[string]Session) []Session {
 // what the agent engine (codex, claude-code, etc.) itself reports for its current state.
 func DeriveStatus(sess Session) string {
 	// 1. User is blocked on a permission prompt, regardless of engine state.
-	if sess.LastEvent == EventPermissionRequest {
+	if sess.LastEvent == EventPermissionRequest || sess.WaitingFor != "" {
 		return "waiting"
 	}
 	// 2. Engine signal (when present) is authoritative for idle, overriding

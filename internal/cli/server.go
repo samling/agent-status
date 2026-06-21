@@ -112,8 +112,8 @@ func init() {
 	serverCmd.Flags().String("addr", "127.0.0.1", "listen address")
 	serverCmd.Flags().String("port", "7878", "listen port")
 
-	serverCmd.Flags().Bool("notify", false, "send a desktop notification when a session enters the waiting state")
-	serverCmd.Flags().Duration("notify-initial-delay", 5*time.Second, "delay between a session entering waiting and its first notification")
+	serverCmd.Flags().Bool("notify", true, "send a desktop notification when a session enters the waiting state")
+	serverCmd.Flags().Duration("notify-initial-delay", 0, "delay between a session entering waiting and its first notification")
 	serverCmd.Flags().Duration("notify-repeat", 5*time.Minute, "repeat notification interval for waiting sessions (0 to disable)")
 	serverCmd.Flags().String("notify-title", "agent-status", "Go template for the notification title")
 	serverCmd.Flags().String("notify-body", "{{.Session.Agent}} session waiting for input", "Go template for the notification body")

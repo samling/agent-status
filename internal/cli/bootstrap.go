@@ -14,23 +14,24 @@ import (
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap",
-	Short: "Install hook config for Claude Code and Codex",
+	Short: "Install hook config for Claude Code, Codex, and opencode",
 	Long: `Install the agent-status forwarder script into each agent's config
-directory and merge the matching hook entries into the agent's hook
-configuration file.
+directory and merge the matching hook entries or plugin path into the
+agent's configuration file.
 
 By default all known agents are configured. Pass --agents to restrict
-to a subset (comma-separated). Use --claude-dir or --codex-dir (or
-CLAUDE_CONFIG_DIR / CODEX_HOME) to override the agent config
-directories.
+to a subset (comma-separated). Use --claude-dir, --codex-dir, or
+--opencode-dir (or CLAUDE_CONFIG_DIR / CODEX_HOME / OPENCODE_CONFIG_DIR)
+to override the agent config directories.
 
 The command prints the planned changes and asks for confirmation before
 writing anything. Pass --yes to skip the prompt or --dry-run to see the
 plan and a diff of each file that would change.
 
 Available agents:
-  claude   Claude Code  (config dir: $CLAUDE_CONFIG_DIR or ~/.claude)
-  codex    Codex        (config dir: $CODEX_HOME or ~/.codex)`,
+  claude     Claude Code  (config dir: $CLAUDE_CONFIG_DIR or ~/.claude)
+  codex      Codex        (config dir: $CODEX_HOME or ~/.codex)
+  opencode   opencode     (config dir: $OPENCODE_CONFIG_DIR, $XDG_CONFIG_HOME/opencode, or ~/.config/opencode)`,
 	Example: `  # all agents, interactive
   agent-status bootstrap
 
@@ -47,6 +48,7 @@ func init() {
 	bootstrapCmd.Flags().StringSlice("agents", nil, "subset of agents to configure (default: all; see Available agents)")
 	bootstrapCmd.Flags().String("claude-dir", "", "Claude Code config dir (default: $CLAUDE_CONFIG_DIR or ~/.claude)")
 	bootstrapCmd.Flags().String("codex-dir", "", "Codex config dir (default: $CODEX_HOME or ~/.codex)")
+	bootstrapCmd.Flags().String("opencode-dir", "", "opencode config dir (default: $OPENCODE_CONFIG_DIR, $XDG_CONFIG_HOME/opencode, or ~/.config/opencode)")
 	bootstrapCmd.Flags().BoolP("yes", "y", false, "skip the confirmation prompt")
 	bootstrapCmd.Flags().Bool("dry-run", false, "print the planned changes and diffs without making them")
 }
@@ -55,13 +57,15 @@ func runBootstrap(cmd *cobra.Command, _ []string) error {
 	agents, _ := cmd.Flags().GetStringSlice("agents")
 	claudeDir, _ := cmd.Flags().GetString("claude-dir")
 	codexDir, _ := cmd.Flags().GetString("codex-dir")
+	opencodeDir, _ := cmd.Flags().GetString("opencode-dir")
 	autoYes, _ := cmd.Flags().GetBool("yes")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 	plan, err := bootstrappkg.BuildPlan(bootstrappkg.Options{
-		Agents:    agents,
-		ClaudeDir: claudeDir,
-		CodexDir:  codexDir,
+		Agents:      agents,
+		ClaudeDir:   claudeDir,
+		CodexDir:    codexDir,
+		OpencodeDir: opencodeDir,
 	})
 	if err != nil {
 		return err
